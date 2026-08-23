@@ -531,7 +531,28 @@ def _process_pdf_odl(pdf_path: Path, job_dir: Path, *, job_id: str, source_name:
         raise PipelineError(f"OpenDataLoader JSON 输出无法解析：{exc}") from exc
     raw_html = _read_text(native_html)
     page_count = _parse_page_count(source_copy, raw_json)
-    ir = odl_to_ir(raw_json, pdf_page_sizes(source_copy, page_count))
+    page_sizes = pdf_page_sizes(source_copy, page_count)
+    pdf_evidence = []
+    try:
+        # The packaged Python runtime intentionally omits PyMuPDF.  The
+        # isolated helper keeps that optional dependency out of the main
+        # conversion process and can fall back to the bundled PDFBox reader.
+        from layout_pipeline import _extract_pdf_evidence_isolated
+
+        if progress:
+            progress("读取 PDF 文字样式", 0.62)
+        pdf_evidence = _extract_pdf_evidence_isolated(source_copy, [], job_dir)
+    except Exception:
+        # Evidence is an enhancement only; a malformed or unavailable reader
+        # must never turn an otherwise usable ODL conversion into a failure.
+        pdf_evidence = []
+    if progress:
+        progress("整理结构与资源", 0.68)
+    ir = odl_to_ir(
+        raw_json,
+        page_sizes,
+        pdf_pages_override=pdf_evidence or None,
+    )
     pages = render_pages(ir)
     assets_dir = job_dir / "assets" / "images"
     image_names = _copy_images(native_dir, assets_dir)

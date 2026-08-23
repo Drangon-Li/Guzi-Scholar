@@ -10,6 +10,8 @@ contextBridge.exposeInMainWorld('myScholarDesktop', Object.freeze({
   platform: process.platform,
   versions: Object.freeze({ electron: process.versions.electron, chrome: process.versions.chrome }),
   copyImage: (dataURL) => ipcRenderer.invoke('my-scholar:copy-image', dataURL),
+  openSourcePdf: (jobId) => ipcRenderer.invoke('my-scholar:open-source-pdf', jobId),
+  showItemInFolder: (jobId) => ipcRenderer.invoke('my-scholar:show-item-in-folder', jobId),
   getLibraryLocation: () => ipcRenderer.invoke('my-scholar:get-library-location'),
   chooseLibraryLocation: () => ipcRenderer.invoke('my-scholar:choose-library-location'),
   chooseMineruComponent: () => ipcRenderer.invoke('my-scholar:choose-mineru-component'),

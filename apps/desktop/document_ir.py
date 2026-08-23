@@ -736,6 +736,21 @@ def _normalized_text_with_offsets(value: str) -> Tuple[str, List[int]]:
     return "".join(normalized), offsets
 
 
+def _compact_text_with_offsets(value: str) -> Tuple[str, List[int]]:
+    """Fold PDF text, including line-break hyphens, for evidence matching."""
+    layout_breaks = frozenset({"\u00ad", "-", "\u2010", "\u2011", "\u2012", "\u2013", "\u2014"})
+    compact: List[str] = []
+    offsets: List[int] = []
+    for index, char in enumerate(value):
+        folded = unicodedata.normalize("NFKC", char).casefold()
+        for output in folded:
+            if output.isspace() or output in layout_breaks:
+                continue
+            compact.append(output)
+            offsets.append(index)
+    return "".join(compact), offsets
+
+
 def _find_prepared_text_range(
     normalized: str, offsets: Sequence[int], target: str, start: int = 0
 ) -> Optional[Tuple[int, int]]:
@@ -746,6 +761,53 @@ def _find_prepared_text_range(
     if found < 0:
         return None
     return offsets[found], offsets[found + len(target) - 1] + 1
+
+
+def _find_emphasis_text_range(
+    compact: str,
+    offsets: Sequence[int],
+    target: str,
+    start: int = 0,
+) -> Optional[Tuple[int, int]]:
+    """Match a PDF run in reading order, failing closed on ambiguous short runs."""
+    if not compact or not target or not offsets:
+        return None
+    target = str(target)
+    if len(target) < 2:
+        return None
+    search_from = bisect_left(offsets, start)
+    occurrences: List[Tuple[int, int]] = []
+    cursor = compact.find(target, search_from)
+    while cursor >= 0:
+        end_cursor = cursor + len(target)
+        if end_cursor > len(offsets):
+            break
+        original_start = offsets[cursor]
+        original_end = offsets[end_cursor - 1] + 1
+        if len(target) <= 3:
+            previous = compact[cursor - 1] if cursor else ""
+            following = compact[end_cursor] if end_cursor < len(compact) else ""
+            if (previous and previous.isalnum()) or (following and following.isalnum()):
+                cursor = compact.find(target, cursor + 1)
+                continue
+        occurrences.append((original_start, original_end))
+        cursor = compact.find(target, cursor + 1)
+    if occurrences:
+        return occurrences[0]
+    # A long run can be recovered when the extractor and layout reader use
+    # different reading orders, but never do this for a two- or three-letter
+    # token: those are too likely to occur inside an unrelated word.
+    if len(target) < 8:
+        return None
+    cursor = compact.find(target)
+    if cursor < 0:
+        return None
+    if compact.find(target, cursor + 1) >= 0:
+        return None
+    end_cursor = cursor + len(target)
+    if end_cursor > len(offsets):
+        return None
+    return offsets[cursor], offsets[end_cursor - 1] + 1
 
 
 def _drawing_bbox(value: Any) -> List[float]:
@@ -878,11 +940,34 @@ def _extract_pdf_text_pages(
                 if not active_budget.checkpoint():
                     return []
                 spans: List[Dict[str, Any]] = []
-                page_dict = page.get_text("dict", flags=text_flags) if text_flags is not None else page.get_text("dict")
+                try:
+                    page_dict = (
+                        page.get_text("rawdict", flags=text_flags)
+                        if text_flags is not None
+                        else page.get_text("rawdict")
+                    )
+                except (AttributeError, TypeError, RuntimeError, ValueError):
+                    page_dict = (
+                        page.get_text("dict", flags=text_flags)
+                        if text_flags is not None
+                        else page.get_text("dict")
+                    )
                 for block in page_dict.get("blocks", []):
                     for line in block.get("lines", []):
                         for span in line.get("spans", []):
+                            raw_chars = span.get("chars") if isinstance(span, Mapping) else None
+                            char_records: List[Dict[str, Any]] = []
+                            if isinstance(raw_chars, list):
+                                for raw_char in raw_chars:
+                                    if not isinstance(raw_char, Mapping):
+                                        continue
+                                    char_text = str(raw_char.get("text") or raw_char.get("c") or "")
+                                    char_box = _bbox(raw_char.get("bbox"))
+                                    if char_text and char_box:
+                                        char_records.append({"text": char_text, "bbox": char_box})
                             text = str(span.get("text") or "")
+                            if not text and char_records:
+                                text = "".join(item["text"] for item in char_records)
                             font = str(span.get("font") or "")
                             span_count += 1
                             text_chars += len(text) + len(font)
@@ -905,7 +990,7 @@ def _extract_pdf_text_pages(
                             bold = bool(flags & 16) or bool(
                                 re.search(r"(?:bold|semi[- ]?bold|demi|black|heavy)", font, flags=re.IGNORECASE)
                             )
-                            spans.append({
+                            evidence_span = {
                                 "text": text,
                                 "bbox": box,
                                 "size": size,
@@ -913,7 +998,10 @@ def _extract_pdf_text_pages(
                                 "flags": flags,
                                 "color": int(span.get("color") or 0),
                                 "bold": bold,
-                            })
+                            }
+                            if char_records:
+                                evidence_span["chars"] = char_records
+                            spans.append(evidence_span)
                 drawings: List[Dict[str, Any]] = []
                 get_drawings = getattr(page, "get_drawings", None)
                 raw_drawings = (
@@ -1020,16 +1108,98 @@ def write_pdf_evidence(
 
 
 def _pdf_bbox(box: Sequence[float], ir_page: Mapping[str, Any], pdf_page: Mapping[str, Any]) -> List[float]:
-    if len(box) != 4:
+    normalized_box = _bbox(box)
+    if not normalized_box:
         return []
-    pdf_width = float(pdf_page.get("width") or 0.0)
-    pdf_height = float(pdf_page.get("height") or 0.0)
-    ir_width = float(ir_page.get("width") or 0.0)
-    ir_height = float(ir_page.get("height") or 0.0)
+    try:
+        pdf_width = float(pdf_page.get("width") or 0.0)
+        pdf_height = float(pdf_page.get("height") or 0.0)
+        ir_width = float(ir_page.get("width") or 0.0)
+        ir_height = float(ir_page.get("height") or 0.0)
+    except (TypeError, ValueError):
+        return []
+    if any(
+        not math.isfinite(value) or value <= 0.0
+        for value in (pdf_width, pdf_height, ir_width, ir_height)
+    ):
+        return []
     normalized_canvas = ir_width > pdf_width * 1.2 or ir_height > pdf_height * 1.2
     scale_x = pdf_width / 1000.0 if normalized_canvas and pdf_width else 1.0
     scale_y = pdf_height / 1000.0 if normalized_canvas and pdf_height else 1.0
-    return [float(box[0]) * scale_x, float(box[1]) * scale_y, float(box[2]) * scale_x, float(box[3]) * scale_y]
+    return [
+        normalized_box[0] * scale_x,
+        normalized_box[1] * scale_y,
+        normalized_box[2] * scale_x,
+        normalized_box[3] * scale_y,
+    ]
+
+
+def _pdf_span_char_records(span: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    raw_chars = span.get("chars")
+    if not isinstance(raw_chars, list):
+        return []
+    records: List[Dict[str, Any]] = []
+    for raw_char in raw_chars:
+        if not isinstance(raw_char, Mapping):
+            continue
+        text = str(raw_char.get("text") or raw_char.get("c") or "")
+        box = _bbox(raw_char.get("bbox"))
+        if not text or not box:
+            continue
+        record = dict(span)
+        record.pop("chars", None)
+        record["text"] = text
+        record["bbox"] = box
+        if raw_char.get("color") is not None:
+            record["color"] = raw_char.get("color")
+        if raw_char.get("bold") is not None:
+            record["bold"] = raw_char.get("bold")
+        record["_pdf_char"] = True
+        records.append(record)
+    return records
+
+
+def _pdf_entries_can_merge(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    if not left.get("_pdf_char") or not right.get("_pdf_char"):
+        return False
+    left_span = left.get("span") if isinstance(left.get("span"), Mapping) else {}
+    right_span = right.get("span") if isinstance(right.get("span"), Mapping) else {}
+    if (
+        left_span.get("color") != right_span.get("color")
+        or bool(left_span.get("bold")) != bool(right_span.get("bold"))
+        or str(left_span.get("font") or "") != str(right_span.get("font") or "")
+    ):
+        return False
+    left_box = _bbox(left_span.get("bbox"))
+    right_box = _bbox(right_span.get("bbox"))
+    if not left_box or not right_box:
+        return False
+    try:
+        left_size = float(left_span.get("size") or 0.0)
+        right_size = float(right_span.get("size") or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(left_size) or not math.isfinite(right_size) or left_size <= 0.0 or right_size <= 0.0:
+        return False
+    line_tolerance = max(2.0, min(left_size, right_size) * 0.35)
+    gap = right_box[0] - left_box[2]
+    return (
+        abs(_center_y(left_box) - _center_y(right_box)) <= line_tolerance
+        and gap >= -max(2.5, min(left_size, right_size) * 0.35)
+        and gap <= max(8.0, max(left_size, right_size) * 2.5)
+        and len(str(left_span.get("text") or "")) + len(str(right_span.get("text") or "")) <= 480
+    )
+
+
+def _merge_pdf_entries(left: Dict[str, Any], right: Mapping[str, Any]) -> None:
+    left_span = left["span"]
+    right_span = right["span"] if isinstance(right.get("span"), Mapping) else {}
+    left_span["text"] = f'{left_span.get("text") or ""}{right_span.get("text") or ""}'
+    left_span["bbox"] = _union([left_span.get("bbox") or [], right_span.get("bbox") or []])
+    normalized, _ = _normalized_text_with_offsets(str(left_span.get("text") or ""))
+    compact, _ = _compact_text_with_offsets(str(left_span.get("text") or ""))
+    left["normalized"] = normalized
+    left["compact"] = compact
 
 
 def _prepare_pdf_span_indexes(
@@ -1046,17 +1216,16 @@ def _prepare_pdf_span_indexes(
     span_count = 0
     text_chars = 0
     indexes: List[Dict[str, Any]] = []
+    sequence = 0
     for pdf_page in pdf_pages:
+        if not isinstance(pdf_page, Mapping):
+            budget.fail("invalid-page")
+            return None
         entries: List[Dict[str, Any]] = []
         raw_spans = pdf_page.get("spans", [])
         if not isinstance(raw_spans, list):
             raw_spans = []
         for ordinal, span in enumerate(raw_spans):
-            span_count += 1
-            budget.spans = span_count
-            if span_count > PDF_EMPHASIS_MAX_SPANS:
-                budget.fail("span-budget")
-                return None
             if not isinstance(span, Mapping):
                 if not budget.checkpoint(1):
                     return None
@@ -1070,20 +1239,42 @@ def _prepare_pdf_span_indexes(
                 return None
             if not budget.checkpoint(1):
                 return None
-            box = span.get("bbox") or []
-            if len(box) != 4:
-                continue
-            normalized, _ = _normalized_text_with_offsets(text)
-            if not budget.checkpoint():
-                return None
-            entries.append({
-                "center_y": _center_y(box),
-                "ordinal": ordinal,
-                "normalized": normalized,
-                "span": span,
-            })
-        entries.sort(key=lambda entry: (entry["center_y"], entry["ordinal"]))
-        indexes.append({"ys": [entry["center_y"] for entry in entries], "entries": entries})
+            char_records = _pdf_span_char_records(span)
+            records = char_records or [dict(span)]
+            for record in records:
+                box = _bbox(record.get("bbox"))
+                record_text = str(record.get("text") or "")
+                if not box or not record_text:
+                    continue
+                span_count += 1
+                budget.spans = span_count
+                if span_count > PDF_EMPHASIS_MAX_SPANS:
+                    budget.fail("span-budget")
+                    return None
+                normalized, _ = _normalized_text_with_offsets(record_text)
+                compact, _ = _compact_text_with_offsets(record_text)
+                if not budget.checkpoint():
+                    return None
+                safe_span = dict(record)
+                safe_span["bbox"] = box
+                sequence += 1
+                entries.append({
+                    "center_y": _center_y(box),
+                    "center_x": _center_x(box),
+                    "ordinal": sequence,
+                    "normalized": normalized,
+                    "compact": compact,
+                    "_pdf_char": bool(record.get("_pdf_char")),
+                    "span": safe_span,
+                })
+        entries.sort(key=lambda entry: (entry["center_y"], entry["center_x"], entry["ordinal"]))
+        merged_entries: List[Dict[str, Any]] = []
+        for entry in entries:
+            if merged_entries and _pdf_entries_can_merge(merged_entries[-1], entry):
+                _merge_pdf_entries(merged_entries[-1], entry)
+            else:
+                merged_entries.append(entry)
+        indexes.append({"ys": [entry["center_y"] for entry in merged_entries], "entries": merged_entries})
     return indexes
 
 
@@ -1918,12 +2109,16 @@ def _recover_caption_continuations(
 
 
 def _span_inside_box(span: Mapping[str, Any], box: Sequence[float]) -> bool:
-    span_box = span.get("bbox") or []
-    if len(span_box) != 4 or len(box) != 4:
+    span_box = _bbox(span.get("bbox"))
+    target_box = _bbox(box)
+    if not span_box or not target_box:
         return False
     center_x = _center_x(span_box)
     center_y = _center_y(span_box)
-    return box[0] - 2.0 <= center_x <= box[2] + 2.0 and box[1] - 2.0 <= center_y <= box[3] + 2.0
+    return (
+        target_box[0] - 2.0 <= center_x <= target_box[2] + 2.0
+        and target_box[1] - 2.0 <= center_y <= target_box[3] + 2.0
+    )
 
 
 def _render_text_piece_slots(render: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2090,9 +2285,10 @@ def _apply_pdf_emphasis(
                     if key in seen_candidates or not (span.get("bold") or tone) or not inside:
                         continue
                     seen_candidates.add(key)
-                    candidates.append((fragment_page, key[1], span, str(entry.get("normalized") or ""), tone))
+                    candidates.append((fragment_page, key[1], span, str(entry.get("compact") or ""), tone))
             candidates.sort(key=lambda item: (item[0], item[1]))
             normalized, offsets = _normalized_text_with_offsets(text)
+            compact, compact_offsets = _compact_text_with_offsets(text)
             if not budget.checkpoint():
                 return False
             ranges: List[Dict[str, Any]] = []
@@ -2100,11 +2296,7 @@ def _apply_pdf_emphasis(
             for _, _, span, target, tone in candidates:
                 if not budget.checkpoint(1):
                     return False
-                matched = _find_prepared_text_range(normalized, offsets, target, cursor)
-                if matched is None:
-                    if not budget.checkpoint(1):
-                        return False
-                    matched = _find_prepared_text_range(normalized, offsets, target)
+                matched = _find_emphasis_text_range(compact, compact_offsets, target, cursor)
                 if matched is None:
                     continue
                 start, end = matched
@@ -2349,11 +2541,41 @@ def mineru_to_ir(
     }
 
 
-def odl_to_ir(raw_json: Mapping[str, Any], page_sizes: Sequence[Tuple[float, float]]) -> Dict[str, Any]:
+def _merge_pdf_evidence_page_sizes(
+    sizes: Sequence[Tuple[float, float]],
+    pdf_pages: Sequence[Mapping[str, Any]],
+    page_count: int,
+) -> List[Tuple[float, float]]:
+    """Use bounded PDF evidence dimensions when the normal PDF reader is absent."""
+    merged = list(sizes[:page_count])
+    while len(merged) < page_count:
+        merged.append((612.0, 792.0))
+    for index, pdf_page in enumerate(pdf_pages[:page_count]):
+        if not isinstance(pdf_page, Mapping):
+            continue
+        try:
+            width = float(pdf_page.get("width") or 0.0)
+            height = float(pdf_page.get("height") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(width) and math.isfinite(height) and width > 0.0 and height > 0.0:
+            merged[index] = (width, height)
+    return merged
+
+
+def odl_to_ir(
+    raw_json: Mapping[str, Any],
+    page_sizes: Sequence[Tuple[float, float]],
+    *,
+    pdf_pages_override: Optional[Sequence[Mapping[str, Any]]] = None,
+) -> Dict[str, Any]:
     page_count = max(1, int(raw_json.get("number of pages") or len(page_sizes) or 1))
     sizes = list(page_sizes)
     while len(sizes) < page_count:
         sizes.append((612.0, 792.0))
+    pdf_pages = list(pdf_pages_override) if pdf_pages_override is not None else []
+    if pdf_pages:
+        sizes = _merge_pdf_evidence_page_sizes(sizes, pdf_pages, page_count)
     raw_pages: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     for item in raw_json.get("kids", []) if isinstance(raw_json.get("kids"), list) else []:
         if not isinstance(item, dict):
@@ -2405,6 +2627,11 @@ def odl_to_ir(raw_json: Mapping[str, Any], page_sizes: Sequence[Tuple[float, flo
         ordered = _order_first_page(elements, width) if page == 1 else _order_page(elements, width)
         ir_pages.append({"page": page, "width": width, "height": height, "coordinate_origin": "top-left", "elements": ordered})
     _merge_continuations(ir_pages)
+    if pdf_pages:
+        emphasis_budget = _new_emphasis_budget()
+        span_indexes = _prepare_pdf_span_indexes(ir_pages, pdf_pages, emphasis_budget)
+        if span_indexes is not None and not emphasis_budget.exceeded:
+            _apply_pdf_emphasis(ir_pages, pdf_pages, span_indexes, emphasis_budget)
     quality = _quality(ir_pages, suppressed, "opendataloader")
     return {"ir_version": IR_VERSION, "backend": "opendataloader", "pages": ir_pages, "suppressed": suppressed, "quality": quality}
 

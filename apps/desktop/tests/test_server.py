@@ -989,6 +989,57 @@ class TranslationCacheTest(unittest.TestCase):
             self.assertEqual(annotations[2]["source"], "manual")
 
 
+class ReaderPerformanceTest(unittest.TestCase):
+    @staticmethod
+    def _bytes_handler() -> ScholarHandler:
+        handler = object.__new__(ScholarHandler)
+        handler.headers_sent: list[tuple[str, str]] = []
+        handler.send_response = lambda *_args, **_kwargs: None
+        handler.send_header = lambda key, value: handler.headers_sent.append((key, value))
+        handler.end_headers = lambda *_args, **_kwargs: None
+        handler.wfile = io.BytesIO()
+        return handler
+
+    def test_handler_uses_persistent_http_connections(self) -> None:
+        self.assertEqual(ScholarHandler.protocol_version, "HTTP/1.1")
+
+    def test_immutable_render_generations_are_cacheable(self) -> None:
+        handler = self._bytes_handler()
+        handler._send_bytes(b"<html></html>", "text/html; charset=utf-8", immutable=True)
+        headers = dict(handler.headers_sent)
+        self.assertIn("immutable", headers.get("Cache-Control", ""))
+        plain = self._bytes_handler()
+        plain._send_bytes(b"{}", "application/json; charset=utf-8")
+        self.assertEqual(dict(plain.headers_sent).get("Cache-Control"), "no-store")
+
+    def test_content_manifest_is_not_rewritten_when_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-manifest-skip-") as temp:
+            job_dir = Path(temp)
+            (job_dir / "source.pdf").write_bytes(b"%PDF-1.4\n")
+            server_module._write_content_manifest(job_dir)
+            manifest_path = job_dir / "content" / "manifest.json"
+            first = manifest_path.read_bytes()
+            server_module._write_content_manifest(job_dir)
+            self.assertEqual(manifest_path.read_bytes(), first)
+            (job_dir / "source.pdf").unlink()
+            (job_dir / "upload.pdf").write_bytes(b"%PDF-1.4\n")
+            server_module._write_content_manifest(job_dir)
+            updated = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(updated["source_pdf"], "../upload.pdf")
+
+    def test_translation_records_persist_only_for_migrations(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-translation-skip-") as temp:
+            job_dir = Path(temp)
+            record = {"cache_key": "k", "block_id": "b", "text": "译文", "profile_id": "p"}
+            # A missing cache rewrites once to create the migration artifacts.
+            self.assertTrue(server_module._translation_records_need_persist(job_dir))
+            server_module._write_translation_records(job_dir, [record])
+            self.assertFalse(server_module._translation_records_need_persist(job_dir))
+            # Legacy list payloads still migrate to keyed entries.
+            (job_dir / "translations.json").write_text(json.dumps([record]), encoding="utf-8")
+            self.assertTrue(server_module._translation_records_need_persist(job_dir))
+
+
 class TranslateStreamTest(unittest.TestCase):
     @staticmethod
     def _stream_handler(job_dir: Path, payload: dict) -> ScholarHandler:

@@ -39,13 +39,14 @@ function readPngSize(file) {
 }
 
 function minimalPdf() {
-  const stream = 'BT /F1 12 Tf 20 100 Td (Guzi Scholar runtime smoke) Tj ET';
+  const stream = 'BT /F1 12 Tf 20 100 Td 1 0 0 rg (Guzi Scholar red) Tj 0 0 1 rg ( blue) Tj 0 0 0 rg ( runtime smoke) Tj /F2 12 Tf ( bold) Tj ET';
   const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R >>',
     `<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`,
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>',
   ];
   let body = '%PDF-1.4\n';
   const offsets = [0];
@@ -72,7 +73,7 @@ assert.strictEqual(manifest.build?.productName, '谷子学术');
 assert.strictEqual(manifest.build?.directories?.output, 'dist/mac.noindex');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleDisplayName, '谷子学术');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleName, '谷子学术');
-assert.strictEqual(manifest.version, '0.1.5');
+assert.strictEqual(manifest.version, '0.1.6');
 assert.strictEqual(manifest.build?.afterPack, 'scripts/after-pack.cjs');
 assert.match(manifest.scripts?.['pack:mac'] || '', /prepare:mac/u);
 assert.match(manifest.scripts?.['dist:mac'] || '', /prepare:mac/u);
@@ -162,8 +163,10 @@ assert.match(mainSource, /关闭并推出安装镜像/u);
 
 const serverSource = fs.readFileSync(path.join(root, 'server.py'), 'utf8');
 const pipelineSource = fs.readFileSync(path.join(root, 'pipeline.py'), 'utf8');
+const rendererSource = fs.readFileSync(path.join(root, 'scripts', 'MyScholarPdfRenderer.java'), 'utf8');
 assert.match(serverSource, /MY_SCHOLAR_PROJECT_ROOT/u);
 assert.match(pipelineSource, /MY_SCHOLAR_JAVA/u);
+assert.match(rendererSource, /"--evidence"/u);
 assert.match(fs.readFileSync(path.join(root, 'layout_pipeline.py'), 'utf8'), /MY_SCHOLAR_PDF_RENDERER_CLASSPATH/u);
 const updateManifest = JSON.parse(fs.readFileSync(path.join(root, '..', '..', 'release-manifests', 'macos-arm64.json'), 'utf8'));
 if (/-internal\.dmg$/u.test(updateManifest.download_url)) assert.strictEqual(updateManifest.channel, 'internal');
@@ -252,6 +255,25 @@ if (packagedApp) {
     ]);
     assert.doesNotMatch(`${rendererRun.stdout || ''}\n${rendererRun.stderr || ''}`, /InaccessibleObjectException/u);
     assert.deepStrictEqual(readPngSize(path.join(pageOutput, 'page-001.png')), { width: 200, height: 200 });
+    const evidenceOutput = path.join(temporary, 'evidence.json');
+    const evidenceRun = runChecked(java, [
+      ...javaBaseArgs,
+      '-cp', `${renderer}${path.delimiter}${odlJar}`,
+      'MyScholarPdfRenderer', '--evidence', sourcePdf, evidenceOutput,
+    ]);
+    assert.doesNotMatch(`${evidenceRun.stdout || ''}\n${evidenceRun.stderr || ''}`, /InaccessibleObjectException/u);
+    const evidence = JSON.parse(fs.readFileSync(evidenceOutput, 'utf8'));
+    const evidenceSpans = evidence.flatMap((page) => page.spans || []);
+    assert.ok(evidenceSpans.some((span) => span.color === 0xFF0000), 'PDFBox evidence must preserve red text');
+    assert.ok(evidenceSpans.some((span) => span.color === 0x0000FF), 'PDFBox evidence must preserve blue text');
+    assert.ok(
+      evidenceSpans.some((span) => span.color !== 0 && Array.isArray(span.chars) && span.chars.length > 0),
+      'PDFBox evidence must include character-level geometry for styled text',
+    );
+    assert.ok(
+      evidenceSpans.some((span) => span.bold === true && /bold/u.test(span.text || '')),
+      'PDFBox evidence must preserve bold text',
+    );
   } finally {
     fs.rmSync(temporary, { recursive: true, force: true });
   }

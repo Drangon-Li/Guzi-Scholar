@@ -68,6 +68,32 @@ ipcMain.handle('my-scholar:copy-image', (event, dataURL) => {
   return { ok: true };
 });
 
+function resolveJobSourcePdf(jobId) {
+  const safeId = String(jobId || '');
+  if (!/^[a-f0-9]{12,40}$/.test(safeId)) throw new Error('文献标识无效。');
+  const jobDir = path.join(storageConfiguration().currentPath, 'jobs', safeId);
+  for (const name of ['source.pdf', 'upload.pdf']) {
+    const candidate = path.join(jobDir, name);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error('找不到该文献的原始 PDF 文件。');
+}
+
+ipcMain.handle('my-scholar:open-source-pdf', async (event, jobId) => {
+  requireMainWindowSender(event);
+  if (libraryMigrationPromise) throw new Error('文献库正在迁移，请等待当前操作完成。');
+  const failure = await shell.openPath(resolveJobSourcePdf(jobId));
+  if (failure) throw new Error(`无法打开原始文件：${failure}`);
+  return { ok: true };
+});
+
+ipcMain.handle('my-scholar:show-item-in-folder', (event, jobId) => {
+  requireMainWindowSender(event);
+  if (libraryMigrationPromise) throw new Error('文献库正在迁移，请等待当前操作完成。');
+  shell.showItemInFolder(resolveJobSourcePdf(jobId));
+  return { ok: true };
+});
+
 ipcMain.handle('my-scholar:get-library-location', (event) => {
   requireMainWindowSender(event);
   return { ok: true, ...publicLibraryLocation(), migrating: Boolean(libraryMigrationPromise) };

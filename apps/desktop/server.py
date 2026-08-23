@@ -334,6 +334,15 @@ def _translation_records(job_dir: Path) -> List[Dict[str, Any]]:
     return [dict(item) for item in values if isinstance(item, dict) and item.get("cache_key")]
 
 
+def _translation_records_need_persist(job_dir: Path) -> bool:
+    """True when a read must rewrite the cache to finish a format migration."""
+    data = _read_json_file(job_dir / "translations.json", {})
+    if not (isinstance(data, dict) and isinstance(data.get("entries"), dict)):
+        # Legacy list payloads (or a missing cache) migrate to keyed entries.
+        return True
+    return not (job_dir / "content" / "chinese" / "blocks.json").is_file()
+
+
 def _read_account_state() -> Dict[str, Any]:
     with ACCOUNT_LOCK:
         data = _read_json_file(ACCOUNT_FILE, {})
@@ -664,6 +673,7 @@ def _write_content_manifest(job_dir: Path, *, updated_at: Optional[str] = None) 
     current = _read_json_file(manifest_path, {})
     if not isinstance(current, dict):
         current = {}
+    existing = dict(current)
     current.update({
         "version": 1,
         "source_pdf": "../source.pdf" if (job_dir / "source.pdf").is_file() else "../upload.pdf",
@@ -675,6 +685,9 @@ def _write_content_manifest(job_dir: Path, *, updated_at: Optional[str] = None) 
         "annotations": "annotations/annotations.json",
         "updated_at": updated_at or utc_now(),
     })
+    # Reads call this defensively; only touch the disk when something changed.
+    if existing and {**current, "updated_at": existing.get("updated_at")} == existing:
+        return
     temporary = _atomic_temp_path(manifest_path)
     temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(manifest_path)
@@ -3040,17 +3053,28 @@ READONLY_BLOCKED_ARTIFACTS = frozenset({
 
 class ScholarHandler(BaseHTTPRequestHandler):
     server_version = "GuziScholar/0.1"
+    # Every non-SSE response carries an explicit Content-Length, so persistent
+    # connections are safe and save a TCP handshake plus a worker thread per
+    # asset when the reader loads a document with images.
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
         # Keep the terminal useful while retaining the standard access-log shape.
-        print("[http] " + format % args, flush=True)
+        # Successful static-asset GETs flood the log during reading; skip them.
+        message = format % args
+        if message.startswith('"GET /api/jobs/') and ' 200 ' in message and ('/assets/' in message or '/renders/' in message or '/pages/' in message):
+            return
+        print("[http] " + message, flush=True)
 
-    def _send_bytes(self, body: bytes, content_type: str, status: int = HTTPStatus.OK, *, disposition: Optional[str] = None) -> bool:
+    def _send_bytes(self, body: bytes, content_type: str, status: int = HTTPStatus.OK, *, disposition: Optional[str] = None, immutable: bool = False) -> bool:
         try:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            # Render generations are content-addressed (sha256 asset names and
+            # a monotonically increasing generation), so they can be cached
+            # forever; everything else stays uncacheable to avoid stale data.
+            self.send_header("Cache-Control", "immutable, max-age=31536000" if immutable else "no-store")
             if disposition:
                 self.send_header("Content-Disposition", disposition)
             self.end_headers()
@@ -3094,7 +3118,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _serve_file(self, path: Path, *, download: bool = False) -> None:
+    def _serve_file(self, path: Path, *, download: bool = False, immutable: bool = False) -> None:
         if not path.is_file():
             self._send_error_json("资源不存在。", HTTPStatus.NOT_FOUND)
             return
@@ -3110,7 +3134,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         elif path.suffix.lower() == ".js":
             content_type = "text/javascript; charset=utf-8"
         disposition = f'attachment; filename="{path.name}"' if download else None
-        self._send_bytes(path.read_bytes(), content_type, disposition=disposition)
+        self._send_bytes(path.read_bytes(), content_type, disposition=disposition, immutable=immutable)
 
     def _serve_web_asset(self, relative: str) -> None:
         try:
@@ -3150,7 +3174,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._send_json({
                 "ok": True,
                 "service": "my-scholar",
-                "version": "0.1.5",
+                "version": "0.1.6",
                 "readonly": READONLY_MODE,
                 "shell": os.environ.get("MY_SCHOLAR_SHELL", "reference"),
                 "ai": ai,
@@ -3232,7 +3256,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             profile_id = translation_profile_id()
             with TRANSLATION_LOCK:
                 records = _translation_records(job_dir)
-                if not READONLY_MODE:
+                if not READONLY_MODE and _translation_records_need_persist(job_dir):
                     _write_translation_records(job_dir, records)
             if READONLY_MODE:
                 # The showcase has no translation credentials of its own; the
@@ -3315,7 +3339,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
         if path is None:
             self._send_error_json("资源不存在。", HTTPStatus.NOT_FOUND)
             return
-        self._serve_file(path, download=download)
+        # Render generations never change once published, so the reader can
+        # cache them aggressively; live job artifacts stay uncacheable.
+        self._serve_file(path, download=download, immutable=bool(render_match))
 
     def _migration_control_authorized(self) -> bool:
         provided = str(self.headers.get("X-My-Scholar-Migration-Token") or "")
@@ -4355,6 +4381,10 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
+            # SSE has no Content-Length; under HTTP/1.1 keep-alive the end of
+            # the stream must be signalled by closing the connection.
+            self.send_header("Connection", "close")
+            self.close_connection = True
             self.end_headers()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return
@@ -4480,6 +4510,10 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
+            # SSE has no Content-Length; under HTTP/1.1 keep-alive the end of
+            # the stream must be signalled by closing the connection.
+            self.send_header("Connection", "close")
+            self.close_connection = True
             self.end_headers()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return
