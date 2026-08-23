@@ -73,7 +73,7 @@ assert.strictEqual(manifest.build?.productName, '谷子学术');
 assert.strictEqual(manifest.build?.directories?.output, 'dist/mac.noindex');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleDisplayName, '谷子学术');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleName, '谷子学术');
-assert.strictEqual(manifest.version, '0.1.5');
+assert.strictEqual(manifest.version, '0.1.6');
 assert.strictEqual(manifest.build?.afterPack, 'scripts/after-pack.cjs');
 assert.match(manifest.scripts?.['pack:mac'] || '', /prepare:mac/u);
 assert.match(manifest.scripts?.['dist:mac'] || '', /prepare:mac/u);
