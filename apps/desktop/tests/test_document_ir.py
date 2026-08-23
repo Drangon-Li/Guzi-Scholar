@@ -278,6 +278,182 @@ class DocumentIRTest(unittest.TestCase):
         self.assertEqual(extracted, [])
         self.assertEqual(budget.reason, "drawing-budget")
 
+    def test_pdf_rawdict_nested_chars_are_preserved_and_reconstructed(self) -> None:
+        class FakePage:
+            rect = types.SimpleNamespace(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+
+            def get_text(self, kind: str) -> dict:
+                if kind != "rawdict":
+                    raise AssertionError(f"unexpected text mode: {kind}")
+                return {"blocks": [{"lines": [{"spans": [{
+                    "bbox": [40, 40, 80, 52],
+                    "size": 12.0,
+                    "font": "Helvetica-Bold",
+                    "flags": 16,
+                    "color": 0xFF0000,
+                    "chars": [
+                        {"c": "U", "bbox": [40, 40, 53, 52]},
+                        {"c": "A", "bbox": [52.5, 40, 66, 52]},
+                        {"c": "V", "bbox": [65.5, 40, 80, 52]},
+                    ],
+                }]}]}]}
+
+        class FakeDocument(list):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+        fake_fitz = types.SimpleNamespace(open=lambda _path: FakeDocument([FakePage()]))
+        with patch.dict(sys.modules, {"fitz": fake_fitz}):
+            extracted = document_ir._extract_pdf_text_pages(Path("fixture.pdf"))
+
+        span = extracted[0]["spans"][0]
+        self.assertEqual(span["text"], "UAV")
+        self.assertTrue(span["bold"])
+        self.assertEqual([item["text"] for item in span["chars"]], ["U", "A", "V"])
+
+        indexes = document_ir._prepare_pdf_span_indexes(
+            [{"page": 1, "width": PAGE_WIDTH, "height": PAGE_HEIGHT, "elements": []}],
+            extracted,
+            document_ir._new_emphasis_budget(),
+        )
+        self.assertIsNotNone(indexes)
+        self.assertEqual(indexes[0]["entries"][0]["span"]["text"], "UAV")
+
+    def test_pdf_short_fragment_does_not_match_inside_unrelated_word(self) -> None:
+        text = "The usually available model uses UAV telemetry."
+        pages = [[{
+            "type": "paragraph",
+            "bbox": [40, 40, 500, 80],
+            "content": {"paragraph_content": [{"type": "text", "content": text}]},
+        }]]
+        pdf_pages = [{
+            "width": PAGE_WIDTH,
+            "height": PAGE_HEIGHT,
+            "spans": [{
+                "text": "UA",
+                "bbox": [80, 50, 95, 62],
+                "size": 10.0,
+                "font": "Regular",
+                "color": 0xFF0000,
+                "bold": False,
+                "chars": [
+                    {"text": "U", "bbox": [80, 50, 87, 62]},
+                    {"text": "A", "bbox": [87, 50, 95, 62]},
+                ],
+            }],
+        }]
+
+        ir = mineru_to_ir(pages, backend="fixture", pdf_pages_override=pdf_pages)
+
+        self.assertNotIn("emphasis", ir["pages"][0]["elements"][0])
+
+    def test_pdf_matching_ignores_missing_spaces_but_keeps_word_boundaries(self) -> None:
+        text = "A red colored phrase and usually remains ordinary."
+        pages = [[{
+            "type": "paragraph",
+            "bbox": [40, 40, 500, 80],
+            "content": {"paragraph_content": [{"type": "text", "content": text}]},
+        }]]
+        pdf_pages = [{
+            "width": PAGE_WIDTH,
+            "height": PAGE_HEIGHT,
+            "spans": [
+                {
+                    "text": "redcolored",
+                    "bbox": [80, 50, 150, 62],
+                    "size": 10.0,
+                    "font": "Regular",
+                    "color": 0xFF0000,
+                    "bold": False,
+                },
+                {
+                    "text": "ua",
+                    "bbox": [180, 50, 195, 62],
+                    "size": 10.0,
+                    "font": "Regular",
+                    "color": 0x0000FF,
+                    "bold": False,
+                },
+            ],
+        }]
+
+        ir = mineru_to_ir(pages, backend="fixture", pdf_pages_override=pdf_pages)
+        emphasis = ir["pages"][0]["elements"][0].get("emphasis", [])
+
+        self.assertEqual([(item["tone"], item["text"]) for item in emphasis], [("red", "red colored")])
+
+    def test_pdf_line_break_hyphenation_rejoins_adjacent_colored_runs(self) -> None:
+        text = "The UAV Networks architecture is robust."
+        pages = [[{
+            "type": "paragraph",
+            "bbox": [40, 40, 500, 100],
+            "content": {"paragraph_content": [{"type": "text", "content": text}]},
+        }]]
+        pdf_pages = [{
+            "width": PAGE_WIDTH,
+            "height": PAGE_HEIGHT,
+            "spans": [
+                {
+                    "text": "UAV Net-",
+                    "bbox": [80, 50, 145, 62],
+                    "size": 10.0,
+                    "font": "Regular",
+                    "color": 0x0000FF,
+                    "bold": False,
+                },
+                {
+                    "text": "works",
+                    "bbox": [80, 64, 112, 76],
+                    "size": 10.0,
+                    "font": "Regular",
+                    "color": 0x0000FF,
+                    "bold": False,
+                },
+            ],
+        }]
+
+        ir = mineru_to_ir(pages, backend="fixture", pdf_pages_override=pdf_pages)
+        emphasis = ir["pages"][0]["elements"][0].get("emphasis", [])
+
+        self.assertEqual([(item["tone"], item["text"]) for item in emphasis], [("blue", "UAV Networks")])
+
+    def test_pdf_bold_spans_apply_bold_emphasis(self) -> None:
+        text = "The Bold Claim holds for every case."
+        pages = [[{
+            "type": "paragraph",
+            "bbox": [40, 40, 500, 80],
+            "content": {"paragraph_content": [{"type": "text", "content": text}]},
+        }]]
+        pdf_pages = [{
+            "width": PAGE_WIDTH,
+            "height": PAGE_HEIGHT,
+            "spans": [{
+                "text": "Bold Claim",
+                "bbox": [80, 50, 160, 62],
+                "size": 10.0,
+                "font": "Helvetica-Bold",
+                "flags": 16,
+                "color": 0,
+                "bold": True,
+            }],
+        }]
+
+        ir = mineru_to_ir(pages, backend="fixture", pdf_pages_override=pdf_pages)
+        emphasis = ir["pages"][0]["elements"][0].get("emphasis", [])
+
+        self.assertEqual(
+            [(item["style"], item["text"]) for item in emphasis],
+            [("bold", "Bold Claim")],
+        )
+        rendered = render_pages(ir)[0][0]
+        self.assertEqual(
+            rendered["content"]["paragraph_content"][0]["emphasis"],
+            [{"start": 4, "end": 14, "style": "bold", "source": "pdf-font"}],
+        )
+
     def test_emphasis_matching_normalizes_body_once_with_linear_operation_count(self) -> None:
         def run(span_count: int) -> tuple[int, int]:
             body = "target " + " ordinary" * 80
@@ -529,6 +705,68 @@ class DocumentIRTest(unittest.TestCase):
         merged = next(item for item in elements if item["text"].startswith("The second left paragraph"))
         self.assertIn("and resumes at the top", merged["text"])
         self.assertIn("cross-column", merged["flags"])
+
+    def test_odl_pdf_evidence_preserves_page_size_and_applies_text_tone(self) -> None:
+        text = "RED COLORED TEXT"
+        raw = {
+            "number of pages": 1,
+            "kids": [{
+                "id": 1,
+                "type": "paragraph",
+                "page number": 1,
+                # ODL stores y coordinates from the bottom edge.
+                "bounding box": [30, 120, 220, 140],
+                "content": text,
+            }],
+        }
+        evidence = [{
+            "width": 400.0,
+            "height": 200.0,
+            "spans": [{
+                "text": text,
+                "bbox": [30.0, 60.0, 213.0, 80.0],
+                "size": 18.0,
+                "font": "Helvetica",
+                "color": 0xFF0000,
+                "bold": False,
+            }],
+        }]
+
+        ir = odl_to_ir(raw, [(612.0, 792.0)], pdf_pages_override=evidence)
+
+        self.assertEqual((ir["pages"][0]["width"], ir["pages"][0]["height"]), (400.0, 200.0))
+        element = ir["pages"][0]["elements"][0]
+        self.assertEqual(
+            [(item["style"], item["tone"], item["text"]) for item in element["emphasis"]],
+            [("color", "red", text)],
+        )
+        rendered = render_pages(ir)[0][0]
+        self.assertEqual(
+            rendered["content"]["paragraph_content"][0]["emphasis"],
+            [{"start": 0, "end": len(text), "style": "color", "source": "pdf-text-color", "tone": "red"}],
+        )
+
+    def test_odl_pdf_evidence_ignores_malformed_span_geometry(self) -> None:
+        raw = {
+            "number of pages": 1,
+            "kids": [{
+                "id": 1,
+                "type": "paragraph",
+                "page number": 1,
+                "bounding box": [30, 500, 300, 600],
+                "content": "A paragraph remains readable when evidence is malformed.",
+            }],
+        }
+        evidence = [{
+            "width": 400.0,
+            "height": 200.0,
+            "spans": [{"text": "A paragraph", "bbox": ["invalid", 1, 2, 3], "color": 0xFF0000}],
+        }]
+
+        ir = odl_to_ir(raw, [(612.0, 792.0)], pdf_pages_override=evidence)
+
+        self.assertEqual(len(ir["pages"][0]["elements"]), 1)
+        self.assertNotIn("emphasis", ir["pages"][0]["elements"][0])
 
     def test_conference_footer_is_not_translatable_body(self) -> None:
         raw = {"number of pages": 1, "kids": [

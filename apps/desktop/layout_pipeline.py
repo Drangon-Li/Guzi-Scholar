@@ -345,6 +345,71 @@ def _pdf_evidence_worker_command(source_pdf: Path, output_json: Path, drawing_pa
     return [sys.executable, str(PROJECT_ROOT / "server.py"), *worker_args]
 
 
+def _pdf_evidence_java_command(source_pdf: Path, output_json: Path) -> Optional[List[str]]:
+    java = str(os.environ.get("MY_SCHOLAR_JAVA") or "").strip()
+    if not java:
+        java = _which(["java", "/usr/bin/java"]) or ""
+    if not java:
+        return None
+    classpath = str(os.environ.get("MY_SCHOLAR_PDF_RENDERER_CLASSPATH") or "").strip()
+    if not classpath:
+        renderer = PROJECT_ROOT / "build" / "mac-runtime" / "pdf-renderer"
+        jar = PROJECT_ROOT / "build" / "mac-runtime" / "opendataloader-pdf-cli-0.0.0.jar"
+        if renderer.is_dir() and jar.is_file():
+            classpath = os.pathsep.join((str(renderer), str(jar)))
+    if not classpath:
+        return None
+    return [
+        str(Path(java).expanduser().resolve()),
+        "--add-opens=java.base/java.nio=ALL-UNNAMED",
+        "-Djava.awt.headless=true",
+        "-cp",
+        classpath,
+        "MyScholarPdfRenderer",
+        "--evidence",
+        str(source_pdf),
+        str(output_json),
+    ]
+
+
+def _read_pdf_evidence_output(path: Path) -> List[Dict[str, Any]]:
+    try:
+        with path.open("rb") as handle:
+            payload = handle.read(PDF_EVIDENCE_MAX_OUTPUT_BYTES + 1)
+        if len(payload) > PDF_EVIDENCE_MAX_OUTPUT_BYTES:
+            return []
+        value = json.loads(payload.decode("utf-8"))
+        if not isinstance(value, list) or len(value) > LAYOUT_SIDECAR_MAX_PAGES:
+            return []
+        if not all(isinstance(page, Mapping) for page in value):
+            return []
+        return [dict(page) for page in value]
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError):
+        return []
+
+
+def _extract_pdf_evidence_java(source_pdf: Path, workspace: Path) -> List[Dict[str, Any]]:
+    try:
+        with tempfile.TemporaryDirectory(prefix="pdf-evidence-java-", dir=str(workspace)) as temp:
+            output_json = Path(temp) / "evidence.json"
+            command = _pdf_evidence_java_command(source_pdf, output_json)
+            if command is None:
+                return []
+            result = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=PDF_EVIDENCE_WORKER_TIMEOUT_SECONDS,
+            )
+            if result.returncode != 0:
+                return []
+            return _read_pdf_evidence_output(output_json)
+    except (OSError, RuntimeError, subprocess.SubprocessError, ValueError):
+        return []
+
+
 def _extract_pdf_evidence_isolated(
     source_pdf: Path,
     raw_pages: Sequence[Sequence[Mapping[str, Any]]],
@@ -362,18 +427,12 @@ def _extract_pdf_evidence_isolated(
                 check=False,
                 timeout=PDF_EVIDENCE_WORKER_TIMEOUT_SECONDS,
             )
-            if result.returncode != 0 or not output_json.is_file():
-                return []
-            with output_json.open("rb") as handle:
-                payload = handle.read(PDF_EVIDENCE_MAX_OUTPUT_BYTES + 1)
-            if len(payload) > PDF_EVIDENCE_MAX_OUTPUT_BYTES:
-                return []
-            value = json.loads(payload.decode("utf-8"))
-            if not isinstance(value, list) or len(value) > LAYOUT_SIDECAR_MAX_PAGES:
-                return []
-            return value if all(isinstance(page, Mapping) for page in value) else []
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
-        return []
+            value = _read_pdf_evidence_output(output_json) if result.returncode == 0 else []
+            if value:
+                return value
+    except (OSError, RuntimeError, subprocess.SubprocessError, json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        pass
+    return _extract_pdf_evidence_java(source_pdf, workspace)
 
 
 def _safe_inline(value: Any) -> str:
@@ -855,6 +914,11 @@ class MathRenderer:
             )
             self.modes[key] = "fallback"
         else:
+            cls = "math-display" if display else "math-inline"
+            rendered = (
+                f'<span class="{cls} math-rendered" data-tex="{html.escape(source_tex, quote=True)}">'
+                f"{rendered}</span>"
+            )
             self.modes[key] = "mathml"
         if display:
             result = f'<div class="equation-line">{rendered}'
@@ -2750,7 +2814,9 @@ def process_layout_pdf(
         raw_pages,
         backend=backend_name,
         pdf_path=source_copy,
-        pdf_pages_override=pdf_evidence,
+        # Keep the direct PyMuPDF path available in development when the
+        # isolated worker or bundled PDFBox fallback is unavailable.
+        pdf_pages_override=pdf_evidence or None,
     )
     pages = render_pages(ir)
     assets = job_dir / "assets" / "images"

@@ -158,6 +158,7 @@
   const state = {
     jobs: [], activeJob: null, selection: null, chatSelection: null, annotations: [], aiHighlights: [], chat: [], chatSessions: new Map(),
     openDocuments: [], translationCache: [], translationCaches: new Map(), translationRun: null, translationRuns: new Map(),
+    hiddenTranslationJobs: new Set(),
     mediaLayouts: new Map(),
     health: null, library: null, activeFolderId: 'system-all', activeViewId: 'view-all', librarySort: 'updated_at-desc', libraryMode: 'list', primaryView: 'library-view',
     selectedLibraryJobId: null, selectedLibraryJobIds: new Set(), activeGroupValue: null, groupingMenuOpen: false,
@@ -893,7 +894,9 @@
     container.querySelectorAll('.document-tab').forEach((tab) => tab.addEventListener('click', (event) => {
       if (event.target.closest('[data-close-job-id]')) return;
       const job = state.openDocuments.find((item) => item.job_id === tab.dataset.jobId) || state.jobs.find((item) => item.job_id === tab.dataset.jobId);
-      if (job) openReader(job, { addTab: false });
+      // Clicking the already-mounted tab must not tear down and rebuild the
+      // whole reader; only genuinely different documents remount the iframe.
+      if (job && !(readerIsActive && state.activeJob?.job_id === job.job_id)) openReader(job, { addTab: false });
     }));
     container.querySelectorAll('.document-tab').forEach((tab) => tab.addEventListener('keydown', (event) => {
       const tabs = [...container.querySelectorAll('.document-tab:not(.is-closing)')];
@@ -1907,7 +1910,7 @@
       const permanentAllowed = actionIds.every((id) => Boolean(libraryEntryById(id)?.item?.deleted_at));
       const menu = entry.item?.deleted_at
         ? `<button data-row-action="metadata" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>编辑元数据</span>${shortcut('⌘I')}</button><div class="row-menu-separator" role="separator"></div><button data-row-action="restore" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">恢复文献${bulkLabel}</span>${shortcut('⌘⌫')}</button><button class="is-danger" data-row-action="permanent" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${permanentAllowed ? '' : ' disabled'} title="只能彻底清除全部位于回收站的选中文献"><span class="row-action-label">彻底清除${bulkLabel}</span></button>`
-        : `<button data-row-action="open" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${job.status === 'completed' ? '' : ' disabled'}><span>打开文献</span>${shortcut('↩')}</button><button data-row-action="metadata" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>编辑元数据</span>${shortcut('⌘I')}</button><button data-row-action="folders" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">添加到文件夹${bulkLabel}…</span>${shortcut('⌘⇧F')}</button><div class="row-menu-separator" role="separator"></div><button class="is-danger" data-row-action="trash" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">移入回收站${bulkLabel}</span>${shortcut('⌘⌫')}</button>`;
+        : `<button data-row-action="open" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${job.status === 'completed' ? '' : ' disabled'}><span>打开文献</span>${shortcut('↩')}</button>${isDesktopApp ? `<button data-row-action="reveal" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>跳转原始文件</span></button>` : ''}<button data-row-action="metadata" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>编辑元数据</span>${shortcut('⌘I')}</button><button data-row-action="folders" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">添加到文件夹${bulkLabel}…</span>${shortcut('⌘⇧F')}</button><div class="row-menu-separator" role="separator"></div><button class="is-danger" data-row-action="trash" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">移入回收站${bulkLabel}</span>${shortcut('⌘⌫')}</button>`;
       const selected = selectedLibraryJobIds().includes(entry.jobId);
       return `<article class="library-card library-row${entry.item?.deleted_at ? ' is-trashed' : ''}${selected ? ' is-selected' : ''}" style="--library-grid-template:${libraryGridTemplate(columns)}" data-job-id="${escapeHTML(entry.jobId)}" data-status="${escapeHTML(job.status || '')}" tabindex="0" aria-selected="${selected ? 'true' : 'false'}" aria-grabbed="false" aria-label="文献：${escapeHTML(title)}">${columns.map(cell).join('')}<div class="library-row-actions"><button class="row-more-button" data-row-menu-job-id="${escapeHTML(entry.jobId)}" type="button" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false">⋯</button><div class="row-more-menu" data-row-more-menu data-menu-owner="${escapeHTML(entry.jobId)}" role="menu" aria-label="文献操作">${menu}</div></div></article>`;
     }).join('');
@@ -2237,6 +2240,14 @@
     if (action === 'open') {
       if (entry.item?.deleted_at) await restoreLibraryItem(jobId);
       else if (entry.job?.status === 'completed') openReader(entry.job);
+    } else if (action === 'reveal') {
+      if (!window.myScholarDesktop?.showItemInFolder) return;
+      try {
+        const result = await window.myScholarDesktop.showItemInFolder(jobId);
+        if (result && result.ok === false) throw new Error(result.error || '无法打开原始文件。');
+      } catch (error) {
+        showToast(error.message || '无法打开原始文件。', true);
+      }
     } else if (action === 'folders') await editLibraryFolders(jobId);
     else if (action === 'metadata') openMetadataDialog(jobId);
     else if (action === 'trash') await trashLibraryItem(jobId);
@@ -4898,6 +4909,9 @@
         [...node.childNodes].forEach((child) => { const childCopy = clone(child); if (childCopy) copy.append(childCopy); });
         return copy;
       }
+      // KaTeX output carries a visual HTML twin next to the accessibility
+      // MathML; previews keep only the MathML half to avoid duplicated glyphs.
+      if (node.classList?.contains('katex-html')) return null;
       const name = String(node.localName || node.tagName || '').toLowerCase();
       const isMath = mathAllowed.has(name);
       if (!isMath && !htmlAllowed.has(name)) return null;
@@ -5414,6 +5428,7 @@
   function renderCachedTranslations() {
     const doc = frameDocument();
     if (!doc || !state.translationCache.length) return;
+    let inserted = 0;
     for (const record of translationsForActiveProfile(state.translationCache)) {
       const blockId = record?.block_id;
       const translated = String(record?.text || '').trim();
@@ -5433,14 +5448,23 @@
       const stored = record.formulas?.length ? record.formulas : source.formulas;
       const formulas = stored.map((formula) => (formula.markup ? formula : { ...formula, markup: source.formulas.find((item) => item.token === formula.token)?.markup }));
       const repaired = repairFormulaTokens(translated, formulas);
-      insertTranslation(blockId, restoreSpecialTokens(restoreInlineMarkers(restoreInlineMath(repaired, formulas), source.markers), tokenPayload.tokens), {
+      const node = insertTranslation(blockId, restoreSpecialTokens(restoreInlineMarkers(restoreInlineMath(repaired, formulas), source.markers), tokenPayload.tokens), {
         cached: true,
         sourceHash: record.source_hash || '',
         role,
         formulas,
         markers: source.markers,
         emphasis: source.emphasis,
+        batch: true,
       });
+      if (node) inserted += 1;
+    }
+    // One rebuild after the whole replay instead of one per inserted node.
+    if (inserted) {
+      if (state.annotations.length) renderFrameAnnotations();
+      rebuildReaderSentencePairs(doc);
+      refreshReaderSearch();
+      applyTranslationVisibility(doc);
     }
   }
 
@@ -5529,6 +5553,91 @@
       if (block.matches('p:not(.paper-metadata)')) block.classList.add('paper-abstract-body');
       if (block.matches('.my-scholar-translation')) block.classList.add('paper-abstract-translation');
     }
+  }
+
+  function hydrateFrameMath(doc) {
+    if (!doc?.querySelector('[data-tex]')) return;
+    const renderAll = () => {
+      const katex = doc.defaultView?.katex;
+      if (!katex) return;
+      doc.querySelectorAll('[data-tex]').forEach((node) => {
+        const tex = node.getAttribute('data-tex') || '';
+        if (!tex.trim()) return;
+        const original = node.innerHTML;
+        try {
+          katex.render(tex, node, {
+            throwOnError: true,
+            strict: false,
+            displayMode: node.classList.contains('math-display'),
+          });
+        } catch (_) {
+          // Keep the build-time MathML (or visible TeX fallback) untouched.
+          node.innerHTML = original;
+        }
+      });
+    };
+    if (doc.defaultView?.katex) {
+      renderAll();
+      return;
+    }
+    if (!doc.querySelector('#my-scholar-katex-style')) {
+      const link = doc.createElement('link');
+      link.id = 'my-scholar-katex-style';
+      link.rel = 'stylesheet';
+      link.href = '/web/vendor/katex/katex.min.css';
+      doc.head.append(link);
+    }
+    let script = doc.querySelector('#my-scholar-katex-script');
+    if (!script) {
+      script = doc.createElement('script');
+      script.id = 'my-scholar-katex-script';
+      script.src = '/web/vendor/katex/katex.min.js';
+      script.addEventListener('load', () => {
+        script.dataset.loaded = '1';
+        renderAll();
+      });
+      doc.head.append(script);
+      return;
+    }
+    if (script.dataset.loaded) renderAll();
+    else script.addEventListener('load', renderAll, { once: true });
+  }
+
+  const translationVisibilityStyleId = 'my-scholar-translation-visibility';
+
+  function translationsHidden(jobId = state.activeJob?.job_id) {
+    return Boolean(jobId) && state.hiddenTranslationJobs.has(jobId);
+  }
+
+  function applyTranslationVisibility(doc = frameDocument()) {
+    if (!doc?.head) return;
+    const existing = doc.querySelector(`#${translationVisibilityStyleId}`);
+    if (translationsHidden()) {
+      if (existing) return;
+      const style = doc.createElement('style');
+      style.id = translationVisibilityStyleId;
+      // Hidden translations stay in the DOM so sentence pairing, search and
+      // selection keep working; they simply stop taking up visual space.
+      style.textContent = '.my-scholar-translation{display:none!important}';
+      doc.head.append(style);
+    } else {
+      existing?.remove();
+    }
+  }
+
+  function syncTranslationVisibilityButton() {
+    const button = $('#toggle-translations-button');
+    if (!button) return;
+    const hidden = translationsHidden();
+    button.classList.toggle('active', hidden);
+    button.setAttribute('aria-pressed', hidden ? 'true' : 'false');
+    const label = $('#toggle-translations-label');
+    if (label) label.textContent = hidden ? '显示翻译' : '隐藏翻译';
+  }
+
+  function scheduleReaderIdle(fn) {
+    if (window.requestIdleCallback) window.requestIdleCallback(fn, { timeout: 1500 });
+    else window.setTimeout(fn, 60);
   }
 
   function wireFrame(mount = readerMount) {
@@ -6066,17 +6175,25 @@
     });
     prepareReaderMedia(doc, state.activeJob?.job_id);
     prepareReaderImages(doc);
+    hydrateFrameMath(doc);
+    applyTranslationVisibility(doc);
+    syncTranslationVisibilityButton();
     installParagraphTranslationControls();
     renderCachedTranslations();
     buildReaderIndexes();
-    installCitationHoverPreviews(doc);
     renderFrameAnnotations();
     installReaderSentenceHover(doc);
-    rebuildReaderSentencePairs(doc);
     refreshReaderSearch();
     applyAppearance();
     applyHighlightColor();
-    ensureTitleTranslation();
+    // Non-critical wiring runs when the main thread is idle so the document
+    // becomes interactive sooner after a switch.
+    scheduleReaderIdle(() => {
+      if (!readerMountMatches(mount)) return;
+      installCitationHoverPreviews(doc);
+      rebuildReaderSentencePairs(doc);
+      ensureTitleTranslation();
+    });
   }
   $('#html-preview').addEventListener('load', () => {
     const mount = readerMount;
@@ -7243,7 +7360,7 @@
     };
   }
 
-  function insertTranslation(blockId, text, { pending = false, error = false, cached = false, sourceHash = '', role = '', formulas = [], markers = [], emphasis = [], doc = frameDocument() } = {}) {
+  function insertTranslation(blockId, text, { pending = false, error = false, cached = false, sourceHash = '', role = '', formulas = [], markers = [], emphasis = [], doc = frameDocument(), batch = false } = {}) {
     const block = translationTarget(blockId, doc);
     if (!block) return null;
     doc.querySelectorAll(`.my-scholar-translation[data-for="${cssEscape(blockId || '')}"]`).forEach((node) => node.remove());
@@ -7269,9 +7386,12 @@
       decorateInlineSectionLabel(body, inlineKeywordsLabelPattern, 'paper-section-label paper-keywords-label');
     }
     block.insertAdjacentElement('afterend', node);
-    if (state.annotations.length && doc === frameDocument()) renderFrameAnnotations();
-    else rebuildReaderSentencePairs(doc);
-    if (doc === frameDocument()) refreshReaderSearch();
+    // Batch callers (cache replay) rebuild these indexes once after the loop.
+    if (!batch) {
+      if (state.annotations.length && doc === frameDocument()) renderFrameAnnotations();
+      else rebuildReaderSentencePairs(doc);
+      if (doc === frameDocument()) refreshReaderSearch();
+    }
     return node;
   }
 
@@ -8881,23 +9001,31 @@
       setPanelStatus(message, true);
       showToast(message, true);
     });
-    await Promise.resolve(notesReady).catch(() => {}).then(() => api(`/api/jobs/${jobId}/notes`)).then((payload) => {
+    // Notes and translations no longer wait on each other; both run in
+    // parallel with the media-layout and annotation fetches above.
+    const notesPromise = Promise.resolve(notesReady).catch(() => {}).then(() => api(`/api/jobs/${jobId}/notes`)).then((payload) => {
       loadArticleNotes(jobId, payload.markdown || '', notesSession);
     }).catch((error) => {
       handleArticleNotesLoadError(jobId, error, notesSession);
     });
+    const translationsPromise = loadTranslationCache(jobId).then(() => {
+      if (!isActiveReaderJob(jobId)) return;
+      renderCachedTranslations();
+      renderAnnotations(); renderFrameAnnotations();
+    });
+    await Promise.all([notesPromise, translationsPromise]);
     if (!isActiveReaderJob(jobId)) return;
-    await loadTranslationCache(jobId);
-    if (!isActiveReaderJob(jobId)) return;
-    renderCachedTranslations();
-    renderAnnotations(); renderFrameAnnotations();
     state.chat = chatSession(jobId); renderChat();
     await annotationsReady;
     if (!isActiveReaderJob(jobId)) return;
     await mediaLayoutReady;
     if (!isActiveReaderJob(jobId)) return;
     scheduleLateReadingLocationRestore(jobId);
-    loadAutoHighlights(jobId).catch(() => {});
+    // Opening a document must not block on AI; run the suggestion pass once
+    // the reader has settled.
+    scheduleReaderIdle(() => {
+      if (isActiveReaderJob(jobId)) loadAutoHighlights(jobId).catch(() => {});
+    });
   }
 
   function openReader(job, { addTab = true } = {}) {
@@ -10785,6 +10913,29 @@
 
   $('#full-translate-button').addEventListener('click', runFullTranslation);
   $('#stop-translation-button').addEventListener('click', stopFullTranslation);
+  $('#open-source-button')?.addEventListener('click', () => {
+    const job = state.activeJob;
+    if (!job) { showToast('请先打开一篇文献。', true); return; }
+    if (window.myScholarDesktop?.openSourcePdf) {
+      Promise.resolve(window.myScholarDesktop.openSourcePdf(job.job_id))
+        .then((result) => {
+          if (result && result.ok === false) throw new Error(result.error || '无法打开原始文件。');
+        })
+        .catch((error) => showToast(error.message || '无法打开原始文件。', true));
+      return;
+    }
+    const source = job.links?.source;
+    if (source) window.open(source, '_blank', 'noopener');
+    else showToast('原始文件不可用。', true);
+  });
+  $('#toggle-translations-button')?.addEventListener('click', () => {
+    const jobId = state.activeJob?.job_id;
+    if (!jobId) { showToast('请先打开一篇文献。', true); return; }
+    if (state.hiddenTranslationJobs.has(jobId)) state.hiddenTranslationJobs.delete(jobId);
+    else state.hiddenTranslationJobs.add(jobId);
+    applyTranslationVisibility();
+    syncTranslationVisibilityButton();
+  });
   let reflowPollToken = 0;
   let reflowPollTimer = null;
   let activeReflowJobId = '';

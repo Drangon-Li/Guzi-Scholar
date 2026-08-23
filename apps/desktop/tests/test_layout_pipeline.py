@@ -1093,8 +1093,11 @@ class LayoutPipelineTest(unittest.TestCase):
         rendered = _caption_html(content, "table_caption", renderer)
         self.assertIn("Table 9: queries ", rendered)
         self.assertIn("<math", rendered)
+        self.assertIn('data-tex="', rendered)
         self.assertIn(" and averaging.", rendered)
-        self.assertNotIn(r"\ldots", re.sub(r"<annotation.*?</annotation>", "", rendered, flags=re.S))
+        visible = re.sub(r'\sdata-tex="[^"]*"', "", rendered)
+        visible = re.sub(r"<annotation.*?</annotation>", "", visible, flags=re.S)
+        self.assertNotIn(r"\ldots", visible)
 
     def test_caption_inline_marker_uses_fixed_accessible_allowlisted_markup(self) -> None:
         from layout_pipeline import _caption_html

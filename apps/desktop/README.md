@@ -33,6 +33,7 @@ My Scholar 是一个本地优先的跨平台学术 PDF 阅读器。它把 PDF �
 | MinerU 或匹配的 content-list sidecar | 版面感知语义转换 | 可选 |
 | Java 11+ 与 OpenDataLoader PDF CLI | MinerU 不可用时的转换回退 | 可选 |
 | Pandoc | LaTeX 转 MathML | 可选（macOS 安装版内置） |
+| KaTeX（vendor 于 `web/vendor/katex/`） | 阅读器公式前端重渲染 | 已内置 |
 | PyMuPDF (`fitz`) | PDF 元数据和视觉裁剪 | 可选 |
 | Playwright | 浏览器交互回归测试 | 仅测试需要 |
 
@@ -157,7 +158,7 @@ flowchart LR
 3. `MY_SCHOLAR_MINERU` 或 PATH 中的 MinerU。
 4. OpenDataLoader PDF CLI 回退。
 
-两条路径都会生成 `manifest.json` 和 `validation.json`。复杂图表优先保留 PDF 原始高分辨率裁剪；公式优先转换为 MathML，无法确认时保留可见 TeX。
+两条路径都会生成 `manifest.json` 和 `validation.json`。复杂图表优先保留 PDF 原始高分辨率裁剪；公式在构建期由 Pandoc 转换为 MathML 并保留原始 TeX（`data-tex`），阅读器加载后用本地 vendor 的 KaTeX（`web/vendor/katex/`）重渲染，KaTeX 失败时保留 MathML 或可见 TeX 兜底。
 
 ### 元数据检索
 
