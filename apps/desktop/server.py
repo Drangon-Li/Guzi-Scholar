@@ -54,7 +54,7 @@ from ai import auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, 
 from bibliography import is_fragmented_metadata_text, retrieve_bibliographic_metadata, retrieve_reference_evidence
 from config import AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE
 from library_store import LibraryStore, LibraryValidationError
-from layout_pipeline import MathRenderer
+from layout_pipeline import MathRenderer, normalize_mineru_backend
 from parsing_providers import ProviderError, ParsingRequest, create_default_registry
 from pipeline import PipelineError, process_pdf, utc_now
 
@@ -837,9 +837,23 @@ def _setting_bool(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
 
 
+ANNOTATION_COLOR_KINDS = ("highlight", "underline")
+
+
 def _setting_color(value: Any, default: str = "#f59e0b") -> str:
     candidate = str(value or "").strip()
     return candidate if re.fullmatch(r"#[0-9a-fA-F]{6}", candidate) else default
+
+
+def _parsing_backend(value: Any) -> str:
+    """An unset choice defers to MY_SCHOLAR_MINERU_BACKEND, then to the default."""
+    return normalize_mineru_backend(value.get("backend") if isinstance(value, dict) else None)
+
+
+def _annotation_colors(value: Any, fallback: str) -> Dict[str, str]:
+    """Remember the last colour picked for each annotation kind."""
+    stored = value if isinstance(value, dict) else {}
+    return {kind: _setting_color(stored.get(kind), fallback) for kind in ANNOTATION_COLOR_KINDS}
 
 
 APPEARANCE_DEFAULTS = {
@@ -1012,12 +1026,16 @@ def _public_settings() -> Dict[str, Any]:
         "ai_status_history": _ai_status_history(),
         "shortcuts": shortcuts,
         "highlight_color": _setting_color(data.get("highlight_color")),
+        "annotation_colors": _annotation_colors(
+            data.get("annotation_colors"), _setting_color(data.get("highlight_color"))
+        ),
         "appearance": _appearance_settings(data.get("appearance")),
         "metadata": {
             "auto_retrieve": _setting_bool(data.get("metadata", {}).get("auto_retrieve", True), True) if isinstance(data.get("metadata"), dict) else True,
             "online_lookup": _setting_bool(data.get("metadata", {}).get("online_lookup", True), True) if isinstance(data.get("metadata"), dict) else True,
             "contact_email": str(data.get("metadata", {}).get("contact_email", "")) if isinstance(data.get("metadata"), dict) else "",
         },
+        "parsing": {"backend": _parsing_backend(data.get("parsing"))},
     }
 
 
@@ -1030,7 +1048,7 @@ def _write_settings(data: Dict[str, Any]) -> Dict[str, Any]:
         raise PipelineError(f"AI 服务配置只能在项目私有配置文件中修改：{', '.join(blocked)}")
     with SETTINGS_LOCK:
         current = _stored_settings()
-        for key in ("shortcuts", "metadata", "highlight_color", "appearance", "ai"):
+        for key in ("shortcuts", "metadata", "highlight_color", "annotation_colors", "appearance", "ai", "parsing"):
             if key in data:
                 if key == "metadata" and isinstance(data[key], dict):
                     current[key] = {
@@ -1038,6 +1056,12 @@ def _write_settings(data: Dict[str, Any]) -> Dict[str, Any]:
                         "online_lookup": _setting_bool(data[key].get("online_lookup"), True),
                         "contact_email": str(data[key].get("contact_email") or "").strip()[:254],
                     }
+                elif key == "parsing":
+                    current["parsing"] = {"backend": _parsing_backend(data[key])}
+                elif key == "annotation_colors":
+                    current["annotation_colors"] = _annotation_colors(
+                        data[key], _setting_color(current.get("highlight_color"))
+                    )
                 elif key == "shortcuts" and isinstance(data[key], dict):
                     defaults = _public_settings().get("shortcuts", {})
                     current["shortcuts"] = {
@@ -2898,6 +2922,7 @@ def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
                 output_dir=attempt_dir,
                 source_name=source_name,
                 generation=generation,
+                backend=_parsing_backend(_stored_settings().get("parsing")),
             ),
             progress=progress,
             cancel_event=cancel_event,

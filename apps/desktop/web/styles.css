@@ -348,6 +348,68 @@ body.resizing-reader-assistant * { cursor: col-resize !important; }
 .notes-editor blockquote { margin: .65em 0; padding: 2px 0 2px 10px; border-left: 3px solid var(--highlight-orange); color: var(--muted); }
 .notes-editor img { display: block; max-width: 100%; height: auto; margin: 9px 0; border-radius: 7px; }
 .notes-editor code { padding: 2px 4px; border-radius: 4px; background: color-mix(in srgb,var(--accent) 8%,var(--soft)); font-family: ui-monospace,SFMono-Regular,Menlo,monospace; }
+
+/* Rich note content. Colours are named tokens so light and dark themes can
+   resolve them independently; the markdown only ever stores the name. */
+:root {
+  --note-red:#c0392b; --note-orange:#b3610e; --note-yellow:#8a6d0b; --note-green:#1f7a45;
+  --note-blue:#1663a6; --note-purple:#6b45c0; --note-gray:#6b7684;
+  --note-mark-red:#ffd9d2; --note-mark-orange:#ffe3c2; --note-mark-yellow:#fff3b0; --note-mark-green:#cdf0d8;
+  --note-mark-blue:#d2e7fb; --note-mark-purple:#e6ddfb; --note-mark-gray:#e3e7ec;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --note-red:#ff9b8f; --note-orange:#ffbe7a; --note-yellow:#f2d472; --note-green:#79dda2;
+    --note-blue:#8bc2f5; --note-purple:#bda6f5; --note-gray:#aeb8c2;
+    --note-mark-red:#5d2a25; --note-mark-orange:#5a3c17; --note-mark-yellow:#544716; --note-mark-green:#1f4630;
+    --note-mark-blue:#1d3a55; --note-mark-purple:#372a55; --note-mark-gray:#333a42;
+  }
+}
+.note-color-red { color: var(--note-red); }
+.note-color-orange { color: var(--note-orange); }
+.note-color-yellow { color: var(--note-yellow); }
+.note-color-green { color: var(--note-green); }
+.note-color-blue { color: var(--note-blue); }
+.note-color-purple { color: var(--note-purple); }
+.note-color-gray { color: var(--note-gray); }
+.note-mark { padding: .05em .2em; border-radius: .2em; background: var(--note-mark-yellow); color: inherit; }
+.note-mark-red { background: var(--note-mark-red); }
+.note-mark-orange { background: var(--note-mark-orange); }
+.note-mark-yellow { background: var(--note-mark-yellow); }
+.note-mark-green { background: var(--note-mark-green); }
+.note-mark-blue { background: var(--note-mark-blue); }
+.note-mark-purple { background: var(--note-mark-purple); }
+.note-mark-gray { background: var(--note-mark-gray); }
+.notes-editor del,.annotation-note del { color: var(--muted); }
+.notes-editor hr,.annotation-note hr { margin: .9em 0; border: 0; border-top: 1px solid var(--line); }
+.notes-editor pre,.annotation-note pre { margin: .6em 0; padding: 9px 11px; overflow-x: auto; border: 1px solid var(--line); border-radius: 7px; background: var(--soft); }
+.notes-editor pre code,.annotation-note pre code { padding: 0; background: transparent; font-size: .94em; line-height: 1.55; }
+.notes-editor ul.note-todo,.annotation-note ul.note-todo { padding-left: 2px; list-style: none; }
+.notes-editor ul.note-todo li,.annotation-note ul.note-todo li { display: flex; align-items: flex-start; gap: 7px; }
+.notes-editor ul.note-todo input,.annotation-note ul.note-todo input { flex: 0 0 auto; margin-top: .28em; accent-color: var(--accent-fill); }
+.notes-editor ul.note-todo li[data-checked="true"] { color: var(--muted); text-decoration: line-through; }
+.notes-editor details,.annotation-note details { margin: .6em 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--soft); }
+.notes-editor details summary,.annotation-note details summary { cursor: pointer; font-weight: 600; }
+.note-format-bar { position: fixed; z-index: 60; display: flex; align-items: center; gap: 2px; padding: 4px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); box-shadow: var(--shadow); }
+.note-format-bar[hidden] { display: none; }
+.note-format-action { display: inline-flex; min-width: 27px; height: 27px; align-items: center; justify-content: center; padding: 0 6px; border: 0; border-radius: 6px; background: transparent; color: var(--ink); font-size: 12px; line-height: 1; cursor: pointer; }
+.note-format-action:hover { background: var(--soft); }
+.note-format-action[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent-dark); }
+.note-format-separator { width: 1px; height: 17px; margin: 0 3px; background: var(--line); }
+.note-format-palette { position: absolute; top: calc(100% + 6px); left: 0; display: flex; flex-wrap: wrap; gap: 4px; width: 168px; padding: 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); box-shadow: var(--shadow); }
+.note-format-palette[hidden] { display: none; }
+.note-format-swatch { width: 20px; height: 20px; border: 1px solid var(--line); border-radius: 5px; background: var(--swatch-color,transparent); color: var(--muted); font-size: 10px; cursor: pointer; }
+.note-format-swatch-color { background: var(--paper); color: var(--swatch-color); font-weight: 800; }
+.note-format-swatch-color::after { content: 'A'; }
+.note-format-swatch-none { background: var(--soft); }
+.note-slash-menu { position: fixed; z-index: 60; max-height: 260px; width: 210px; overflow: auto; padding: 5px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); box-shadow: var(--shadow); }
+.note-slash-menu[hidden] { display: none; }
+.note-slash-item { display: flex; width: 100%; align-items: center; gap: 8px; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--ink); font-size: 12px; text-align: left; cursor: pointer; }
+.note-slash-item:hover,.note-slash-item[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-dark); }
+.note-slash-item span:first-child { width: 18px; color: var(--muted); text-align: center; }
+.note-slash-empty { padding: 8px; color: var(--muted); font-size: 12px; }
+.note-math { display: inline-block; }
+.note-math.math-display { display: block; margin: .8em 0; overflow-x: auto; text-align: center; }
 .annotations-list { min-height: 0; overflow: auto; }.annotation-item { --annotation-color: var(--highlight-orange); position: relative; margin: 6px 0; padding: 8px 8px 7px 10px; border-left: 3px solid var(--annotation-color); border-radius: 0 8px 8px 0; background: color-mix(in srgb,var(--annotation-color) 9%,var(--paper)); }.annotation-quote { color: #405261; font-size: calc(var(--reader-content-font-size) * .78); line-height: 1.48; cursor: pointer; }.annotation-note { margin-top: 4px; color: var(--muted); font-size: calc(var(--reader-content-font-size) * .74); line-height: 1.48; }.annotation-note p { margin: .25em 0; }.annotation-note ul,.annotation-note ol { margin: .25em 0; padding-left: 17px; }.annotation-note blockquote { margin: .35em 0; padding-left: 8px; border-left: 2px solid var(--annotation-color); }.annotation-note h1,.annotation-note h2,.annotation-note h3 { margin: .4em 0 .2em; color: var(--ink); font-size: 1.08em; }.annotation-note code { padding: 1px 3px; border-radius: 3px; background: color-mix(in srgb,var(--annotation-color) 10%,var(--soft)); }.annotation-note img { display: block; max-width: 100%; height: auto; margin: 6px 0; border-radius: 7px; }.annotation-meta { display: flex; justify-content: space-between; margin-top: 5px; color: #99a4ad; font-size: 10px; }.annotation-meta button { padding: 0; border: 0; background: transparent; color: #9aa6af; font-size: 10px; }
 
 /* Reading content follows the paper exactly. Interface labels and controls use
