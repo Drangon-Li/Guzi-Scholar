@@ -60,6 +60,7 @@ public final class MyScholarPdfRenderer {
     private static final int MAX_EVIDENCE_PAGES = 512;
     private static final int MAX_EVIDENCE_SPANS = 200_000;
     private static final int MAX_EVIDENCE_TEXT_CHARS = 4_000_000;
+    private static final float BOLD_STEM_WIDTH = 100.0f;
 
     private static final class EvidenceChar {
         private final String text;
@@ -248,7 +249,17 @@ public final class MyScholarPdfRenderer {
             }
             try {
                 PDFontDescriptor descriptor = font.getFontDescriptor();
-                return descriptor != null && (descriptor.isForceBold() || descriptor.getFontWeight() >= 600.0f);
+                if (descriptor == null) {
+                    return false;
+                }
+                if (descriptor.isForceBold() || descriptor.getFontWeight() >= 600.0f) {
+                    return true;
+                }
+                // LaTeX and URW bold faces (CMBX10, NimbusRomNo9L-Medi) leave FontWeight at
+                // 0, never set ForceBold and never spell "bold" in the name, so the stem
+                // width is the only weight they advertise. Their regular counterparts sit
+                // near 70-90; the bold cuts start around 110.
+                return descriptor.getStemV() >= BOLD_STEM_WIDTH;
             } catch (RuntimeException ignored) {
                 return false;
             }
