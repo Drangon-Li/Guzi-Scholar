@@ -31,6 +31,10 @@ CHAT_MAX_TOKENS = 4096
 # Keep one explicit ceiling for translation requests. The relay applies the
 # same ceiling, while normal chat remains on its smaller conversational budget.
 TRANSLATION_MAX_TOKENS = 8192
+# A connection probe only needs "OK" back, but a reasoning model that ignores
+# every disable-thinking switch still has to finish thinking before it emits
+# anything, so leave enough headroom for that instead of the bare reply.
+PROBE_MAX_TOKENS = 512
 
 
 # Gateway configuration and connection status.
@@ -203,10 +207,12 @@ def _complete(
     if temperature is not None:
         request_body["temperature"] = temperature
     if _uses_chat_template(service, config) and os.environ.get("MY_SCHOLAR_AI_DISABLE_THINKING", "1").strip().lower() not in {"0", "false", "no"}:
-        # vLLM/Qwen uses this OpenAI-compatible extension.  It keeps academic
-        # translations and connection probes from returning the hidden chain
-        # of thought as if it were user-visible content.
+        # Reasoning models otherwise spend the token budget on a hidden chain of
+        # thought and return empty content.  Vendors spell the switch
+        # differently, so send both; whichever one the gateway rejects is
+        # stripped by the retry below.
         request_body["chat_template_kwargs"] = {"enable_thinking": False}
+        request_body["thinking"] = {"type": "disabled"}
     if response_format:
         request_body["response_format"] = response_format
     if max_tokens is not None:
@@ -237,10 +243,11 @@ def _complete(
     except urllib.error.HTTPError as exc:
         # Older OpenAI-compatible gateways reject optional body extensions even
         # though they implement chat/completions. Retry once without them.
-        if exc.code not in {400, 422} or not ("response_format" in request_body or "chat_template_kwargs" in request_body):
+        optional_keys = ("response_format", "chat_template_kwargs", "thinking")
+        if exc.code not in {400, 422} or not any(key in request_body for key in optional_keys):
             raise
-        request_body.pop("response_format", None)
-        request_body.pop("chat_template_kwargs", None)
+        for key in optional_keys:
+            request_body.pop(key, None)
         envelope = request_envelope(request_body)
     content = _message_content(envelope)
     if not content:
@@ -454,7 +461,7 @@ def test_connection(service: str = "chat") -> Dict[str, Any]:
             _translation_messages("Connection test.", "Chinese", terms, mode),
             service=name,
             temperature=0 if mode == "chat" else None,
-            max_tokens=8 if mode == "chat" else None,
+            max_tokens=PROBE_MAX_TOKENS if mode == "chat" else None,
             extra_body=None if mode == "chat" else {"translation_options": _translation_options("Chinese")},
             timeout_seconds=probe_timeout,
         )
@@ -466,7 +473,7 @@ def test_connection(service: str = "chat") -> Dict[str, Any]:
             ],
             service=name,
             temperature=0,
-            max_tokens=8,
+            max_tokens=PROBE_MAX_TOKENS,
             timeout_seconds=probe_timeout,
         )
     return {
