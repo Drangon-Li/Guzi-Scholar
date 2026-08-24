@@ -47,6 +47,8 @@ TAG_RE = re.compile(r"\\tag\s*\{([^{}]+)\}")
 SPECIAL_TOKEN_RE = re.compile(r"\[(?P<prefix>I|T)(?P<separator>\\?_)?(?P<suffix>CLS|SEP)\]", flags=re.IGNORECASE)
 MINERU_WORKERS = max(1, min(2, int(os.environ.get("MY_SCHOLAR_MINERU_WORKERS", "1"))))
 MINERU_SEMAPHORE = threading.BoundedSemaphore(MINERU_WORKERS)
+MINERU_BACKENDS = ("pipeline", "hybrid-engine")
+DEFAULT_MINERU_BACKEND = "pipeline"
 DISCOVERY_CACHE_LOCK = threading.RLock()
 DISCOVERY_CACHE: Dict[Tuple[str, str], Tuple[float, List[Path]]] = {}
 FIRST_PAGE_CACHE: Dict[Tuple[str, int, int], str] = {}
@@ -1106,11 +1108,26 @@ def _stop_mineru_process(process: subprocess.Popen) -> str:
         return stdout or ""
 
 
+def normalize_mineru_backend(value: Any) -> str:
+    """Resolve the MinerU backend, preferring the caller over the environment.
+
+    ``hybrid-engine`` matches MinerU's own default and parses formulas and
+    layout far more accurately, but it downloads and runs a VLM, so an
+    unrecognized value falls back to the light ``pipeline`` backend.
+    """
+    for candidate in (value, os.environ.get("MY_SCHOLAR_MINERU_BACKEND")):
+        normalized = str(candidate or "").strip().lower()
+        if normalized in MINERU_BACKENDS:
+            return normalized
+    return DEFAULT_MINERU_BACKEND
+
+
 def _run_mineru(
     executable: Path,
     pdf_path: Path,
     output: Path,
     *,
+    backend: Optional[str] = None,
     runtime_root: Optional[Path] = None,
     cancel_event: Any = None,
 ) -> Path:
@@ -1118,7 +1135,7 @@ def _run_mineru(
     output.mkdir(parents=True, exist_ok=True)
     command = [
         str(executable), "-p", str(pdf_path), "-o", str(output),
-        "-b", os.environ.get("MY_SCHOLAR_MINERU_BACKEND", "pipeline"),
+        "-b", normalize_mineru_backend(backend),
         "-m", "auto", "-f", "true", "-t", "true",
     ]
     acquired = False
@@ -2778,6 +2795,7 @@ def process_layout_pdf(
     progress=None,
     render_budget: Optional[LayoutRenderBudget] = None,
     layout_source: Optional[Tuple[Optional[Path], str]] = None,
+    mineru_backend: Optional[str] = None,
     runtime_root: Optional[Path] = None,
     cancel_event: Any = None,
 ) -> Optional[dict]:
@@ -2795,14 +2813,16 @@ def process_layout_pdf(
     shutil.copy2(pdf_path, source_copy)
     layout_dir = job_dir / "layout"
     if source_kind == "mineru-executable":
+        resolved_backend = normalize_mineru_backend(mineru_backend)
         sidecar = _run_mineru(
             sidecar_or_bin,
             source_copy,
             layout_dir,
+            backend=resolved_backend,
             runtime_root=runtime_root,
             cancel_event=cancel_event,
         )
-        backend_name = "MinerU local pipeline"
+        backend_name = f"MinerU local {resolved_backend}"
     else:
         sidecar = sidecar_or_bin
         backend_name = "MinerU cached layout sidecar"

@@ -41,6 +41,7 @@ from layout_pipeline import (  # noqa: E402
     MathRenderer,
     LayoutPipelineCancelled,
     LayoutPipelineError,
+    normalize_mineru_backend,
     process_layout_pdf,
 )
 
@@ -94,6 +95,42 @@ class LayoutPipelineTest(unittest.TestCase):
             self.assertTrue(popen.call_args.kwargs["start_new_session"])
             killpg.assert_called_once_with(process.pid, __import__("signal").SIGTERM)
             self.assertEqual((root / "output/mineru.log").read_text(encoding="utf-8"), "cancelled")
+
+    def test_mineru_backend_prefers_the_caller_then_the_environment(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MY_SCHOLAR_MINERU_BACKEND", None)
+            self.assertEqual(normalize_mineru_backend(None), "pipeline")
+            self.assertEqual(normalize_mineru_backend("hybrid-engine"), "hybrid-engine")
+            self.assertEqual(normalize_mineru_backend(" Hybrid-Engine "), "hybrid-engine")
+            self.assertEqual(normalize_mineru_backend("vlm-engine"), "pipeline")
+        with patch.dict(os.environ, {"MY_SCHOLAR_MINERU_BACKEND": "hybrid-engine"}):
+            self.assertEqual(normalize_mineru_backend(None), "hybrid-engine")
+            self.assertEqual(normalize_mineru_backend("pipeline"), "pipeline")
+
+    def test_mineru_command_carries_the_selected_backend(self) -> None:
+        class CompleteProcess:
+            pid = 43212
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def communicate(self, timeout=None):
+                return ("complete", None)
+
+        with tempfile.TemporaryDirectory(prefix="guzi-mineru-backend-") as temp, patch(
+            "layout_pipeline.subprocess.Popen", return_value=CompleteProcess(),
+        ) as popen:
+            root = Path(temp)
+            with self.assertRaisesRegex(LayoutPipelineError, "content_list_v2"):
+                _run_mineru(
+                    root / "mineru",
+                    root / "source.pdf",
+                    root / "output",
+                    backend="hybrid-engine",
+                )
+            command = popen.call_args.args[0]
+            self.assertEqual(command[command.index("-b") + 1], "hybrid-engine")
 
     def test_managed_mineru_uses_component_cwd_minimal_path_and_offline_caches(self) -> None:
         class CompleteProcess:
