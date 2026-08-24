@@ -1927,6 +1927,26 @@ class SettingsBoundaryTest(unittest.TestCase):
             self.assertEqual(public["highlight_color"], "#123ABC")
             self.assertEqual(settings_path.stat().st_mode & 0o777, 0o600)
 
+    def test_settings_writer_round_trips_the_parsing_backend_and_rejects_others(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-settings-parsing-") as temp:
+            settings_path = Path(temp) / "settings.json"
+            environment = {key: value for key, value in os.environ.items() if key != "MY_SCHOLAR_MINERU_BACKEND"}
+            with patch("server.SETTINGS_PATH", settings_path), patch("server.ai_services", return_value={}), patch.dict(
+                os.environ, environment, clear=True,
+            ):
+                self.assertEqual(_public_settings()["parsing"]["backend"], "pipeline")
+                public = _write_settings({"parsing": {"backend": "hybrid-engine"}})
+                self.assertEqual(public["parsing"]["backend"], "hybrid-engine")
+                self.assertEqual(
+                    json.loads(settings_path.read_text(encoding="utf-8"))["parsing"]["backend"],
+                    "hybrid-engine",
+                )
+                # An unsupported backend must not reach the MinerU command line.
+                self.assertEqual(
+                    _write_settings({"parsing": {"backend": "vlm-engine"}})["parsing"]["backend"],
+                    "pipeline",
+                )
+
     def test_settings_writer_persists_allowlisted_appearance_privately(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-settings-appearance-") as temp:
             settings_path = Path(temp) / "settings.json"

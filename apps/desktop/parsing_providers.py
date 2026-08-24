@@ -60,6 +60,7 @@ class ParsingRequest:
     output_dir: Path
     source_name: str
     generation: Optional[int] = None
+    backend: Optional[str] = None
 
     @classmethod
     def from_value(cls, value: Any) -> "ParsingRequest":
@@ -74,6 +75,7 @@ class ParsingRequest:
                 output_dir=Path(value["output_dir"]),
                 source_name=str(value.get("source_name") or Path(value["source_pdf"]).name),
                 generation=int(value["generation"]) if value.get("generation") is not None else None,
+                backend=str(value["backend"]) if value.get("backend") is not None else None,
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ProviderError("解析请求缺少有效字段。", code="invalid_request") from exc
@@ -343,6 +345,7 @@ class LocalMineruProvider:
                 backend_override="layout",
                 layout_executable=self.manager.executable_path(manifest) if manifest else external.executable,
                 layout_runtime_root=self.manager.target_dir(manifest) if manifest else None,
+                layout_backend=parsed.backend,
                 cancel_event=cancel_event,
             )
         except Exception as exc:

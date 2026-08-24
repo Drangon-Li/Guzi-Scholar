@@ -164,7 +164,7 @@
     selectedLibraryJobId: null, selectedLibraryJobIds: new Set(), activeGroupValue: null, groupingMenuOpen: false,
     graphController: null, graphData: null, graphConfig: { showSimilarity: false, showAttributes: true, attributeIds: null, topK: 2, viewportScale: 0.85 },
     inlineImportanceSaving: new Set(),
-    assistantInitialized: false, quickPreview: null, highlightColor: '#f59e0b', appearance: { ...appearanceDefaults }, pendingAppearance: { ...appearanceDefaults },
+    assistantInitialized: false, quickPreview: null, highlightColor: '#f59e0b', annotationColors: { highlight: '#f59e0b', underline: '#f59e0b' }, appearance: { ...appearanceDefaults }, pendingAppearance: { ...appearanceDefaults },
     shortcuts: { open_library: 'Cmd+1', open_settings: 'Cmd+,', highlight: 'Cmd+Shift+H', underline: 'Cmd+Shift+U', highlight_note: 'Cmd+Shift+J', underline_note: 'Cmd+Shift+K' },
     highlightFilter: 'all', typography: { ...typographyDefaults }, importQueue: [], importRunning: false, metadataAutoRetrieve: true,
   };
@@ -6270,6 +6270,19 @@
   function normalizeAnnotationColor(value) {
     return normalizeHexColor(legacyAnnotationColors[String(value || '').toLowerCase()] || value, state.highlightColor);
   }
+  function annotationColorSlot(kind) {
+    return kind === 'underline' ? 'underline' : 'highlight';
+  }
+  function annotationColorFor(kind) {
+    return normalizeAnnotationColor(state.annotationColors?.[annotationColorSlot(kind)]);
+  }
+  function rememberAnnotationColor(kind, color) {
+    const slot = annotationColorSlot(kind);
+    const value = normalizeAnnotationColor(color);
+    if (state.annotationColors?.[slot] === value) return;
+    state.annotationColors = { ...state.annotationColors, [slot]: value };
+    api('/api/settings', jsonOptions({ annotation_colors: state.annotationColors }, 'PUT')).catch(() => {});
+  }
   function annotationPaletteHTML(annotation) {
     if (isAIAnnotation(annotation)) return '';
     const selected = normalizeAnnotationColor(annotation.color);
@@ -6367,6 +6380,16 @@
         trigger.title = annotation.note ? '查看句内笔记' : '添加或查看句内笔记';
         trigger.setAttribute('aria-label', trigger.title);
         trigger.textContent = annotation.note ? '✎' : '＋';
+        trigger.addEventListener('pointerenter', (event) => {
+          if (event.pointerType !== 'mouse') return;
+          cancelNoteHoverClose();
+          scheduleNoteHoverOpen(trigger);
+        });
+        trigger.addEventListener('pointerleave', (event) => {
+          if (event.pointerType !== 'mouse') return;
+          cancelNoteHoverOpen();
+          scheduleNoteHoverClose();
+        });
         applyAnnotationTheme(trigger, annotation);
         mark.insertAdjacentElement('afterend', trigger);
       }
@@ -6377,7 +6400,49 @@
     }
   }
 
+  // Hovering the inline marker previews the note; the popover itself is
+  // interactive, so it stays while the pointer travels to it and pins as soon
+  // as the reader clicks or edits.
+  const NOTE_HOVER_OPEN_DELAY = 120;
+  const NOTE_HOVER_CLOSE_DELAY = 260;
+  const notePopoverHover = { openTimer: null, closeTimer: null, pinned: false };
+
+  function cancelNoteHoverOpen() {
+    window.clearTimeout(notePopoverHover.openTimer);
+    notePopoverHover.openTimer = null;
+  }
+  function cancelNoteHoverClose() {
+    window.clearTimeout(notePopoverHover.closeTimer);
+    notePopoverHover.closeTimer = null;
+  }
+  function scheduleNoteHoverOpen(trigger) {
+    if (notePopoverHover.pinned) return;
+    const doc = frameDocument(); if (!doc) return;
+    const annotationId = trigger.dataset.annotationId;
+    const shown = doc.querySelector('.annotation-note-popover');
+    if (shown && shown.dataset.annotationId === annotationId && !shown.classList.contains('is-closing')) return;
+    cancelNoteHoverOpen();
+    notePopoverHover.openTimer = window.setTimeout(() => {
+      notePopoverHover.openTimer = null;
+      if (notePopoverHover.pinned) return;
+      const annotation = state.annotations.find((item) => item.id === annotationId);
+      const anchor = annotationAnchor(frameDocument(), annotationId);
+      if (annotation && anchor) showInlineAnnotation(annotation, anchor, { pinned: false });
+    }, NOTE_HOVER_OPEN_DELAY);
+  }
+  function scheduleNoteHoverClose() {
+    if (notePopoverHover.pinned) return;
+    cancelNoteHoverClose();
+    notePopoverHover.closeTimer = window.setTimeout(() => {
+      notePopoverHover.closeTimer = null;
+      if (!notePopoverHover.pinned) closeInlineAnnotation();
+    }, NOTE_HOVER_CLOSE_DELAY);
+  }
+
   function closeInlineAnnotation(doc = frameDocument(), { immediate = false } = {}) {
+    cancelNoteHoverOpen();
+    cancelNoteHoverClose();
+    notePopoverHover.pinned = false;
     const popover = doc?.querySelector('.annotation-note-popover');
     if (!popover) return;
     const trigger = annotationAnchor(doc, popover.dataset.annotationId);
@@ -6563,9 +6628,10 @@
     popover.querySelector('[data-action="ai-add-note"]')?.focus();
   }
 
-  function showInlineAnnotation(annotation, trigger) {
+  function showInlineAnnotation(annotation, trigger, { pinned = true } = {}) {
     const doc = frameDocument(); if (!doc || !trigger) return;
     closeInlineAnnotation(doc, { immediate: true });
+    notePopoverHover.pinned = pinned;
     const popover = doc.createElement('div');
     popover.className = 'annotation-note-popover';
     popover.dataset.annotationId = annotation.id;
@@ -6573,6 +6639,9 @@
     popover.setAttribute('aria-label', annotation.kind === 'underline' ? '划线笔记' : '重点笔记');
     applyAnnotationTheme(popover, annotation);
     const conversionLabel = annotation.kind === 'underline' ? '转为高亮' : '转为划线';
+    popover.addEventListener('pointerenter', cancelNoteHoverClose);
+    popover.addEventListener('pointerleave', (event) => { if (event.pointerType === 'mouse') scheduleNoteHoverClose(); });
+    popover.addEventListener('click', () => { notePopoverHover.pinned = true; });
     popover.innerHTML = `<div class="annotation-note-popover-head"><strong>${annotation.kind === 'underline' ? '划线笔记' : '重点笔记'}</strong><span>第 ${escapeHTML(annotation.page || '—')} 页</span></div>${annotationPaletteHTML(annotation)}<div class="annotation-note-popover-quote">${escapeHTML(annotation.quote)}</div><div class="annotation-note-popover-body">${annotation.note ? renderMarkdown(annotation.note) : '<span class="annotation-note-empty">还没有笔记，点击“添加笔记”。</span>'}</div><div class="annotation-note-popover-actions"><button type="button" data-action="convert">${conversionLabel}</button><button type="button" data-action="edit">${annotation.note ? '编辑笔记' : '添加笔记'}</button><button type="button" data-action="sidebar">打开高亮笔记</button><button type="button" data-action="delete">删除</button><button type="button" data-action="close">关闭</button></div>`;
     popover.addEventListener('click', (event) => event.stopPropagation());
     popover.addEventListener('mouseup', (event) => event.stopPropagation());
@@ -6625,6 +6694,7 @@
       applyAnnotationTheme(popover, annotation);
       applyAnnotationTheme(frameDocument()?.querySelector(`.annotation-note-trigger[data-annotation-id="${cssEscape(annotation.id)}"]`), annotation);
       buttons.forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.annotationColor === normalizeAnnotationColor(annotation.color))));
+      rememberAnnotationColor(annotation.kind, nextColor);
       renderAnnotations();
     } catch (error) {
       setPanelStatus(error.message, true);
@@ -6680,7 +6750,7 @@
     const jobId = state.activeJob.job_id;
     let note = '';
     try {
-      const payload = await api(`/api/jobs/${jobId}/annotations`, jsonOptions({ ...selection, kind, note, category: 'method', color: state.highlightColor, source: 'manual' }));
+      const payload = await api(`/api/jobs/${jobId}/annotations`, jsonOptions({ ...selection, kind, note, category: 'method', color: annotationColorFor(kind), source: 'manual' }));
       if (state.activeJob?.job_id !== jobId) return;
       state.annotations = payload.annotations || [];
       renderFrameAnnotations();
@@ -6726,6 +6796,19 @@
       .replace(/^(\s*\d+)([.)])(?=\s)/gmu, '$1\\$2');
   }
 
+  // Colour names rather than hex: the renderer whitelist stays a finite enum,
+  // and each token maps to a CSS variable that follows the light/dark theme.
+  const NOTE_COLOR_TOKENS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'gray'];
+  const NOTE_COLOR_PATTERN = NOTE_COLOR_TOKENS.join('|');
+  function noteColorToken(value, fallback = '') {
+    const token = String(value || '').trim().toLowerCase();
+    return NOTE_COLOR_TOKENS.includes(token) ? token : fallback;
+  }
+  function noteInlineTex(node) {
+    if (node?.nodeType !== Node.ELEMENT_NODE) return '';
+    return String(node.getAttribute('data-tex') || '').trim();
+  }
+
   const noteAssetRefPattern = /^assets\/[a-f0-9]{64}\.(?:png|jpg|webp|gif)$/i;
   function noteAssetRefFromImage(node) {
     const stored = String(node?.dataset?.noteAsset || '');
@@ -6739,10 +6822,17 @@
     if (node.nodeType === Node.TEXT_NODE) return escapeAnnotationMarkdownText(node.nodeValue);
     if (node.nodeType !== Node.ELEMENT_NODE) return '';
     const tag = node.tagName.toLowerCase();
+    const tex = noteInlineTex(node);
+    if (tex) return node.classList.contains('math-display') ? `$$${tex}$$` : `$${tex}$`;
     const content = [...node.childNodes].map(annotationInlineMarkdown).join('');
     if (tag === 'br') return '\n';
     if (tag === 'strong' || tag === 'b') return content ? `**${content}**` : '';
     if (tag === 'em' || tag === 'i') return content ? `*${content}*` : '';
+    if (tag === 'del' || tag === 's' || tag === 'strike') return content ? `~~${content}~~` : '';
+    if (tag === 'mark') return content ? `<mark data-color="${noteColorToken(node.dataset.color, 'yellow')}">${content}</mark>` : '';
+    if (tag === 'span' && noteColorToken(node.dataset.color)) {
+      return content ? `<span data-color="${noteColorToken(node.dataset.color)}">${content}</span>` : '';
+    }
     if (tag === 'code') return `\`${String(node.textContent || '').replace(/`/g, '\\`')}\``;
     if (tag === 'a') {
       const href = String(node.getAttribute('href') || '').trim();
@@ -6757,19 +6847,58 @@
     return content;
   }
 
+  const NOTE_BLOCK_TAGS = new Set([
+    'p', 'div', 'ul', 'ol', 'li', 'pre', 'blockquote', 'hr', 'details',
+    'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article', 'figure', 'table',
+  ]);
+
+  function noteHasBlockChild(node) {
+    return [...node.childNodes].some(
+      (child) => child.nodeType === Node.ELEMENT_NODE && NOTE_BLOCK_TAGS.has(child.tagName.toLowerCase()),
+    );
+  }
+
   function annotationBlockMarkdown(node) {
     if (node.nodeType === Node.TEXT_NODE) return escapeAnnotationMarkdownBlockStart(escapeAnnotationMarkdownText(node.nodeValue).trim());
     if (node.nodeType !== Node.ELEMENT_NODE) return '';
     const tag = node.tagName.toLowerCase();
+    const tex = noteInlineTex(node);
+    if (tex) return `$$${tex}$$`;
     const content = [...node.childNodes].map(annotationInlineMarkdown).join('').trim();
-    if (['strong', 'b', 'em', 'i', 'code', 'a', 'img'].includes(tag)) return annotationInlineMarkdown(node).trim();
+    if (['strong', 'b', 'em', 'i', 'del', 's', 'mark', 'span', 'code', 'a', 'img'].includes(tag)) return annotationInlineMarkdown(node).trim();
     if (/^h[1-3]$/.test(tag)) return `${'#'.repeat(Number(tag[1]))} ${content}`;
+    if (tag === 'hr') return '---';
     if (tag === 'blockquote') return content.split('\n').map((line) => `> ${line}`).join('\n');
     if (tag === 'ul' || tag === 'ol') {
-      return [...node.children].filter((item) => item.tagName === 'LI').map((item, index) => `${tag === 'ol' ? `${index + 1}.` : '-'} ${[...item.childNodes].map(annotationInlineMarkdown).join('').trim()}`).join('\n');
+      const todo = tag === 'ul' && node.classList.contains('note-todo');
+      return [...node.children].filter((item) => item.tagName === 'LI').map((item, index) => {
+        const text = [...item.childNodes]
+          .filter((child) => !(child.nodeType === Node.ELEMENT_NODE && child.tagName === 'INPUT'))
+          .map(annotationInlineMarkdown).join('').trim();
+        if (todo) return `- [${item.dataset.checked === 'true' ? 'x' : ' '}] ${text}`;
+        return `${tag === 'ol' ? `${index + 1}.` : '-'} ${text}`;
+      }).join('\n');
     }
-    if (tag === 'pre') return `\`\`\`\n${String(node.textContent || '').replace(/\n+$/, '')}\n\`\`\``;
+    if (tag === 'details') {
+      const summary = [...node.children].find((child) => child.tagName === 'SUMMARY');
+      const title = summary ? [...summary.childNodes].map(annotationInlineMarkdown).join('').trim() : '';
+      const body = [...node.childNodes]
+        .filter((child) => child !== summary)
+        .map(annotationBlockMarkdown).filter(Boolean).join('\n\n');
+      return `<details><summary>${title}</summary>\n\n${body}\n\n</details>`;
+    }
+    if (tag === 'pre') {
+      const code = [...node.children].find((child) => child.tagName === 'CODE');
+      const language = String(code?.className || '').match(/language-([\w+#.-]+)/)?.[1] || '';
+      return `\`\`\`${language}\n${String(node.textContent || '').replace(/\n+$/, '')}\n\`\`\``;
+    }
     if (tag === 'br') return '';
+    // execCommand nests the list it creates inside the paragraph it replaced
+    // (`<p><ol>…</ol></p>`), so a container holding blocks has to recurse.
+    // Flattening it through the inline path would drop the list entirely.
+    if (noteHasBlockChild(node)) {
+      return [...node.childNodes].map(annotationBlockMarkdown).filter(Boolean).join('\n\n');
+    }
     return escapeAnnotationMarkdownBlockStart(content);
   }
 
@@ -6812,6 +6941,8 @@
     const body = popover.querySelector('.annotation-note-popover-body');
     const actions = popover.querySelector('.annotation-note-popover-actions');
     if (!body || !actions) return;
+    notePopoverHover.pinned = true;
+    cancelNoteHoverClose();
     popover.classList.add('is-editing');
     const shell = doc.createElement('div');
     shell.className = 'annotation-note-editor-shell';
@@ -9100,6 +9231,461 @@
     return payload.asset;
   }
 
+  function noteEditorElement() { return $('#notes-editor'); }
+
+  // The formatting commands rewrite the DOM directly, which the browser's own
+  // undo stack does not record — it would silently skip past them and revert
+  // earlier typing instead. So this editor owns its whole history.
+  const NOTE_HISTORY_LIMIT = 160;
+  const NOTE_HISTORY_COALESCE_MS = 400;
+  const noteHistory = { entries: [], index: -1, timer: null, applying: false };
+
+  function noteCaretOffsets() {
+    const editor = noteEditorElement();
+    const selection = window.getSelection();
+    if (!editor || !selection?.rangeCount) return null;
+    const range = selection.getRangeAt(0);
+    if (!editor.contains(range.commonAncestorContainer)) return null;
+    const prefix = range.cloneRange();
+    prefix.selectNodeContents(editor);
+    prefix.setEnd(range.startContainer, range.startOffset);
+    const start = prefix.toString().length;
+    return { start, end: start + range.toString().length };
+  }
+
+  function restoreNoteCaret(offsets) {
+    const editor = noteEditorElement();
+    if (!editor || !offsets) return;
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, null);
+    let seen = 0;
+    let start = null;
+    let end = null;
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const length = node.nodeValue.length;
+      if (!start && seen + length >= offsets.start) start = { node, offset: offsets.start - seen };
+      if (!end && seen + length >= offsets.end) end = { node, offset: offsets.end - seen };
+      seen += length;
+      if (start && end) break;
+    }
+    if (!start) return;
+    const range = document.createRange();
+    try {
+      range.setStart(start.node, Math.min(start.offset, start.node.nodeValue.length));
+      const tail = end || start;
+      range.setEnd(tail.node, Math.min(tail.offset, tail.node.nodeValue.length));
+    } catch (_error) {
+      return;
+    }
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function resetNoteHistory() {
+    const editor = noteEditorElement();
+    window.clearTimeout(noteHistory.timer);
+    noteHistory.timer = null;
+    noteHistory.applying = false;
+    noteHistory.entries = editor ? [{ html: editor.innerHTML, caret: null }] : [];
+    noteHistory.index = editor ? 0 : -1;
+  }
+
+  function commitNoteHistory({ immediate = false } = {}) {
+    const editor = noteEditorElement();
+    if (!editor || noteHistory.applying) return;
+    const record = () => {
+      noteHistory.timer = null;
+      const html = editor.innerHTML;
+      if (noteHistory.entries[noteHistory.index]?.html === html) return;
+      noteHistory.entries = noteHistory.entries.slice(0, noteHistory.index + 1);
+      noteHistory.entries.push({ html, caret: noteCaretOffsets() });
+      if (noteHistory.entries.length > NOTE_HISTORY_LIMIT) noteHistory.entries.shift();
+      noteHistory.index = noteHistory.entries.length - 1;
+    };
+    window.clearTimeout(noteHistory.timer);
+    if (immediate) record();
+    else noteHistory.timer = window.setTimeout(record, NOTE_HISTORY_COALESCE_MS);
+  }
+
+  function stepNoteHistory(delta) {
+    const editor = noteEditorElement();
+    const next = noteHistory.index + delta;
+    if (!editor || next < 0 || next >= noteHistory.entries.length) return false;
+    window.clearTimeout(noteHistory.timer);
+    noteHistory.timer = null;
+    noteHistory.applying = true;
+    try {
+      noteHistory.index = next;
+      const entry = noteHistory.entries[next];
+      editor.innerHTML = entry.html;
+      hydrateFrameMath(document);
+      editor.focus();
+      restoreNoteCaret(entry.caret);
+      updateArticleNotesEmptyState(editor);
+    } finally {
+      noteHistory.applying = false;
+    }
+    hideNoteFormatBar();
+    closeNoteSlashMenu();
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }
+
+  function noteSelectionRange() {
+    const editor = noteEditorElement();
+    const selection = window.getSelection();
+    if (!editor || !selection?.rangeCount) return null;
+    const range = selection.getRangeAt(0);
+    if (range.collapsed || !editor.contains(range.commonAncestorContainer)) return null;
+    return range;
+  }
+
+  // Every inline command works on the text runs a range touches. Wrapping runs
+  // one at a time keeps a selection that spans two paragraphs from producing
+  // block elements nested inside an inline tag.
+  function noteRangeSlices(range) {
+    const editor = noteEditorElement();
+    if (!editor || !range) return [];
+    const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT, null);
+    const slices = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (!node.nodeValue || node.parentElement?.closest('.note-math')) continue;
+      if (!range.intersectsNode(node)) continue;
+      const start = node === range.startContainer ? range.startOffset : 0;
+      const end = node === range.endContainer ? range.endOffset : node.nodeValue.length;
+      if (end > start) slices.push({ node, start, end });
+    }
+    return slices;
+  }
+
+  function unwrapNoteElement(element) {
+    const parent = element?.parentNode;
+    if (!parent) return;
+    while (element.firstChild) parent.insertBefore(element.firstChild, element);
+    parent.removeChild(element);
+  }
+
+  function noteSliceWrapper(slice, selector) {
+    return slice.node.parentElement?.closest(selector) || null;
+  }
+
+  function wrapNoteSlices(slices, createWrapper) {
+    const wrappers = [];
+    slices.forEach(({ node, start, end }) => {
+      if (!node.parentNode) return;
+      const slice = document.createRange();
+      slice.setStart(node, start);
+      slice.setEnd(node, end);
+      const wrapper = createWrapper();
+      try {
+        wrapper.appendChild(slice.extractContents());
+        slice.insertNode(wrapper);
+        wrappers.push(wrapper);
+      } catch (_error) {
+        // A run that moved out of the tree mid-pass simply keeps its old format.
+      }
+    });
+    return wrappers;
+  }
+
+  function selectNoteWrappers(wrappers) {
+    if (!wrappers.length) return;
+    const range = document.createRange();
+    range.setStartBefore(wrappers[0]);
+    range.setEndAfter(wrappers[wrappers.length - 1]);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function toggleNoteWrapper(range, selector, createWrapper, matches) {
+    const slices = noteRangeSlices(range);
+    if (!slices.length) return;
+    const wrappers = slices.map((slice) => noteSliceWrapper(slice, selector));
+    if (wrappers.every((wrapper) => wrapper && matches(wrapper))) {
+      // Deliberately no normalize(): the precomputed runs must stay valid.
+      [...new Set(wrappers)].forEach(unwrapNoteElement);
+      return;
+    }
+    [...new Set(wrappers.filter(Boolean))].forEach(unwrapNoteElement);
+    selectNoteWrappers(wrapNoteSlices(slices, createWrapper));
+  }
+
+  function applyNoteInlineFormat(kind, value = '') {
+    const editor = noteEditorElement();
+    const range = noteSelectionRange();
+    if (!editor || !range) return;
+    if (kind === 'bold' || kind === 'italic' || kind === 'strike') {
+      document.execCommand(kind === 'bold' ? 'bold' : kind === 'italic' ? 'italic' : 'strikeThrough', false, null);
+    } else if (kind === 'code') {
+      toggleNoteWrapper(range, 'code', () => document.createElement('code'), () => true);
+    } else if (kind === 'mark') {
+      const token = noteColorToken(value, 'yellow');
+      toggleNoteWrapper(range, 'mark', () => {
+        const mark = document.createElement('mark');
+        mark.className = `note-mark note-mark-${token}`;
+        mark.dataset.color = token;
+        return mark;
+      }, (wrapper) => wrapper.dataset.color === token);
+    } else if (kind === 'color') {
+      const token = noteColorToken(value, 'red');
+      toggleNoteWrapper(range, 'span.note-color', () => {
+        const span = document.createElement('span');
+        span.className = `note-color note-color-${token}`;
+        span.dataset.color = token;
+        return span;
+      }, (wrapper) => wrapper.dataset.color === token);
+    } else if (kind === 'math') {
+      const tex = range.toString().trim();
+      if (!tex) return;
+      const node = document.createElement('span');
+      node.className = 'note-math';
+      node.dataset.tex = tex;
+      node.contentEditable = 'false';
+      range.deleteContents();
+      range.insertNode(node);
+      hydrateFrameMath(document);
+      selectNoteWrappers([node]);
+    } else if (kind === 'link') {
+      const href = window.prompt('链接地址', 'https://');
+      if (!href || !/^https?:\/\//i.test(href)) return;
+      toggleNoteWrapper(range, 'a', () => {
+        const anchor = document.createElement('a');
+        anchor.href = href;
+        anchor.target = '_blank';
+        anchor.rel = 'noopener';
+        return anchor;
+      }, () => false);
+    } else if (kind === 'clear') {
+      ['mark', 'span.note-color', 'code', 'a', 'del', 's', 'strike', 'strong', 'b', 'em', 'i'].forEach((selector) => {
+        const current = noteSelectionRange();
+        if (!current) return;
+        [...new Set(noteRangeSlices(current).map((slice) => noteSliceWrapper(slice, selector)).filter(Boolean))]
+          .forEach(unwrapNoteElement);
+      });
+    }
+    editor.focus();
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    commitNoteHistory({ immediate: true });
+    positionNoteFormatBar();
+  }
+
+  const NOTE_COLOR_LABELS = { red: '红色', orange: '橙色', yellow: '黄色', green: '绿色', blue: '蓝色', purple: '紫色', gray: '灰色' };
+
+  const NOTE_SLASH_ITEMS = [
+    { id: 'h1', icon: 'H1', label: '一级标题', keywords: 'h1 heading title 标题' },
+    { id: 'h2', icon: 'H2', label: '二级标题', keywords: 'h2 heading 标题' },
+    { id: 'h3', icon: 'H3', label: '三级标题', keywords: 'h3 heading 标题' },
+    { id: 'todo', icon: '☑', label: '待办事项', keywords: 'todo task check 待办 清单' },
+    { id: 'ul', icon: '•', label: '项目列表', keywords: 'ul bullet list 列表' },
+    { id: 'ol', icon: '1.', label: '编号列表', keywords: 'ol number list 编号 列表' },
+    { id: 'quote', icon: '❝', label: '引用', keywords: 'quote blockquote 引用' },
+    { id: 'code', icon: '{ }', label: '代码块', keywords: 'code pre 代码' },
+    { id: 'math', icon: '∑', label: '公式块', keywords: 'math formula latex tex 公式' },
+    { id: 'details', icon: '▸', label: '折叠块', keywords: 'toggle details fold 折叠' },
+    { id: 'divider', icon: '—', label: '分隔线', keywords: 'divider hr rule 分隔' },
+    { id: 'image', icon: '🖼', label: '图片', keywords: 'image picture 图片' },
+  ];
+
+  const noteSlash = { open: false, query: '', index: 0 };
+
+  function placeCaretInNote(node, atStart = true) {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    range.collapse(atStart);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  function noteCurrentBlock() {
+    const editor = noteEditorElement();
+    const selection = window.getSelection();
+    if (!editor || !selection?.rangeCount) return null;
+    let node = selection.getRangeAt(0).startContainer;
+    if (node === editor) return null;
+    while (node && node.parentNode && node.parentNode !== editor) node = node.parentNode;
+    return node?.parentNode === editor ? node : null;
+  }
+
+  function noteSlashContext() {
+    const editor = noteEditorElement();
+    const selection = window.getSelection();
+    if (!editor || !selection?.rangeCount) return null;
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed) return null;
+    const node = range.startContainer;
+    if (node.nodeType !== Node.TEXT_NODE || !editor.contains(node)) return null;
+    const before = node.nodeValue.slice(0, range.startOffset);
+    const match = before.match(/(?:^|\s)\/([^\s/]*)$/);
+    if (!match) return null;
+    return { node, query: match[1], start: range.startOffset - match[1].length - 1, end: range.startOffset };
+  }
+
+  function noteSlashMatches() {
+    const query = noteSlash.query.trim().toLowerCase();
+    if (!query) return NOTE_SLASH_ITEMS;
+    return NOTE_SLASH_ITEMS.filter((item) => `${item.id} ${item.label} ${item.keywords}`.toLowerCase().includes(query));
+  }
+
+  function closeNoteSlashMenu() {
+    const menu = $('#note-slash-menu');
+    noteSlash.open = false;
+    noteSlash.query = '';
+    noteSlash.index = 0;
+    if (menu) menu.hidden = true;
+  }
+
+  function renderNoteSlashMenu() {
+    const menu = $('#note-slash-menu');
+    if (!menu) return;
+    const matches = noteSlashMatches();
+    if (!matches.length) {
+      menu.innerHTML = '<div class="note-slash-empty">没有匹配的块</div>';
+      return;
+    }
+    noteSlash.index = Math.max(0, Math.min(noteSlash.index, matches.length - 1));
+    menu.innerHTML = matches.map((item, index) => `<button type="button" role="option" class="note-slash-item" data-note-slash="${item.id}" aria-selected="${index === noteSlash.index ? 'true' : 'false'}"><span>${item.icon}</span><span>${item.label}</span></button>`).join('');
+    menu.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'nearest' });
+  }
+
+  function openNoteSlashMenu() {
+    const menu = $('#note-slash-menu');
+    const selection = window.getSelection();
+    if (!menu || !selection?.rangeCount) return;
+    const rect = selection.getRangeAt(0).getBoundingClientRect();
+    noteSlash.open = true;
+    menu.hidden = false;
+    renderNoteSlashMenu();
+    const left = Math.min(Math.max(rect.left, 8), window.innerWidth - menu.offsetWidth - 8);
+    const below = rect.bottom + 6;
+    const top = below + menu.offsetHeight > window.innerHeight - 8 ? Math.max(8, rect.top - menu.offsetHeight - 6) : below;
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+  }
+
+  function applyNoteSlashCommand(id) {
+    const editor = noteEditorElement();
+    const context = noteSlashContext();
+    if (!editor) return;
+    if (context) {
+      const range = document.createRange();
+      range.setStart(context.node, context.start);
+      range.setEnd(context.node, context.end);
+      range.deleteContents();
+      placeCaretInNote(context.node, false);
+      const collapsed = document.createRange();
+      collapsed.setStart(context.node, context.start);
+      collapsed.collapse(true);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(collapsed);
+    }
+    closeNoteSlashMenu();
+    const block = noteCurrentBlock();
+    const create = (html) => {
+      const holder = document.createElement('div');
+      holder.innerHTML = html;
+      return holder.firstElementChild;
+    };
+    const swap = (element, caretTarget = null) => {
+      if (block) block.replaceWith(element); else editor.appendChild(element);
+      placeCaretInNote(caretTarget || element, true);
+    };
+    const text = block ? block.textContent.trim() : '';
+    if (/^h[123]$/.test(id)) {
+      swap(create(`<${id}>${escapeHTML(text)}</${id}>`));
+    } else if (id === 'todo') {
+      const list = create('<ul class="note-todo"><li data-checked="false"><input type="checkbox" contenteditable="false"></li></ul>');
+      const item = list.querySelector('li');
+      item.appendChild(document.createTextNode(text));
+      swap(list, item);
+    } else if (id === 'ul' || id === 'ol') {
+      const list = create(`<${id}><li>${escapeHTML(text)}</li></${id}>`);
+      swap(list, list.querySelector('li'));
+    } else if (id === 'quote') {
+      swap(create(`<blockquote>${escapeHTML(text)}</blockquote>`));
+    } else if (id === 'code') {
+      const pre = create('<pre><code></code></pre>');
+      pre.querySelector('code').textContent = text;
+      swap(pre, pre.querySelector('code'));
+      editor.insertBefore(create('<p><br></p>'), pre.nextSibling);
+    } else if (id === 'math') {
+      const tex = window.prompt('输入 LaTeX 公式', text || '\\frac{a}{b}');
+      if (!tex) return;
+      const node = create('<div class="note-math math-display" contenteditable="false"></div>');
+      node.dataset.tex = tex;
+      const trailer = create('<p><br></p>');
+      if (block) block.replaceWith(node); else editor.appendChild(node);
+      node.after(trailer);
+      hydrateFrameMath(document);
+      placeCaretInNote(trailer, true);
+    } else if (id === 'details') {
+      const details = create('<details open><summary>折叠标题</summary><p><br></p></details>');
+      swap(details, details.querySelector('summary'));
+    } else if (id === 'divider') {
+      const rule = create('<hr>');
+      const trailer = create('<p><br></p>');
+      if (block) block.replaceWith(rule); else editor.appendChild(rule);
+      rule.after(trailer);
+      placeCaretInNote(trailer, true);
+    } else if (id === 'image') {
+      $('#insert-image-button')?.click();
+      return;
+    }
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    commitNoteHistory({ immediate: true });
+  }
+
+  function closeNoteFormatPalette() {
+    const palette = $('#note-format-palette');
+    if (palette) palette.hidden = true;
+    $$('#note-format-bar [data-note-menu]').forEach((button) => button.setAttribute('aria-expanded', 'false'));
+  }
+
+  function hideNoteFormatBar() {
+    const bar = $('#note-format-bar');
+    if (!bar || bar.hidden) return;
+    closeNoteFormatPalette();
+    bar.hidden = true;
+  }
+
+  function positionNoteFormatBar() {
+    const bar = $('#note-format-bar');
+    const editor = noteEditorElement();
+    const range = noteSelectionRange();
+    if (!bar || !editor || !range) { hideNoteFormatBar(); return; }
+    const rect = range.getBoundingClientRect();
+    if (!rect.width && !rect.height) { hideNoteFormatBar(); return; }
+    const bounds = editor.getBoundingClientRect();
+    bar.hidden = false;
+    const width = bar.offsetWidth;
+    const height = bar.offsetHeight;
+    const left = Math.min(
+      Math.max(rect.left + rect.width / 2 - width / 2, 8),
+      window.innerWidth - width - 8,
+    );
+    const above = rect.top - height - 8;
+    const top = above > bounds.top - height ? above : rect.bottom + 8;
+    bar.style.left = `${Math.round(left)}px`;
+    bar.style.top = `${Math.round(Math.max(8, top))}px`;
+  }
+
+  function openNoteFormatPalette(kind, anchor) {
+    const palette = $('#note-format-palette');
+    if (!palette) return;
+    const active = anchor.getAttribute('aria-expanded') === 'true';
+    closeNoteFormatPalette();
+    if (active) return;
+    palette.dataset.kind = kind;
+    palette.innerHTML = NOTE_COLOR_TOKENS.map((token) => `<button type="button" role="menuitem" class="note-format-swatch note-format-swatch-${kind}" data-note-color="${token}" style="--swatch-color:var(--note-${kind === 'mark' ? 'mark-' : ''}${token})" title="${NOTE_COLOR_LABELS[token]}" aria-label="${NOTE_COLOR_LABELS[token]}"></button>`).join('')
+      + '<button type="button" role="menuitem" class="note-format-swatch note-format-swatch-none" data-note-color="none" title="清除" aria-label="清除">⌫</button>';
+    palette.hidden = false;
+    anchor.setAttribute('aria-expanded', 'true');
+  }
+
   function renderMarkdown(markdown, jobId = state.activeJob?.job_id) {
     const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
     const inline = (value) => {
@@ -9109,6 +9695,12 @@
         return `\uE000${escaped.length - 1}\uE001`;
       });
       let safe = escapeHTML(protectedValue);
+      // TeX is full of _ and *, so park formulas before the emphasis passes run.
+      const formulas = [];
+      safe = safe.replace(/\$([^$\n]+?)\$/g, (_match, tex) => {
+        formulas.push(tex);
+        return `\uE002${formulas.length - 1}\uE003`;
+      });
       safe = safe.replace(/!\[([^\]]*)\]\((data:image\/[a-zA-Z0-9.+-]+;base64,[^)]+)\)/g, '<img alt="$1" src="$2">');
       safe = safe.replace(/!\[([^\]]*)\]\((assets\/[a-f0-9]{64}\.(?:png|jpg|webp|gif))\)/gi, (_match, alt, ref) => {
         const source = noteAssetURL(ref, jobId);
@@ -9117,12 +9709,29 @@
       safe = safe.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
       safe = safe.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>').replace(/__(.+?)__/g, '<strong>$1</strong>');
       safe = safe.replace(/\*(.+?)\*/g, '<em>$1</em>').replace(/_(.+?)_/g, '<em>$1</em>');
+      safe = safe.replace(/~~(.+?)~~/g, '<del>$1</del>');
       safe = safe.replace(/`([^`]+)`/g, '<code>$1</code>');
+      // The only markup allowed straight from the note source: an exact escaped
+      // tag pair whose colour is one of the enumerated tokens. Everything else
+      // stays escaped, so this stays a whitelist rather than an innerHTML hole.
+      safe = safe
+        .replace(
+          new RegExp(`&lt;mark data-color=&quot;(${NOTE_COLOR_PATTERN})&quot;&gt;([\\s\\S]*?)&lt;/mark&gt;`, 'g'),
+          (_match, token, inner) => `<mark class="note-mark note-mark-${token}" data-color="${token}">${inner}</mark>`,
+        )
+        .replace(
+          new RegExp(`&lt;span data-color=&quot;(${NOTE_COLOR_PATTERN})&quot;&gt;([\\s\\S]*?)&lt;/span&gt;`, 'g'),
+          (_match, token, inner) => `<span class="note-color note-color-${token}" data-color="${token}">${inner}</span>`,
+        );
+      safe = safe.replace(/\uE002(\d+)\uE003/g, (_match, index) => `<span class="note-math" data-tex="${formulas[Number(index)] || ''}" contenteditable="false"></span>`);
       return safe.replace(/\uE000(\d+)\uE001/g, (_match, index) => escapeHTML(escaped[Number(index)] || ''));
     };
     const html = [];
     let paragraph = [];
     let list = null;
+    let fence = null;
+    let mathBlock = null;
+    let detailsBodyStart = -1;
     const flushParagraph = () => {
       if (!paragraph.length) return;
       html.push(`<p>${paragraph.map(inline).join('<br>')}</p>`);
@@ -9130,26 +9739,78 @@
     };
     const flushList = () => {
       if (!list) return;
-      html.push(`<${list.type}>${list.items.map((item) => `<li>${inline(item)}</li>`).join('')}</${list.type}>`);
+      const items = list.items.map((item) => (list.todo
+        ? `<li data-checked="${item.checked ? 'true' : 'false'}"><input type="checkbox" contenteditable="false"${item.checked ? ' checked' : ''}>${inline(item.text)}</li>`
+        : `<li>${inline(item.text)}</li>`)).join('');
+      html.push(`<${list.type}${list.todo ? ' class="note-todo"' : ''}>${items}</${list.type}>`);
       list = null;
     };
+    const flushFence = () => {
+      if (!fence) return;
+      const language = fence.language ? ` class="language-${fence.language}"` : '';
+      html.push(`<pre><code${language}>${escapeHTML(fence.lines.join('\n'))}</code></pre>`);
+      fence = null;
+    };
+    const flushMathBlock = () => {
+      if (!mathBlock) return;
+      html.push(`<div class="note-math math-display" data-tex="${escapeHTML(mathBlock.join('\n').trim())}" contenteditable="false"></div>`);
+      mathBlock = null;
+    };
     for (const line of lines) {
+      if (fence) {
+        if (/^```\s*$/.test(line)) flushFence();
+        else fence.lines.push(line);
+        continue;
+      }
+      if (mathBlock) {
+        if (/^\s*\$\$\s*$/.test(line)) flushMathBlock();
+        else mathBlock.push(line);
+        continue;
+      }
+      const fenceOpen = line.match(/^```([\w+#.-]*)\s*$/);
+      if (fenceOpen) { flushParagraph(); flushList(); fence = { language: fenceOpen[1] || '', lines: [] }; continue; }
+      const mathInline = line.match(/^\s*\$\$(.+)\$\$\s*$/);
+      if (mathInline) { flushParagraph(); flushList(); html.push(`<div class="note-math math-display" data-tex="${escapeHTML(mathInline[1].trim())}" contenteditable="false"></div>`); continue; }
+      if (/^\s*\$\$\s*$/.test(line)) { flushParagraph(); flushList(); mathBlock = []; continue; }
+      const detailsOpen = line.match(/^<details><summary>(.*)<\/summary>\s*$/);
+      if (detailsOpen) {
+        flushParagraph(); flushList();
+        html.push(`<details open><summary>${inline(detailsOpen[1])}</summary>`);
+        detailsBodyStart = html.length;
+        continue;
+      }
+      if (/^<\/details>\s*$/.test(line)) {
+        flushParagraph(); flushList();
+        // A toggle with no body would leave nowhere to place the caret.
+        if (detailsBodyStart === html.length) html.push('<p><br></p>');
+        detailsBodyStart = -1;
+        html.push('</details>');
+        continue;
+      }
+      if (/^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { flushParagraph(); flushList(); html.push('<hr>'); continue; }
       const heading = line.match(/^(#{1,3})\s+(.+)$/);
+      const todo = line.match(/^\s*[-*+]\s+\[([ xX])\]\s*(.*)$/);
       const bullet = line.match(/^\s*[-*+]\s+(.+)$/);
       const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
       if (!line.trim()) { flushParagraph(); flushList(); continue; }
       if (heading) { flushParagraph(); flushList(); html.push(`<h${heading[1].length}>${inline(heading[2])}</h${heading[1].length}>`); continue; }
+      if (todo) {
+        flushParagraph();
+        if (!list || list.type !== 'ul' || !list.todo) { flushList(); list = { type: 'ul', todo: true, items: [] }; }
+        list.items.push({ text: todo[2], checked: todo[1].toLowerCase() === 'x' });
+        continue;
+      }
       if (bullet || ordered) {
         flushParagraph();
         const type = bullet ? 'ul' : 'ol';
-        if (!list || list.type !== type) { flushList(); list = { type, items: [] }; }
-        list.items.push((bullet || ordered)[1]);
+        if (!list || list.type !== type || list.todo) { flushList(); list = { type, todo: false, items: [] }; }
+        list.items.push({ text: (bullet || ordered)[1] });
         continue;
       }
       if (/^>\s?/.test(line)) { flushParagraph(); flushList(); html.push(`<blockquote>${inline(line.replace(/^>\s?/, ''))}</blockquote>`); continue; }
       paragraph.push(line);
     }
-    flushParagraph(); flushList();
+    flushParagraph(); flushList(); flushFence(); flushMathBlock();
     return html.join('');
   }
 
@@ -9245,6 +9906,8 @@
       draft = null;
     }
     editor.innerHTML = renderMarkdown(draft?.markdown ?? markdown, jobId);
+    hydrateFrameMath(document);
+    resetNoteHistory();
     editor.contentEditable = 'true';
     editor.setAttribute('aria-busy', 'false');
     setArticleNotesControlsDisabled(false);
@@ -9397,6 +10060,7 @@
     selection.addRange(nextRange);
     articleNoteImageRange = nextRange.cloneRange();
     editor.dispatchEvent(new Event('input', { bubbles: true }));
+    commitNoteHistory({ immediate: true });
     await saveNotes();
   }
 
@@ -9420,6 +10084,7 @@
       if (command) document.execCommand(command, false, value || null);
       articleNoteImageRange = articleNotesSelectionRange();
       editor.dispatchEvent(new Event('input', { bubbles: true }));
+    commitNoteHistory({ immediate: true });
     });
   });
 
@@ -9440,15 +10105,109 @@
       if (pending) queueArticleNotesSave(pending);
     }, 1200);
   });
+  // The bar follows the selection rather than the caret, so it is driven by
+  // selectionchange and repositioned whenever the panel moves under it.
+  document.addEventListener('selectionchange', () => {
+    if (document.activeElement?.closest('#note-format-bar')) return;
+    positionNoteFormatBar();
+  });
+  // Electron's Edit menu and the trackpad gesture reach the editor as
+  // beforeinput rather than a key event, so route those through the same stack.
+  $('#notes-editor').addEventListener('beforeinput', (event) => {
+    if (event.inputType !== 'historyUndo' && event.inputType !== 'historyRedo') return;
+    event.preventDefault();
+    stepNoteHistory(event.inputType === 'historyUndo' ? -1 : 1);
+  });
+  $('#notes-editor').addEventListener('input', () => {
+    commitNoteHistory();
+    const context = noteSlashContext();
+    if (!context) { closeNoteSlashMenu(); return; }
+    noteSlash.query = context.query;
+    if (noteSlash.open) renderNoteSlashMenu(); else openNoteSlashMenu();
+  });
+  $('#note-slash-menu').addEventListener('pointerdown', (event) => event.preventDefault());
+  $('#note-slash-menu').addEventListener('click', (event) => {
+    const item = event.target.closest('[data-note-slash]');
+    if (item) applyNoteSlashCommand(item.dataset.noteSlash);
+  });
+  $('#note-format-bar').addEventListener('pointerdown', (event) => event.preventDefault());
+  $('#note-format-bar').addEventListener('click', (event) => {
+    const swatch = event.target.closest('[data-note-color]');
+    if (swatch) {
+      const kind = $('#note-format-palette').dataset.kind === 'mark' ? 'mark' : 'color';
+      const value = swatch.dataset.noteColor;
+      closeNoteFormatPalette();
+      if (value === 'none') {
+        const range = noteSelectionRange();
+        if (range) {
+          [...new Set(noteRangeSlices(range)
+            .map((slice) => noteSliceWrapper(slice, kind === 'mark' ? 'mark' : 'span.note-color'))
+            .filter(Boolean))].forEach(unwrapNoteElement);
+          noteEditorElement()?.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        return;
+      }
+      applyNoteInlineFormat(kind, value);
+      return;
+    }
+    const menu = event.target.closest('[data-note-menu]');
+    if (menu) { openNoteFormatPalette(menu.dataset.noteMenu, menu); return; }
+    const action = event.target.closest('[data-note-format]');
+    if (action) { closeNoteFormatPalette(); applyNoteInlineFormat(action.dataset.noteFormat); }
+  });
+  $('#notes-panel')?.addEventListener('scroll', () => positionNoteFormatBar(), { passive: true, capture: true });
+  document.addEventListener('pointerdown', (event) => {
+    if (event.target.closest('#note-format-bar') || event.target.closest('#notes-editor')) return;
+    hideNoteFormatBar();
+  }, { capture: true });
   const rememberArticleNoteSelection = () => {
     const range = articleNotesSelectionRange();
     if (range) articleNoteImageRange = range;
   };
+  $('#notes-editor').addEventListener('click', (event) => {
+    const box = event.target.closest('ul.note-todo input[type="checkbox"]');
+    if (!box) return;
+    const item = box.closest('li');
+    if (!item) return;
+    const checked = !(item.dataset.checked === 'true');
+    item.dataset.checked = checked ? 'true' : 'false';
+    box.checked = checked;
+    event.currentTarget.dispatchEvent(new Event('input', { bubbles: true }));
+  });
   $('#notes-editor').addEventListener('mouseup', rememberArticleNoteSelection);
   $('#notes-editor').addEventListener('keyup', rememberArticleNoteSelection);
   $('#notes-editor').addEventListener('keydown', (event) => {
     const modifier = event.metaKey || event.ctrlKey;
     const key = event.key.toLowerCase();
+    if (modifier && key === 'z') {
+      event.preventDefault();
+      stepNoteHistory(event.shiftKey ? 1 : -1);
+      return;
+    }
+    if (modifier && key === 'y') {
+      event.preventDefault();
+      stepNoteHistory(1);
+      return;
+    }
+    if (noteSlash.open) {
+      const matches = noteSlashMatches();
+      if (event.key === 'Escape') { event.preventDefault(); closeNoteSlashMenu(); return; }
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (!matches.length) return;
+        const step = event.key === 'ArrowDown' ? 1 : -1;
+        noteSlash.index = (noteSlash.index + step + matches.length) % matches.length;
+        renderNoteSlashMenu();
+        return;
+      }
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        if (!matches.length) { closeNoteSlashMenu(); return; }
+        event.preventDefault();
+        applyNoteSlashCommand(matches[noteSlash.index].id);
+        return;
+      }
+    }
+    if (event.key === 'Escape') { hideNoteFormatBar(); return; }
     if (modifier && key === 'a') {
       event.preventDefault();
       const range = document.createRange();
@@ -10681,6 +11440,8 @@
       if ($('#setting-metadata-auto')) $('#setting-metadata-auto').checked = metadata.auto_retrieve !== false;
       if ($('#setting-metadata-online')) $('#setting-metadata-online').checked = metadata.online_lookup !== false;
       if ($('#setting-metadata-email')) $('#setting-metadata-email').value = metadata.contact_email || '';
+      const parsingBackend = settings.parsing?.backend || 'pipeline';
+      if ($('#setting-parsing-backend')) $('#setting-parsing-backend').value = parsingBackend;
       const shortcuts = settings.shortcuts || {};
       const normalizedShortcuts = Object.fromEntries(Object.entries({ ...state.shortcuts, ...shortcuts }).map(([key, value]) => [key, normalizeShortcut(value) || state.shortcuts[key]]));
       state.shortcuts = { ...state.shortcuts, ...normalizedShortcuts };
@@ -10691,6 +11452,10 @@
       $('#shortcut-highlight-note').value = state.shortcuts.highlight_note;
       $('#shortcut-underline-note').value = state.shortcuts.underline_note;
       state.highlightColor = normalizeHexColor(settings.highlight_color, state.highlightColor);
+      state.annotationColors = {
+        highlight: normalizeAnnotationColor(settings.annotation_colors?.highlight),
+        underline: normalizeAnnotationColor(settings.annotation_colors?.underline),
+      };
       state.appearance = normalizeAppearance(settings.appearance, appearanceDefaults);
       state.pendingAppearance = { ...state.appearance };
       renderAppearanceControls();
@@ -10717,6 +11482,9 @@
         auto_retrieve: Boolean($('#setting-metadata-auto')?.checked),
         online_lookup: Boolean($('#setting-metadata-online')?.checked),
         contact_email: $('#setting-metadata-email')?.value.trim() || '',
+      },
+      parsing: {
+        backend: $('#setting-parsing-backend')?.value || 'pipeline',
       },
     };
   }
