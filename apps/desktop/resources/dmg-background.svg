@@ -23,7 +23,7 @@
     <path d="m11.5 13.5 5 3-5 3V24l9-5.4v-4.2l-9-5.4v4.5Z" fill="#F97316"/>
   </g>
   <text x="91" y="48" fill="#2F2924" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="18" font-weight="700">安装谷子学术</text>
-  <text x="91" y="69" fill="#756A60" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="11.5">开源发布版 · 版本 0.1.7 · Apple 芯片</text>
+  <text x="91" y="69" fill="#756A60" font-family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif" font-size="11.5">开源发布版 · 版本 0.1.8 · Apple 芯片</text>
 
   <g opacity="0.9">
     <circle cx="168" cy="203" r="66" fill="#FFFFFF" stroke="#E9DED1"/>

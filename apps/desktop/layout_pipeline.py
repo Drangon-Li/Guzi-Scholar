@@ -1084,7 +1084,9 @@ def _find_formula_dir(pdf_path: Path, source_name: Optional[str] = None) -> Opti
     return None
 
 
-def _stop_mineru_process(process: subprocess.Popen) -> str:
+def _stop_mineru_process(process: subprocess.Popen) -> None:
+    # stdout is owned by the _MineruOutputMonitor reader thread, so this only
+    # terminates the process group and must never call communicate().
     if process.poll() is None:
         try:
             if os.name == "posix":
@@ -1094,8 +1096,7 @@ def _stop_mineru_process(process: subprocess.Popen) -> str:
         except (OSError, ProcessLookupError):
             pass
     try:
-        stdout, _ = process.communicate(timeout=5)
-        return stdout or ""
+        process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         try:
             if os.name == "posix":
@@ -1104,8 +1105,124 @@ def _stop_mineru_process(process: subprocess.Popen) -> str:
                 process.kill()
         except (OSError, ProcessLookupError):
             pass
-        stdout, _ = process.communicate()
-        return stdout or ""
+        process.wait()
+
+
+MINERU_PROGRESS_RE = re.compile(
+    r"^(?P<stage>[A-Za-z][A-Za-z0-9 ()/_-]{0,48}):\s+\d{1,3}%\|.*\|\s*(?P<done>\d+)/(?P<total>\d+)\b"
+)
+
+# Window boundaries follow the measured share of a hybrid-engine run, where
+# the VLM "Predict" bars consume ~90% of the wall time; unknown bars keep the
+# monotonic floor so progress never moves backwards across stages.
+_MINERU_STAGE_WINDOWS = (
+    ("layout predict", "版面检测", 0.02, 0.08),
+    ("table orientation", "表格方向分析", 0.08, 0.10),
+    ("mfd predict", "公式检测", 0.10, 0.12),
+    ("mfr predict", "公式识别", 0.12, 0.16),
+    ("processing pages", "汇总解析结果", 0.96, 1.0),
+    ("ocr-det", "文字检测", 0.88, 0.94),
+    ("ocr-rec", "文字识别", 0.94, 0.96),
+    ("predict", "AI 深度解析", 0.16, 0.88),
+)
+
+
+def _mineru_progress_update(line: str) -> Optional[Tuple[str, int, int]]:
+    match = MINERU_PROGRESS_RE.match(line)
+    if not match:
+        return None
+    done = int(match.group("done"))
+    total = int(match.group("total"))
+    if total <= 0 or done > total:
+        return None
+    return match.group("stage").strip(), done, total
+
+
+class _MineruOutputMonitor:
+    """Drain MinerU stdout while it runs.
+
+    Keeps the transcript for ``mineru.log`` and turns the tqdm bars (separated
+    by carriage returns, tail-buffered per chunk) into progress callbacks; the
+    run is otherwise silent for minutes during local VLM inference.
+    """
+
+    def __init__(self, stream: Any, progress: Optional[Callable[[str, float], None]]) -> None:
+        self._stream = stream
+        self._progress = progress
+        self._chunks: List[bytes] = []
+        self._pending = b""
+        self._thread: Optional[threading.Thread] = None
+        self._latest: Optional[Tuple[str, int, int]] = None
+        self._reported: Optional[Tuple[str, int, int]] = None
+        self._reported_at = 0.0
+        self._floor = 0.0
+
+    def start(self) -> None:
+        if self._stream is None:
+            return
+        self._thread = threading.Thread(target=self._drain, name="mineru-output", daemon=True)
+        self._thread.start()
+
+    def _drain(self) -> None:
+        try:
+            fd = self._stream.fileno()
+        except (OSError, ValueError, AttributeError):
+            return
+        while True:
+            try:
+                chunk = os.read(fd, 4096)
+            except (OSError, ValueError):
+                break
+            if not chunk:
+                break
+            self._chunks.append(chunk)
+            self._pending += chunk
+            *lines, self._pending = re.split(rb"[\r\n]", self._pending)
+            for raw in lines:
+                update = _mineru_progress_update(raw.decode("utf-8", "replace").strip())
+                if update is not None:
+                    self._latest = update
+
+    def emit(self) -> None:
+        # Runs on the polling thread so a cancellation raised by the progress
+        # callback unwinds through _run_mineru, not the reader thread.
+        if self._progress is None:
+            return
+        latest = self._latest
+        if latest is None or latest == self._reported:
+            return
+        now = time.monotonic()
+        if self._reported is not None and latest[0] == self._reported[0] and now - self._reported_at < 0.5:
+            return
+        stage, done, total = latest
+        label, fraction = self._describe(stage, done, total)
+        self._reported = latest
+        self._reported_at = now
+        self._progress(label, fraction)
+
+    def _describe(self, stage: str, done: int, total: int) -> Tuple[str, float]:
+        lowered = stage.lower()
+        label = stage
+        fraction = self._floor
+        for prefix, name, start, end in _MINERU_STAGE_WINDOWS:
+            if lowered.startswith(prefix):
+                label = name
+                fraction = start + (end - start) * (done / total)
+                break
+        self._floor = max(self._floor, min(1.0, fraction))
+        return f"{label} {done}/{total}", self._floor
+
+    def close(self) -> None:
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        try:
+            if self._stream is not None:
+                self._stream.close()
+        except OSError:
+            pass
+
+    def transcript(self) -> str:
+        return b"".join(self._chunks).decode("utf-8", "replace")
 
 
 def normalize_mineru_backend(value: Any) -> str:
@@ -1130,6 +1247,7 @@ def _run_mineru(
     backend: Optional[str] = None,
     runtime_root: Optional[Path] = None,
     cancel_event: Any = None,
+    progress: Optional[Callable[[str, float], None]] = None,
 ) -> Path:
     executable = Path(executable).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -1140,18 +1258,19 @@ def _run_mineru(
     ]
     acquired = False
     process: Optional[subprocess.Popen] = None
-    stdout = ""
+    monitor: Optional[_MineruOutputMonitor] = None
     try:
+        waiting_reported = False
         while not acquired:
             _raise_if_cancelled(cancel_event)
             acquired = MINERU_SEMAPHORE.acquire(timeout=0.2)
+            if not acquired and not waiting_reported and progress is not None:
+                progress("排队等待版面引擎空闲", 0.0)
+                waiting_reported = True
         _raise_if_cancelled(cancel_event)
         options: Dict[str, Any] = {
             "stdout": subprocess.PIPE,
             "stderr": subprocess.STDOUT,
-            "text": True,
-            "encoding": "utf-8",
-            "errors": "replace",
         }
         if os.name == "posix":
             options["start_new_session"] = True
@@ -1185,29 +1304,34 @@ def _run_mineru(
             options["cwd"] = str(managed_root)
             options["env"] = environment
         process = subprocess.Popen(command, **options)
+        monitor = _MineruOutputMonitor(process.stdout, progress)
+        monitor.start()
+        if progress is not None:
+            progress("启动本地版面引擎", 0.0)
         deadline = time.monotonic() + int(os.environ.get("MY_SCHOLAR_MINERU_TIMEOUT", "900"))
         while True:
             if cancel_event is not None and cancel_event.is_set():
-                stdout = _stop_mineru_process(process)
                 raise LayoutPipelineCancelled("AI 重排已取消。")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                stdout = _stop_mineru_process(process)
                 raise LayoutPipelineError("MinerU 运行超时。")
-            try:
-                stdout, _ = process.communicate(timeout=min(0.25, remaining))
+            if process.poll() is not None:
                 break
-            except subprocess.TimeoutExpired:
-                continue
+            monitor.emit()
+            time.sleep(min(0.25, remaining))
     except LayoutPipelineError:
         raise
     except OSError as exc:
         raise LayoutPipelineError(f"MinerU 运行失败：{exc}") from exc
     finally:
+        if process is not None:
+            _stop_mineru_process(process)
+        if monitor is not None:
+            monitor.close()
         if acquired:
             MINERU_SEMAPHORE.release()
-        if stdout or process is not None:
-            (output / "mineru.log").write_text(stdout or "", encoding="utf-8")
+        if process is not None:
+            (output / "mineru.log").write_text(monitor.transcript() if monitor else "", encoding="utf-8")
     if process is None or process.returncode != 0:
         returncode = process.returncode if process is not None else "unknown"
         raise LayoutPipelineError(f"MinerU 退出码 {returncode}，详见 mineru.log")
@@ -2814,6 +2938,11 @@ def process_layout_pdf(
     layout_dir = job_dir / "layout"
     if source_kind == "mineru-executable":
         resolved_backend = normalize_mineru_backend(mineru_backend)
+        mineru_progress: Optional[Callable[[str, float], None]] = None
+        if progress:
+            def mineru_progress(stage: str, fraction: float) -> None:
+                # MinerU owns the 0.12..0.62 span of the overall conversion.
+                progress(stage, 0.12 + 0.5 * max(0.0, min(1.0, fraction)))
         sidecar = _run_mineru(
             sidecar_or_bin,
             source_copy,
@@ -2821,6 +2950,7 @@ def process_layout_pdf(
             backend=resolved_backend,
             runtime_root=runtime_root,
             cancel_event=cancel_event,
+            progress=mineru_progress,
         )
         backend_name = f"MinerU local {resolved_backend}"
     else:

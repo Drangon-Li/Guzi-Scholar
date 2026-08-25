@@ -662,6 +662,10 @@
     if (viewId !== 'reader-view' && $('#reader-view')?.classList.contains('active-view')) captureCurrentReadingLocation();
     if (viewId !== 'settings-view' && $('#settings-view')?.classList.contains('active-view')) {
       void flushPendingSettings();
+      // The section hash exists so a reload lands back on the open settings
+      // category. Once the user leaves settings it must not hijack the next
+      // reload, so drop it together with the view.
+      if (/^#settings-[a-z-]+$/u.test(location.hash)) history.replaceState(null, '', location.pathname + location.search);
     }
     if (viewId !== 'library-view' && state.graphController) teardownLibraryGraph();
     if (viewId !== 'reader-view') {
@@ -705,7 +709,6 @@
     switchView(viewId);
   }
   $$('.nav-button').forEach((button) => button.addEventListener('click', () => openPrimaryView(button.dataset.view)));
-  $('#back-library')?.addEventListener('click', () => openPrimaryView('library-view'));
 
   const settingsNavigationLinks = $$('.settings-navigation a[href^="#settings-"]');
   let activeSettingsSectionId = settingsNavigationLinks[0]?.getAttribute('href')?.slice(1) || 'settings-reading';
@@ -2180,32 +2183,6 @@
   function closeAllRowMenus(except = null) {
     $$('.library-row.menu-open').forEach((row) => { if (row !== except) closeRowMenu(row); });
   }
-  function closeReadingStatusMenus(except = null) {
-    document.querySelectorAll('.reading-status-menu:not([hidden])').forEach((menu) => {
-      if (menu === except) return;
-      menu.hidden = true;
-      menu.classList.remove('menu-up');
-      menu.style.removeProperty('top');
-      menu.style.removeProperty('left');
-      menu.closest('.reading-status-control')?.querySelector('[data-status-picker-button]')?.setAttribute('aria-expanded', 'false');
-    });
-  }
-  function positionReadingStatusMenu(button, menu) {
-    if (!button || !menu || menu.hidden) return;
-    const buttonRect = button.getBoundingClientRect();
-    const menuRect = menu.getBoundingClientRect();
-    const gap = 5;
-    const padding = 8;
-    const spaceBelow = window.innerHeight - buttonRect.bottom - padding;
-    const spaceAbove = buttonRect.top - padding;
-    const menuUp = spaceBelow < menuRect.height + gap && spaceAbove >= menuRect.height + gap;
-    const preferredTop = menuUp ? buttonRect.top - menuRect.height - gap : buttonRect.bottom + gap;
-    const top = Math.max(padding, Math.min(window.innerHeight - menuRect.height - padding, preferredTop));
-    const left = Math.max(padding, Math.min(window.innerWidth - menuRect.width - padding, buttonRect.left));
-    menu.style.top = `${Math.round(top)}px`;
-    menu.style.left = `${Math.round(left)}px`;
-    menu.classList.toggle('menu-up', menuUp);
-  }
   function openRowMenu(row, { clientX = null, clientY = null, focusFirst = false } = {}) {
     if (!row) return;
     closeAllRowMenus(row);
@@ -2254,12 +2231,6 @@
     else if (action === 'restore') await restoreLibraryItem(jobId);
     else if (action === 'permanent') await permanentlyDeleteLibraryItem(jobId);
   }
-  function previewInlineRating(group, rating = null) {
-    if (!group) return;
-    const preview = rating == null ? Number.NaN : Number(rating);
-    group.classList.toggle('is-previewing', Number.isFinite(preview));
-    group.querySelectorAll('[data-inline-importance]').forEach((star) => star.classList.toggle('is-preview-filled', Number(star.dataset.inlineImportance) <= preview));
-  }
   async function setInlineImportance(jobId, rating) {
     const item = libraryState().items?.[jobId];
     const next = Math.max(0, Math.min(5, Number(rating) || 0));
@@ -2281,8 +2252,8 @@
       state.inlineImportanceSaving.delete(jobId);
       renderLibrary(); renderViews();
       window.requestAnimationFrame(() => {
-        const group = document.querySelector(`.active-view .library-row[data-job-id="${cssEscape(jobId)}"] [data-inline-rating]`);
-        (group?.querySelector('[aria-checked="true"]') || group?.querySelector('[data-inline-importance]'))?.focus({ preventScroll: true });
+        const group = document.querySelector('#library-details .details-stars');
+        (group?.querySelector('[aria-checked="true"]') || group?.querySelector('[data-details-importance]'))?.focus({ preventScroll: true });
       });
     }
   }
@@ -2434,11 +2405,8 @@
       event.stopPropagation();
       return;
     }
-    // Inline editors and status pickers stop propagation so their own
-    // handlers can remain isolated. Close any other transient surface here
-    // before those early returns, keeping one popup open at a time.
+    // Close any other transient surface first, keeping one popup open at a time.
     if (!event.target.closest('[data-row-more-menu],[data-row-menu-job-id]')) closeAllRowMenus();
-    if (!event.target.closest('.reading-status-control')) closeReadingStatusMenus();
     const row = event.target.closest('.library-row');
     const groupFilter = event.target.closest('[data-group-filter]');
     if (groupFilter) {
@@ -2448,43 +2416,12 @@
       renderLibrary();
       return;
     }
-    const rowSurface = row && !event.target.closest('button, select, input, a, [data-row-more-menu], .reading-status-menu');
-    if (!row && !event.target.closest('button, select, input, a, [data-row-more-menu], .reading-status-menu')) {
+    const rowSurface = row && !event.target.closest('button, select, input, a, [data-row-more-menu]');
+    if (!row && !event.target.closest('button, select, input, a, [data-row-more-menu]')) {
       clearLibrarySelection();
       return;
     }
     if (rowSurface) selectLibraryRow(row, { additive: event.metaKey || event.ctrlKey, range: event.shiftKey });
-    const open = event.target.closest('[data-open-job-id]');
-    if (open) { event.stopPropagation(); await performLibraryRowAction(open.dataset.openJobId, 'open'); return; }
-    const metadataEditor = event.target.closest('[data-metadata-job-id]');
-    if (metadataEditor) { event.stopPropagation(); openMetadataDialog(metadataEditor.dataset.metadataJobId); return; }
-    const inlineImportance = event.target.closest('[data-inline-importance]');
-    if (inlineImportance) { event.stopPropagation(); await setInlineImportance(inlineImportance.closest('[data-inline-rating]')?.dataset.jobId, inlineImportance.dataset.inlineImportance); return; }
-    const statusButton = event.target.closest('[data-status-picker-button]');
-    if (statusButton) {
-      event.stopPropagation();
-      const menu = document.querySelector(`[data-status-menu="${cssEscape(statusButton.dataset.statusPickerButton)}"]`);
-      const openMenu = menu && menu.hidden;
-      closeReadingStatusMenus();
-      if (menu) {
-        menu.hidden = !openMenu;
-        statusButton.setAttribute('aria-expanded', String(openMenu));
-        if (openMenu) positionReadingStatusMenu(statusButton, menu);
-      }
-      return;
-    }
-    const statusOption = event.target.closest('[data-status-option]');
-    if (statusOption) {
-      event.stopPropagation();
-      const jobId = statusOption.dataset.jobId;
-      const value = statusOption.dataset.statusOption;
-      closeReadingStatusMenus();
-      const select = document.querySelector(`.reading-status-select[data-job-id="${cssEscape(jobId)}"]`);
-      if (select) { select.value = value; select.dispatchEvent(new Event('change', { bubbles: true })); }
-      return;
-    }
-    const property = event.target.closest('[data-property-id]');
-    if (property) { event.stopPropagation(); editLibraryProperty(property.dataset.jobId, property.dataset.propertyId); return; }
     const menuTrigger = event.target.closest('[data-row-menu-job-id]');
     if (menuTrigger) {
       event.stopPropagation();
@@ -2502,13 +2439,13 @@
       await performLibraryRowAction(jobId, action);
       return;
     }
-    // Inline controls own their click/change lifecycle; clicking a select or
-    // editor button must not unexpectedly navigate into the reader.
+    // Row controls own their click lifecycle; clicking a button or link must
+    // not unexpectedly navigate into the reader.
     if (event.target.closest('button, select, input, a')) return;
   }
   async function handleLibraryListDblClick(event) {
     const row = event.target.closest('.library-row');
-    if (!row || event.target.closest('button, select, input, a, [data-row-more-menu], .reading-status-menu')) return;
+    if (!row || event.target.closest('button, select, input, a, [data-row-more-menu]')) return;
     event.preventDefault();
     selectLibraryRow(row);
     await performLibraryRowAction(row.dataset.jobId, 'open');
@@ -2662,7 +2599,7 @@
     // the browser delivered events out of order.
     libraryMarquee.suppressNextClick = false;
     const row = event.target.closest('.library-row');
-    const interactive = event.target.closest('button, select, input, a, [data-row-more-menu], .reading-status-menu');
+    const interactive = event.target.closest('button, select, input, a, [data-row-more-menu]');
     const surface = librarySelectionSurface(event.currentTarget);
     if (!row && !interactive && surface) {
       clearLibraryDrag();
@@ -2725,11 +2662,6 @@
     if (libraryDrag.active) { event.preventDefault(); finishLibraryDrag(); }
     else clearLibraryDrag();
   }
-  function handleLibraryListChange(event) {
-    const select = event.target.closest('.reading-status-select');
-    if (!select) return;
-    updateLibraryItem(select.dataset.jobId, { values: { reading_status: select.value } });
-  }
   $$('.library-main, .view-editor').forEach((surface) => {
     surface.addEventListener('click', handleLibraryListClick);
     surface.addEventListener('pointerdown', handleLibraryPointerDown);
@@ -2737,14 +2669,9 @@
   ['#recent-list', '#view-results'].forEach((selector) => {
     const list = $(selector);
     list?.addEventListener('dblclick', handleLibraryListDblClick);
-    list?.addEventListener('change', handleLibraryListChange);
     list?.addEventListener('focusin', (event) => { const row = event.target.closest('.library-row'); if (row && !state.selectedLibraryJobIds.size) selectLibraryRow(row); });
-    list?.addEventListener('focusin', (event) => { const star = event.target.closest('[data-inline-importance]'); if (star) previewInlineRating(star.closest('[data-inline-rating]'), star.dataset.inlineImportance); });
-    list?.addEventListener('focusout', (event) => { const group = event.target.closest('[data-inline-rating]'); if (group && !group.contains(event.relatedTarget)) previewInlineRating(group); });
     list?.addEventListener('keydown', handleLibraryListKeydown);
     list?.addEventListener('contextmenu', handleLibraryListContextMenu);
-    list?.addEventListener('pointerover', (event) => { const star = event.target.closest('[data-inline-importance]'); if (star) previewInlineRating(star.closest('[data-inline-rating]'), star.dataset.inlineImportance); });
-    list?.addEventListener('pointerout', (event) => { const group = event.target.closest('[data-inline-rating]'); if (group && !group.contains(event.relatedTarget)) previewInlineRating(group); });
     list?.addEventListener('scroll', repositionOpenRowMenus, { passive: true });
   });
   function handleLibraryListContextMenu(event) {
@@ -2767,40 +2694,6 @@
       } else if (event.key === 'Escape') {
         event.preventDefault(); closeRowMenu(menu.closest('.library-row'), { restoreFocus: true });
       } else if (event.key === 'Tab') closeRowMenu(menu.closest('.library-row'));
-      return;
-    }
-    const statusButton = event.target.closest('[data-status-picker-button]');
-    if (statusButton && ['Enter', ' ', 'ArrowDown', 'ArrowUp'].includes(event.key)) {
-      event.preventDefault();
-      const menu = document.querySelector(`[data-status-menu="${cssEscape(statusButton.dataset.statusPickerButton)}"]`);
-      if (event.key === 'Enter' || event.key === ' ') {
-        const open = menu && menu.hidden;
-        closeReadingStatusMenus();
-        if (menu) {
-          menu.hidden = !open;
-          statusButton.setAttribute('aria-expanded', String(open));
-          if (open) { positionReadingStatusMenu(statusButton, menu); menu.querySelector('[aria-checked="true"]')?.focus(); }
-        }
-      } else if (menu?.hidden === false) {
-        const options = [...menu.querySelectorAll('[role="radio"]')]; const current = options.findIndex((option) => option.getAttribute('aria-checked') === 'true'); const next = Math.max(0, Math.min(options.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1))); options[next]?.focus();
-      }
-      return;
-    }
-    const statusOption = event.target.closest('[data-status-option]');
-    if (statusOption && ['ArrowDown', 'ArrowUp', 'Home', 'End', 'Enter', ' '].includes(event.key)) {
-      event.preventDefault();
-      const options = [...statusOption.closest('[role="radiogroup"]')?.querySelectorAll('[role="radio"]') || []];
-      if (event.key === 'Enter' || event.key === ' ') { statusOption.click(); return; }
-      const current = options.indexOf(statusOption); const next = event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : Math.max(0, Math.min(options.length - 1, current + (event.key === 'ArrowDown' ? 1 : -1))); options[next]?.focus();
-      return;
-    }
-    const inlineStar = event.target.closest('[data-inline-importance]');
-    if (inlineStar && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-      event.preventDefault();
-      const stars = [...inlineStar.closest('[data-inline-rating]').querySelectorAll('[data-inline-importance]:not([disabled])')];
-      const index = stars.indexOf(inlineStar);
-      const next = event.key === 'Home' ? 0 : event.key === 'End' ? stars.length - 1 : Math.max(0, Math.min(stars.length - 1, index + (event.key === 'ArrowRight' ? 1 : -1)));
-      stars[next]?.click();
       return;
     }
     const row = event.target.closest('.library-row');
@@ -2841,9 +2734,6 @@
   }
   function repositionOpenRowMenus() {
     $$('.library-row.menu-open').forEach((row) => positionRowMenu(row, row.querySelector('.row-more-menu')));
-    $$('.reading-status-menu:not([hidden])').forEach((menu) => {
-      positionReadingStatusMenu(menu.closest('.reading-status-control')?.querySelector('[data-status-picker-button]'), menu);
-    });
   }
   window.addEventListener('resize', repositionOpenRowMenus, { passive: true });
   window.addEventListener('scroll', repositionOpenRowMenus, { passive: true });
@@ -2871,7 +2761,6 @@
   document.addEventListener('click', (event) => {
     if (event.target.closest('.row-more-menu,[data-row-menu-job-id]')) return;
     closeAllRowMenus();
-    if (!event.target.closest('.reading-status-control')) closeReadingStatusMenus();
     if (state.libraryMode === 'list' && !event.target.closest('.library-grouping-heading,#library-grouping-list,#grouping-field-menu')) setGroupingMenuOpen(false);
   });
 

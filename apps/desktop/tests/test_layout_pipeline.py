@@ -66,24 +66,22 @@ class LayoutPipelineTest(unittest.TestCase):
 
     def test_mineru_cancel_terminates_its_process_group(self) -> None:
         cancel = threading.Event()
+        read_fd, write_fd = os.pipe()
+        os.write(write_fd, b"cancelled")
+        os.close(write_fd)
 
         class HangingProcess:
             pid = 43210
             returncode = None
-
-            def __init__(self) -> None:
-                self.calls = 0
+            stdout = os.fdopen(read_fd, "rb")
 
             def poll(self):
+                cancel.set()
                 return self.returncode
 
-            def communicate(self, timeout=None):
-                self.calls += 1
-                if self.calls == 1:
-                    cancel.set()
-                    raise subprocess.TimeoutExpired(["mineru"], timeout)
+            def wait(self, timeout=None):
                 self.returncode = -15
-                return ("cancelled", None)
+                return self.returncode
 
         process = HangingProcess()
         with tempfile.TemporaryDirectory(prefix="guzi-mineru-cancel-") as temp, patch(
@@ -111,12 +109,13 @@ class LayoutPipelineTest(unittest.TestCase):
         class CompleteProcess:
             pid = 43212
             returncode = 0
+            stdout = None
 
             def poll(self):
                 return self.returncode
 
-            def communicate(self, timeout=None):
-                return ("complete", None)
+            def wait(self, timeout=None):
+                return self.returncode
 
         with tempfile.TemporaryDirectory(prefix="guzi-mineru-backend-") as temp, patch(
             "layout_pipeline.subprocess.Popen", return_value=CompleteProcess(),
@@ -132,16 +131,110 @@ class LayoutPipelineTest(unittest.TestCase):
             command = popen.call_args.args[0]
             self.assertEqual(command[command.index("-b") + 1], "hybrid-engine")
 
+    def test_mineru_progress_lines_parse_stage_and_counts(self) -> None:
+        from layout_pipeline import _mineru_progress_update
+
+        self.assertEqual(
+            _mineru_progress_update("Layout Predict:  52%|█████▏    | 12/23 [00:09<00:02,  4.93it/s]"),
+            ("Layout Predict", 12, 23),
+        )
+        self.assertEqual(
+            _mineru_progress_update("OCR-det:  32%|███▏      | 98/307 [00:07<00:10, 20.66it/s]"),
+            ("OCR-det", 98, 307),
+        )
+        self.assertEqual(
+            _mineru_progress_update("Predict: 100%|██████████| 33/33 [11:24<00:00, 20.75s/it]"),
+            ("Predict", 33, 33),
+        )
+        self.assertIsNone(_mineru_progress_update("INFO:     Started server process [22327]"))
+        self.assertIsNone(_mineru_progress_update("2026-08-25 16:52:14.794 | INFO | mineru.cli.client - started"))
+        self.assertIsNone(_mineru_progress_update("Layout Predict:   0%|          | 0/0 [00:00<?, ?it/s]"))
+
+    def test_mineru_progress_monitor_maps_stages_monotonically(self) -> None:
+        from layout_pipeline import _MineruOutputMonitor
+
+        updates: list = []
+        monitor = _MineruOutputMonitor(None, lambda stage, fraction: updates.append((stage, fraction)))
+        monitor._latest = ("Layout Predict", 12, 23)
+        monitor.emit()
+        monitor.emit()
+        monitor._latest = ("Predict", 5, 33)
+        monitor.emit()
+        monitor._latest = ("Predict", 6, 33)
+        monitor.emit()
+        monitor._latest = ("Table orientation det", 17, 17)
+        monitor.emit()
+        self.assertEqual(
+            [stage for stage, _ in updates],
+            ["版面检测 12/23", "AI 深度解析 5/33", "表格方向分析 17/17"],
+        )
+        fractions = [fraction for _, fraction in updates]
+        self.assertEqual(fractions, sorted(fractions))
+        self.assertAlmostEqual(fractions[1], 0.16 + 0.72 * 5 / 33, places=6)
+        self.assertEqual(fractions[2], fractions[1])
+
+    def test_run_mineru_streams_progress_from_stdout(self) -> None:
+        read_fd, write_fd = os.pipe()
+        transcript = (
+            b"2026-08-25 16:52:16 | INFO | starting\n"
+            b"Layout Predict:  52%|#####     | 12/23 [00:09<00:02,  4.93it/s]\r"
+            b"Predict:  15%|#         | 5/33 [00:41<05:19, 11.41s/it]\r"
+            b"done\n"
+        )
+
+        class StreamingProcess:
+            pid = 43213
+            stdout = os.fdopen(read_fd, "rb")
+
+            def __init__(self) -> None:
+                self.polls = 0
+                self.returncode = None
+
+            def poll(self):
+                self.polls += 1
+                if self.polls == 1:
+                    os.write(write_fd, transcript)
+                    os.close(write_fd)
+                    return None
+                if self.polls < 5:
+                    return None
+                self.returncode = 0
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        updates: list = []
+        with tempfile.TemporaryDirectory(prefix="guzi-mineru-progress-") as temp, patch(
+            "layout_pipeline.subprocess.Popen", return_value=StreamingProcess(),
+        ):
+            root = Path(temp)
+            with self.assertRaisesRegex(LayoutPipelineError, "content_list_v2"):
+                _run_mineru(
+                    root / "mineru",
+                    root / "source.pdf",
+                    root / "output",
+                    progress=lambda stage, fraction: updates.append((stage, fraction)),
+                )
+            log = (root / "output/mineru.log").read_text(encoding="utf-8")
+            self.assertIn("Layout Predict", log)
+            self.assertIn("done", log)
+            self.assertEqual(updates[0], ("启动本地版面引擎", 0.0))
+            self.assertEqual(updates[-1][0], "AI 深度解析 5/33")
+            fractions = [fraction for _, fraction in updates]
+            self.assertEqual(fractions, sorted(fractions))
+
     def test_managed_mineru_uses_component_cwd_minimal_path_and_offline_caches(self) -> None:
         class CompleteProcess:
             pid = 43211
             returncode = 0
+            stdout = None
 
             def poll(self):
                 return self.returncode
 
-            def communicate(self, timeout=None):
-                return ("complete", None)
+            def wait(self, timeout=None):
+                return self.returncode
 
         with tempfile.TemporaryDirectory(prefix="guzi-mineru-environment-") as temp, patch(
             "layout_pipeline.subprocess.Popen", return_value=CompleteProcess(),
