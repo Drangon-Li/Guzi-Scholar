@@ -57,7 +57,7 @@ from config import AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE
 from content_store import MAX_MEDIA_LAYOUT_BYTES, MAX_MEDIA_LAYOUT_ITEMS, MAX_NOTE_ASSET_BYTES, MEDIA_LAYOUT_KEY_RE, _active_conversion_root, _atomic_temp_path, _content_root, _empty_media_layout, _ensure_content_layout, _normalize_media_layout_items, _note_image_type, _read_media_layout, _store_note_asset, _sync_content_file, _translation_key, _translation_records, _translation_records_need_persist, _write_content_manifest, _write_english_snapshot, _write_media_layout, _write_translation_records
 from job_store import JOB_ID_RE, PERMANENT_DELETE_JOURNAL_NAME, RENDER_GENERATION_RE, JobStore, ReflowCancelledError, ReflowConflictError, _read_json_file, set_artifact_migrator
 from library_store import LibraryStore, LibraryValidationError
-from layout_pipeline import MathRenderer, normalize_mineru_backend
+from layout_pipeline import LayoutPipelineError, MathRenderer, normalize_mineru_backend, normalize_mineru_server_url
 from parsing_providers import ProviderError, ParsingRequest, create_default_registry
 from pipeline import PipelineError, process_pdf, utc_now
 from runtime import METADATA_PENDING, METADATA_STATE_LOCK
@@ -571,6 +571,25 @@ def _parsing_backend(value: Any) -> str:
     return normalize_mineru_backend(value.get("backend") if isinstance(value, dict) else None)
 
 
+def _parsing_server_url(value: Any, *, strict: bool) -> str:
+    """Validate the layout server address, rejecting anything but http(s).
+
+    Reads are lenient: a stored value that is somehow invalid must not take the
+    whole settings endpoint down with it. Writes reject it so it never lands.
+    """
+    raw = value.get("server_url") if isinstance(value, dict) else None
+    try:
+        return normalize_mineru_server_url(raw)
+    except LayoutPipelineError as exc:
+        if strict:
+            raise PipelineError(str(exc)) from exc
+        return ""
+
+
+def _parsing_settings(value: Any, *, strict: bool = False) -> Dict[str, str]:
+    return {"backend": _parsing_backend(value), "server_url": _parsing_server_url(value, strict=strict)}
+
+
 def _annotation_colors(value: Any, fallback: str) -> Dict[str, str]:
     """Remember the last colour picked for each annotation kind."""
     stored = value if isinstance(value, dict) else {}
@@ -756,7 +775,7 @@ def _public_settings() -> Dict[str, Any]:
             "online_lookup": _setting_bool(data.get("metadata", {}).get("online_lookup", True), True) if isinstance(data.get("metadata"), dict) else True,
             "contact_email": str(data.get("metadata", {}).get("contact_email", "")) if isinstance(data.get("metadata"), dict) else "",
         },
-        "parsing": {"backend": _parsing_backend(data.get("parsing"))},
+        "parsing": _parsing_settings(data.get("parsing")),
     }
 
 
@@ -778,7 +797,7 @@ def _write_settings(data: Dict[str, Any]) -> Dict[str, Any]:
                         "contact_email": str(data[key].get("contact_email") or "").strip()[:254],
                     }
                 elif key == "parsing":
-                    current["parsing"] = {"backend": _parsing_backend(data[key])}
+                    current["parsing"] = _parsing_settings(data[key], strict=True)
                 elif key == "annotation_colors":
                     current["annotation_colors"] = _annotation_colors(
                         data[key], _setting_color(current.get("highlight_color"))
@@ -1830,7 +1849,7 @@ def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
                 output_dir=attempt_dir,
                 source_name=source_name,
                 generation=generation,
-                backend=_parsing_backend(_stored_settings().get("parsing")),
+                **_parsing_settings(_stored_settings().get("parsing")),
             ),
             progress=progress,
             cancel_event=cancel_event,

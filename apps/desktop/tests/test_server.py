@@ -1737,6 +1737,39 @@ class SettingsBoundaryTest(unittest.TestCase):
                 "accent": "amber",
             })
 
+    def test_remote_parsing_server_url_round_trips_and_is_normalised(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-parsing-url-") as temp:
+            settings_path = Path(temp) / "settings.json"
+            with patch("server.SETTINGS_PATH", settings_path), patch("server.ai_services", return_value={}):
+                public = _write_settings({
+                    "parsing": {"backend": "vlm-http-client", "server_url": "  http://gpu-box:30000/  "},
+                })
+            self.assertEqual(public["parsing"]["backend"], "vlm-http-client")
+            self.assertEqual(public["parsing"]["server_url"], "http://gpu-box:30000")
+
+    def test_a_non_http_parsing_server_url_is_refused_on_write(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-parsing-url-reject-") as temp:
+            settings_path = Path(temp) / "settings.json"
+            with patch("server.SETTINGS_PATH", settings_path), patch("server.ai_services", return_value={}):
+                for rejected in ("file:///etc/passwd", "ftp://host", "gpu-box:30000"):
+                    with self.assertRaises(PipelineError, msg=rejected):
+                        _write_settings({"parsing": {"backend": "vlm-http-client", "server_url": rejected}})
+                self.assertFalse(settings_path.is_file())
+
+    def test_an_unreadable_stored_parsing_url_does_not_break_the_settings_read(self) -> None:
+        # A bad value already on disk must degrade to "unset" rather than take
+        # the whole settings endpoint down.
+        with tempfile.TemporaryDirectory(prefix="my-scholar-parsing-url-stored-") as temp:
+            settings_path = Path(temp) / "settings.json"
+            settings_path.write_text(
+                json.dumps({"parsing": {"backend": "vlm-http-client", "server_url": "file:///etc/passwd"}}),
+                encoding="utf-8",
+            )
+            with patch("server.SETTINGS_PATH", settings_path), patch("server.ai_services", return_value={}):
+                public = _public_settings()
+            self.assertEqual(public["parsing"]["server_url"], "")
+            self.assertEqual(public["parsing"]["backend"], "vlm-http-client")
+
     def test_public_settings_exposes_service_status_without_ai_configuration(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-settings-public-") as temp:
             settings_path = Path(temp) / "settings.json"

@@ -307,7 +307,8 @@
           </section>
           <section id="settings-parsing" class="settings-section" hidden>
             <div class="settings-section-heading"><div><h2>版面引擎</h2><p>管理高级 AI 重排所需的解析组件。基础导入与阅读仍使用内置转换器。</p></div><span class="settings-badge">按需安装</span></div>
-            <label class="settings-select-field" for="setting-parsing-backend"><span><strong>解析精度</strong><small>高精度使用 MinerU 官方默认的 hybrid 引擎，公式与版面识别明显更准，但首次运行需要下载视觉模型，且单篇耗时更长。</small></span><select id="setting-parsing-backend"><option value="pipeline">快速（专用小模型）</option><option value="hybrid-engine">高精度（hybrid 引擎）</option></select></label>
+            <label class="settings-select-field" for="setting-parsing-backend"><span><strong>解析精度</strong><small>高精度使用 MinerU 官方默认的 hybrid 引擎，公式与版面识别明显更准，但首次运行需要下载视觉模型，且单篇耗时更长。</small></span><select id="setting-parsing-backend"><option value="pipeline">快速（专用小模型）</option><option value="hybrid-engine">高精度（hybrid 引擎）</option><option value="vlm-http-client">远程服务器（轻量客户端）</option><option value="hybrid-http-client">远程服务器（本地混合）</option></select></label>
+            <label id="setting-parsing-server-field" class="settings-field" hidden>版面引擎服务器地址<input id="setting-parsing-server-url" type="url" placeholder="http://127.0.0.1:30000" autocomplete="off" spellcheck="false"><small>指向 <code>mineru-openai-server</code> 的地址。选择远程解析后，PDF 原文会上传到该服务器，请只填写你自己或团队控制的地址。</small></label>
             <div class="parsing-provider-grid">
               <article id="local-mineru-provider" class="parsing-provider-card is-loading" aria-labelledby="local-mineru-title">
                 <div class="parsing-provider-heading"><span class="ai-service-icon" aria-hidden="true">版</span><div><h3 id="local-mineru-title">本地 MinerU</h3><p>高级 AI 重排 · 文献不会离开当前设备</p></div><span id="local-mineru-status" class="ai-service-status is-unknown">正在检测</span></div>

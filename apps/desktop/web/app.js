@@ -11241,6 +11241,8 @@
       if ($('#setting-metadata-email')) $('#setting-metadata-email').value = metadata.contact_email || '';
       const parsingBackend = settings.parsing?.backend || 'pipeline';
       if ($('#setting-parsing-backend')) $('#setting-parsing-backend').value = parsingBackend;
+      if ($('#setting-parsing-server-url')) $('#setting-parsing-server-url').value = settings.parsing?.server_url || '';
+      syncParsingServerField();
       const shortcuts = settings.shortcuts || {};
       const normalizedShortcuts = Object.fromEntries(Object.entries({ ...state.shortcuts, ...shortcuts }).map(([key, value]) => [key, normalizeShortcut(value) || state.shortcuts[key]]));
       state.shortcuts = { ...state.shortcuts, ...normalizedShortcuts };
@@ -11271,6 +11273,13 @@
     }
   }
 
+  function syncParsingServerField() {
+    const field = $('#setting-parsing-server-field');
+    const select = $('#setting-parsing-backend');
+    if (!field || !select) return;
+    field.hidden = !String(select.value || '').endsWith('-http-client');
+  }
+
   function settingsPayload() {
     const shortcutValidation = validateShortcutInputs();
     return {
@@ -11284,6 +11293,7 @@
       },
       parsing: {
         backend: $('#setting-parsing-backend')?.value || 'pipeline',
+        server_url: $('#setting-parsing-server-url')?.value.trim() || '',
       },
     };
   }
@@ -11386,6 +11396,7 @@
   $('#settings-form').addEventListener('submit', (event) => event.preventDefault());
   $('#settings-form').addEventListener('change', (event) => {
     if (event.target.closest('.shortcut-grid')) return;
+    if (event.target.id === 'setting-parsing-backend') syncParsingServerField();
     queueSettingsSave(true);
   });
   $('#settings-form').addEventListener('input', (event) => {
