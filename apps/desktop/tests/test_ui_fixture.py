@@ -34,11 +34,18 @@ class UIFixtureTest(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls._temp.cleanup()
 
-    def _documents(self) -> list[str]:
+    def _documents(self, rich: bool = False) -> list[str]:
+        """Documents for the plain papers, or for the single reader fixture."""
         return [
             (self.root / "jobs" / job_id / "document.html").read_text(encoding="utf-8")
-            for job_id in self.job_ids
+            for paper, job_id in zip(PAPERS, self.job_ids, strict=True)
+            if bool(paper.get("rich")) is rich
         ]
+
+    def _reader_document(self) -> str:
+        documents = self._documents(rich=True)
+        self.assertEqual(len(documents), 1)
+        return documents[0]
 
     def test_every_paper_is_seeded_and_completed(self) -> None:
         self.assertEqual(len(self.job_ids), len(PAPERS))
@@ -73,6 +80,69 @@ class UIFixtureTest(unittest.TestCase):
     def test_a_paragraph_carries_inline_mathml(self) -> None:
         for document in self._documents():
             self.assertIn("<math", document)
+
+    def test_inline_mathml_carries_a_tex_annotation(self) -> None:
+        # The reader only tokenizes a formula that has one, so without it
+        # translation_smoke's round-trip silently degrades to plain text.
+        for document in self._documents() + [self._reader_document()]:
+            self.assertIn('<annotation encoding="application/x-tex">', document)
+
+    def test_the_reader_document_matches_the_census_web_smoke_asserts(self) -> None:
+        document = self._reader_document()
+        counts = {
+            "pages": document.count('class="pdf-page"'),
+            "figures": document.count('class="pdf-figure"'),
+            "tables": document.count('class="pdf-table'),
+            "table images": len(re.findall(r'class="table-source-primary[^"]*"><img', document)),
+            "semantic tables": document.count("<table"),
+            "equations": document.count('class="equation-entry"'),
+            "references": len(re.findall(r'id="ref-\d+"', document)),
+        }
+        self.assertEqual(counts, {
+            "pages": 12,
+            "figures": 3,
+            "tables": 7,
+            "table images": 7,
+            "semantic tables": 0,
+            "equations": 2,
+            "references": 100,
+        })
+
+    def test_the_reader_document_carries_the_sentences_feature_smoke_quotes(self) -> None:
+        # feature_smoke feeds these to the auto-highlight mock, which can only
+        # anchor a highlight if the sentence appears verbatim in the body.
+        document = self._reader_document()
+        for block_id, quote in (
+            ("block-1-4-paragraph", "In this paper, we present OneLLM, an MLLM that aligns eight modalities to language using a unified framework."),
+            ("block-2-3-paragraph", "OneLLM consists of lightweight modality tokenizers, a universal encoder, a universal projection module (UPM), and an LLM."),
+            ("block-2-8-paragraph", "OneLLM is the first MLLM that integrates eight distinct modalities within a single model."),
+            ("block-2-9-paragraph", "OneLLM finetuned on this dataset achieves superior performance on multimodal tasks"),
+        ):
+            self.assertIn(f'data-block-id="{block_id}"', document)
+            self.assertIn(quote, document)
+            paragraph = re.search(rf'<p id="{block_id}"[^>]*>(.*?)</p>', document, re.S)
+            self.assertIsNotNone(paragraph, block_id)
+            # The quote must not open the paragraph: the reader wraps it in a
+            # <mark>, and feature_smoke walks the first text node expecting a
+            # direct child of the paragraph.
+            self.assertFalse(paragraph.group(1).startswith(quote), block_id)
+
+    def test_the_introduction_stays_on_page_one(self) -> None:
+        # feature_smoke checks that a Chat citation naming the wrong page
+        # ([p2/block-1-6-paragraph]) fails to resolve.
+        document = self._reader_document()
+        anchor = re.search(r'<p id="block-1-6-paragraph"[^>]*data-page="(\d+)"[^>]*>(.*?)</p>', document, re.S)
+        self.assertIsNotNone(anchor)
+        self.assertEqual(anchor.group(1), "1")
+        self.assertTrue(anchor.group(2).startswith("Large Language Models (LLMs)"))
+
+    def test_the_figure_cross_reference_avoids_the_first_figure(self) -> None:
+        # feature_smoke rewrites the referenced figure's image to a 1x1 stub,
+        # and separately opens the first figure's image in the lightbox.
+        document = self._reader_document()
+        targets = re.findall(r'<a class="cross-reference" href="#(fig-\d+)"', document)
+        self.assertTrue(targets)
+        self.assertNotIn("fig-1", targets)
 
     def test_metadata_retrieval_is_disabled(self) -> None:
         # A CI run must never reach out to Crossref or arXiv.

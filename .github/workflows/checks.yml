@@ -99,26 +99,30 @@ jobs:
           npm install --global playwright
           playwright install --with-deps chromium
           echo "MY_SCHOLAR_PLAYWRIGHT_MODULE=$(npm root -g)/playwright" >> "$GITHUB_ENV"
-      - name: Seed the fixture library
-        run: python3 apps/desktop/tests/fixtures/seed_library.py "${RUNNER_TEMP}/ui-data"
-      - name: Start the local server
-        run: |
-          MY_SCHOLAR_DATA_DIR="${RUNNER_TEMP}/ui-data" \
-            nohup python3 apps/desktop/server.py --port 8766 > "${RUNNER_TEMP}/server.log" 2>&1 &
-          disown || true
-          for _ in $(seq 1 60); do
-            if curl -sf http://127.0.0.1:8766/api/health > /dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          echo "server did not become healthy in time"
-          cat "${RUNNER_TEMP}/server.log"
-          exit 1
+      # The runner seeds a fresh library and starts a dedicated server for each
+      # suite, and prints that server's log when a suite fails.
       - name: Run UI smoke tests
-        env:
-          MY_SCHOLAR_TEST_DATA: ${{ runner.temp }}/ui-data
         run: npm --prefix apps/desktop run test:ui:ci
-      - name: Show server log on failure
-        if: failure()
-        run: cat "${RUNNER_TEMP}/server.log" || true
+
+  runtime:
+    name: Runtime checks (macOS)
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+      # macOS-only: two of these three check the packaged bundle and the mac
+      # release layout, so they cannot run on the Linux jobs above.
+      - name: Run runtime, installation and release checks
+        run: npm --prefix apps/desktop run test:runtime
