@@ -12,6 +12,9 @@
     "check": "npm run check:syntax && npm run test:unit && npm run test:graph && npm run test:storage && npm run test:runtime",
     "check:syntax": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/library-storage.cjs && node --check electron/update-service.cjs && node --check electron/renderer-state.cjs && node --check electron/url-security.cjs && node --check electron/python-runtime.cjs && node --check electron/macos-installation.cjs && node --check electron/launcher.cjs && node --check scripts/after-pack.cjs && node --check scripts/build-mac-target.cjs && node --check web/graph-model.js && node --check web/graph-view.js && node --check web/core.js && node --check web/app.js && node --check tests/playwright.cjs && node --check tests/run_python_tests.js && node --check tests/run_ui_tests.js && node --check tests/web_smoke.js && node --check tests/feature_smoke.js && node --check tests/translation_smoke.js && node --check tests/library_smoke.js && node --check tests/library_v3_smoke.js && node --check tests/library_interactions_v4.js && node --check tests/reading_progress_retirement_smoke.js && node --check tests/interaction_regression.js && node --check tests/graph_model_smoke.js && node --check tests/graph_ui_smoke.js && node --check tests/onboarding_smoke.js && node --check tests/library_storage_test.js && node --check tests/update_service_test.js && node --check tests/renderer_state_test.js && node --check tests/desktop_security_test.js && node --check tests/python_runtime_test.js && node --check tests/macos_installation_test.js && node --check tests/mac_release_test.js && node --check tests/tencent_deploy_test.js && sh -n run.sh && zsh -n run-my-scholar.command && zsh -n scripts/fetch-pandoc.sh && zsh -n scripts/prepare-mac-release.sh && zsh -n scripts/remote-ai-tunnel.sh && zsh -n scripts/lsl-proxy-command.sh",
     "test": "npm run check",
+    "lint": "npm run lint:js && npm run lint:py",
+    "lint:js": "eslint .",
+    "lint:py": "python3 -m ruff check .",
     "test:unit": "node tests/run_python_tests.js",
     "test:graph": "node tests/graph_model_smoke.js",
     "test:storage": "node tests/library_storage_test.js && node tests/update_service_test.js && node tests/renderer_state_test.js && node tests/desktop_security_test.js",
@@ -38,7 +41,9 @@
   },
   "devDependencies": {
     "electron": "43.2.0",
-    "electron-builder": "26.15.3"
+    "electron-builder": "26.15.3",
+    "eslint": "^9.39.5",
+    "globals": "^17.11.0"
   },
   "build": {
     "appId": "com.guzi.scholar",

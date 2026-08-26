@@ -31,7 +31,6 @@ import shutil
 import sys
 import threading
 import time
-import unicodedata
 import urllib.error
 import urllib.request
 import uuid
@@ -54,8 +53,10 @@ import runtime
 from ai import auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, is_metadata_block, list_models as ai_list_models, reference_quick_read, review_tables, services as ai_services, status as ai_status, test_connections as ai_test_connections, translate_text, translate_text_stream, translation_profile_id
 from bibliography import is_fragmented_metadata_text, retrieve_bibliographic_metadata, retrieve_reference_evidence
 from config import AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE
-from content_store import MAX_MEDIA_LAYOUT_BYTES, MAX_MEDIA_LAYOUT_ITEMS, MAX_NOTE_ASSET_BYTES, MEDIA_LAYOUT_KEY_RE, _active_conversion_root, _atomic_temp_path, _content_root, _empty_media_layout, _ensure_content_layout, _normalize_media_layout_items, _note_image_type, _read_media_layout, _store_note_asset, _sync_content_file, _translation_key, _translation_records, _translation_records_need_persist, _write_content_manifest, _write_english_snapshot, _write_media_layout, _write_translation_records
-from job_store import JOB_ID_RE, PERMANENT_DELETE_JOURNAL_NAME, RENDER_GENERATION_RE, JobStore, ReflowCancelledError, ReflowConflictError, _read_json_file, set_artifact_migrator
+from content_store import MAX_NOTE_ASSET_BYTES, _active_conversion_root, _atomic_temp_path, _ensure_content_layout, _normalize_media_layout_items, _note_image_type, _read_media_layout, _store_note_asset, _sync_content_file, _translation_key, _translation_records, _translation_records_need_persist, _write_media_layout, _write_translation_records
+# Re-exported for the tests, which reach these through the server module.
+from content_store import MAX_MEDIA_LAYOUT_ITEMS, _write_content_manifest, _write_english_snapshot  # noqa: F401
+from job_store import JOB_ID_RE, RENDER_GENERATION_RE, JobStore, ReflowCancelledError, ReflowConflictError, _read_json_file, set_artifact_migrator
 from library_store import LibraryStore, LibraryValidationError
 from layout_pipeline import LayoutPipelineError, MathRenderer, normalize_mineru_backend, normalize_mineru_server_url
 from parsing_providers import ProviderError, ParsingRequest, create_default_registry

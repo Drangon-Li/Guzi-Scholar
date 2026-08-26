@@ -6,7 +6,6 @@
   const {
     $,
     $$,
-    desktopPersistentState,
     flushPersistentStateWrites,
     formatBytes,
     isDesktopApp,
@@ -1792,7 +1791,7 @@
     const columns = visibleLibraryColumns();
     const propertyMap = new Map(libraryProperties().map((property) => [property.id, property]));
     return entries.map((entry) => {
-      const values = itemValues(entry); const metadata = itemMetadata(entry); const job = entry.job || {}; const counts = job.manifest?.counts || {};
+      const values = itemValues(entry); const job = entry.job || {}; const counts = job.manifest?.counts || {};
       const topics = Array.isArray(values.research_topic) ? values.research_topic : [];
       const title = itemTitle(entry);
       const cell = (column) => {
@@ -4523,7 +4522,7 @@
     // Read-only showcase deployments have no annotation/translation/chat
     // actions, so the selection popover has nothing to offer.
     if (state.health?.readonly) return;
-    const frame = $('#html-preview'); const doc = frameDocument();
+    const doc = frameDocument();
     if (!doc) return;
     if (isAnnotationInteraction(event?.target)) {
       clearSelectionPopover({ clearState: true, immediate: true });

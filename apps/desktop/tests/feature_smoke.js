@@ -597,6 +597,8 @@ let browserSession;
   const persistedLayout = await page.evaluate(async (id) => (await (await fetch(`/api/jobs/${id}/media-layout`)).json()).media_layout, jobId);
   if (Math.abs(Number(persistedLayout?.items?.[figureKey]?.width_percent) - resizedFigure.percent) > .11) throw new Error(`Persisted figure width did not match the reader (${JSON.stringify(persistedLayout)})`);
 
+  // Reassigning src to itself is the standard way to force an iframe reload.
+  // eslint-disable-next-line no-self-assign
   await page.locator('#html-preview').evaluate((iframe) => { iframe.src = iframe.src; });
   figureShell = frame.locator('figure.pdf-figure').first();
   figureBlock = figureShell.locator(`:scope > .my-scholar-media-visual.my-scholar-media-resizable[data-media-key="${figureKey}"]`);

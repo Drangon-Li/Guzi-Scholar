@@ -118,7 +118,8 @@ def _resolve_interpreter(executable: Path) -> Optional[Path]:
 
 def _health_failure(executable: Path, *, timeout: float = 20) -> Optional[str]:
     try:
-        info = executable.stat()
+        # Probing for reachability; the stat result itself is not needed.
+        executable.stat()
     except OSError as exc:
         return str(exc)
     if not executable.is_file() or not os.access(executable, os.X_OK):
