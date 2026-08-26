@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from pymupdf_runtime import load_fitz
 
 
 IR_VERSION = 5
@@ -917,7 +918,7 @@ def _extract_pdf_text_pages(
     if not active_budget.checkpoint():
         return []
     try:
-        import fitz  # type: ignore
+        fitz = load_fitz()
 
         pages: List[Dict[str, Any]] = []
         span_count = 0
@@ -2679,7 +2680,7 @@ def serializable_ir(ir: Mapping[str, Any]) -> Dict[str, Any]:
 
 def pdf_page_sizes(pdf_path: Path, page_count: int) -> List[Tuple[float, float]]:
     try:
-        import fitz  # type: ignore
+        fitz = load_fitz()
 
         with fitz.open(pdf_path) as document:
             return [(float(page.rect.width), float(page.rect.height)) for page in document]

@@ -31,6 +31,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, 
 from document_ir import _marker_drawing_pages, mineru_to_ir, render_pages, serializable_ir
 from mineru_discovery import discover_mineru
 from toolchain_paths import tool_path_candidates
+from pymupdf_runtime import load_fitz
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -966,7 +967,7 @@ def _first_page_text(path: Path) -> str:
         if cache_key in FIRST_PAGE_CACHE:
             return FIRST_PAGE_CACHE[cache_key]
     try:
-        import fitz  # type: ignore
+        fitz = load_fitz()
 
         with fitz.open(path) as doc:
             text = doc[0].get_text("text") if doc.page_count else ""
@@ -1470,7 +1471,7 @@ def _render_pages(pdf_path: Path, target: Path, page_count: int, dpi: int = 144)
         existing.unlink(missing_ok=True)
     rendered: List[str] = []
     try:
-        import fitz  # type: ignore
+        fitz = load_fitz()
 
         with fitz.open(pdf_path) as doc:
             if len(doc) < page_count:
@@ -1794,7 +1795,7 @@ def _render_pdf_visual_crops(
     except (TypeError, ValueError):
         pixel_limit = VISUAL_CROP_MAX_PIXELS
     try:
-        import fitz  # type: ignore
+        fitz = load_fitz()
     except Exception:
         return _render_pdf_visual_crops_java(
             pdf_path,
@@ -1974,7 +1975,7 @@ def _visual_crop_base_dpi(value: Any = None) -> int:
 
 def _page_count(pdf_path: Path) -> int:
     try:
-        import fitz  # type: ignore
+        fitz = load_fitz()
 
         doc = fitz.open(pdf_path)
         count = len(doc)

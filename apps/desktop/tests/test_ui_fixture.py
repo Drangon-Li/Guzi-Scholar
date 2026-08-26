@@ -81,8 +81,8 @@ class UIFixtureTest(unittest.TestCase):
         self.assertFalse(settings["metadata"]["online_lookup"])
 
     def test_source_pdfs_are_structurally_valid(self) -> None:
-        # A malformed PDF wedges MuPDF's error callback and hangs the server,
-        # so the fixture must produce files that really parse.
+        # The fixture should look like a real document to the metadata worker,
+        # which opens it with PyMuPDF.
         try:
             import fitz  # type: ignore
         except ImportError:

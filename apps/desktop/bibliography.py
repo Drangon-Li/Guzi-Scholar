@@ -23,6 +23,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import quote, urlencode, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from xml.etree import ElementTree
+from pymupdf_runtime import load_fitz
 
 
 BIBLIOGRAPHIC_FIELDS = (
@@ -292,7 +293,7 @@ def extract_local_metadata(pdf_path: Path, document_json_path: Optional[Path] = 
     pdf_page_texts: List[str] = []
     pdf_link_uris: List[str] = []
     try:
-        import fitz  # type: ignore
+        fitz = load_fitz()
 
         with fitz.open(pdf_path) as pdf:
             pdf_metadata = dict(pdf.metadata or {})

@@ -146,9 +146,10 @@ PAPERS = [
 def _minimal_pdf(title: str) -> bytes:
     """Build a small but structurally valid single-page PDF.
 
-    It must really parse: the metadata worker opens every source with PyMuPDF,
-    and a malformed file wedges MuPDF's error callback instead of failing
-    cleanly, which takes the whole server down with it.
+    The metadata worker opens every source with PyMuPDF, so the fixture should
+    look like a document the app would really be given. A malformed file used
+    to take the server down with it -- see pymupdf_runtime.py -- and while that
+    is fixed, a fixture that only works because of the fix is a poor fixture.
     """
     safe = "".join(ch for ch in title if 32 <= ord(ch) < 127).replace("(", "").replace(")", "")[:80]
     stream = f"BT /F1 14 Tf 72 720 Td ({safe}) Tj ET".encode("ascii")
