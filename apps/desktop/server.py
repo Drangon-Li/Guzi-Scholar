@@ -97,24 +97,14 @@ PARSING_INSTALL_CANCEL_EVENT: Optional[threading.Event] = None
 METADATA_GENERATIONS: Dict[str, int] = {}
 METADATA_JOB_LOCKS: Dict[str, threading.RLock] = {}
 JOB_MUTATION_LOCKS: Dict[str, threading.RLock] = {}
-ACCOUNT_SERVICE_URL = os.environ.get("MY_SCHOLAR_ACCOUNT_URL", "").strip().rstrip("/")
-ALLOW_INSECURE_LOOPBACK_ACCOUNT = str(
-    os.environ.get("MY_SCHOLAR_ALLOW_INSECURE_LOOPBACK_ACCOUNT", "")
-).strip().lower() in {"1", "true", "yes", "on"}
 ACCOUNT_FILE = DATA_ROOT / "account.json"
 ACCOUNT_LOCK = threading.RLock()
 LANDING_FILE = Path(os.environ.get("MY_SCHOLAR_LANDING_FILE", "")).expanduser() if os.environ.get("MY_SCHOLAR_LANDING_FILE") else None
-# Open-source builds use the user's own AI credentials and do not require an
-# account or a hosted membership entitlement. The legacy gate can still be
-# enabled explicitly for private deployments with MY_SCHOLAR_AI_REQUIRE_MEMBER=1.
-AI_REQUIRES_MEMBER = str(os.environ.get("MY_SCHOLAR_AI_REQUIRE_MEMBER", "0")).strip().lower() not in {"", "0", "false", "no", "off"}
 _USAGE_CACHE: Dict[str, Any] = {"at": None, "bytes": 0}
-MIGRATION_CONTROL_TOKEN = os.environ.get("MY_SCHOLAR_MIGRATION_TOKEN", "").strip()
 MIGRATION_REQUEST_CONDITION = threading.Condition(threading.RLock())
 MIGRATION_QUIESCING = False
 MIGRATION_ACTIVE_REQUESTS = 0
 MIGRATION_ACTIVE_MUTATIONS = 0
-API_ACCESS_TOKEN = os.environ.get("MY_SCHOLAR_API_TOKEN", "").strip()
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
@@ -299,7 +289,7 @@ def _read_account_state() -> Dict[str, Any]:
 
 
 def _account_service_configuration(url: Optional[str] = None) -> Dict[str, Any]:
-    candidate = str(ACCOUNT_SERVICE_URL if url is None else url).strip().rstrip("/")
+    candidate = str(runtime.ACCOUNT_SERVICE_URL if url is None else url).strip().rstrip("/")
     if not candidate:
         return {"available": False, "secure": False, "error": "尚未配置账号服务。"}
     try:
@@ -313,7 +303,7 @@ def _account_service_configuration(url: Optional[str] = None) -> Dict[str, Any]:
     if parsed.scheme == "https":
         return {"available": True, "secure": True, "server": candidate}
     if parsed.scheme == "http" and hostname in LOOPBACK_HOSTS:
-        if ALLOW_INSECURE_LOOPBACK_ACCOUNT:
+        if runtime.ALLOW_INSECURE_LOOPBACK_ACCOUNT:
             return {
                 "available": True,
                 "secure": False,
@@ -396,7 +386,7 @@ def _account_request(path: str, *, method: str = "GET", token: str = "", payload
     if token:
         headers["Authorization"] = "Bearer " + token
     request = urllib.request.Request(
-        ACCOUNT_SERVICE_URL + path,
+        runtime.ACCOUNT_SERVICE_URL + path,
         data=json.dumps(payload or {}, ensure_ascii=False).encode("utf-8") if method == "POST" else None,
         headers=headers,
         method=method,
@@ -444,7 +434,7 @@ def _account_summary() -> Dict[str, Any]:
 
 def _apply_member_gate(services: Dict[str, Any]) -> Dict[str, Any]:
     """AI features are a membership entitlement when gating is enabled."""
-    if not AI_REQUIRES_MEMBER:
+    if not runtime.AI_REQUIRES_MEMBER:
         return services
     summary = _account_summary()
     if summary["member"]:
@@ -2059,7 +2049,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         self._send_json(payload, status)
 
     def _require_ai_entitlement(self) -> bool:
-        if not AI_REQUIRES_MEMBER:
+        if not runtime.AI_REQUIRES_MEMBER:
             return True
         account = _account_summary()
         if not account["logged_in"]:
@@ -2297,7 +2287,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
 
     def _migration_control_authorized(self) -> bool:
         provided = str(self.headers.get("X-My-Scholar-Migration-Token") or "")
-        return bool(MIGRATION_CONTROL_TOKEN) and hmac.compare_digest(provided, MIGRATION_CONTROL_TOKEN)
+        return bool(runtime.MIGRATION_CONTROL_TOKEN) and hmac.compare_digest(provided, runtime.MIGRATION_CONTROL_TOKEN)
 
     def _prepare_library_migration(self) -> None:
         if not self._migration_control_authorized():
@@ -3163,7 +3153,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             "logged_in": bool(state.get("token")),
             "profile": state.get("profile") if isinstance(state.get("profile"), dict) else None,
             "local_used_bytes": _local_usage_bytes(),
-            "ai_requires_member": AI_REQUIRES_MEMBER,
+            "ai_requires_member": runtime.AI_REQUIRES_MEMBER,
         })
 
     def _account_action(self, action: str) -> None:
@@ -3232,7 +3222,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 result = _account_request(f"/api/auth/{action}", method="POST", payload=body)
                 if not result.get("token"):
                     raise PipelineError("账号服务返回异常。")
-                fresh = {"server": ACCOUNT_SERVICE_URL, "username": username, "token": result["token"], "profile": result.get("profile") or {}}
+                fresh = {"server": runtime.ACCOUNT_SERVICE_URL, "username": username, "token": result["token"], "profile": result.get("profile") or {}}
                 _write_account_state(fresh)
                 response = {"ok": True, "logged_in": True, "profile": fresh["profile"], "local_used_bytes": _local_usage_bytes()}
                 if action == "register" and result.get("recovery_code"):
@@ -3923,9 +3913,9 @@ def _request_security_failure(handler: Any) -> Optional[tuple[str, int]]:
     # BaseHTTPRequestHandler requests always provide both attributes.
     if headers is None or server is None:
         return None
-    if API_ACCESS_TOKEN:
+    if runtime.API_ACCESS_TOKEN:
         provided = str(headers.get("X-My-Scholar-Api-Token") or "")
-        if not hmac.compare_digest(provided, API_ACCESS_TOKEN):
+        if not hmac.compare_digest(provided, runtime.API_ACCESS_TOKEN):
             return "本地服务访问凭据无效。", HTTPStatus.UNAUTHORIZED
     try:
         bound_host = str(server.server_address[0]).lower()
