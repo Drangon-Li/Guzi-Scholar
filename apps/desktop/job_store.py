@@ -21,8 +21,9 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+import runtime
 from pipeline import PipelineError, utc_now
-from runtime import METADATA_PENDING, METADATA_STATE_LOCK, READONLY_MODE
+from runtime import METADATA_PENDING, METADATA_STATE_LOCK
 
 PERMANENT_DELETE_JOURNAL_NAME = ".permanent-delete-journal.json"
 JOB_ID_RE = re.compile(r"^[a-f0-9]{12,40}$")
@@ -83,7 +84,7 @@ class JobStore:
         return [item for item in journal if isinstance(item, dict) and str(item.get("job_id") or "").strip()]
 
     def _write_permanent_delete_journal(self, entries: List[Dict[str, Any]]) -> None:
-        if READONLY_MODE:
+        if runtime.READONLY_MODE:
             return
         target = self.permanent_delete_journal_path
         temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
@@ -187,7 +188,7 @@ class JobStore:
 
     def _discard_abandoned_uploads(self) -> None:
         """Remove unpublished upload fragments left by an interrupted process."""
-        if READONLY_MODE:
+        if runtime.READONLY_MODE:
             return
         for child in self.incoming_root.iterdir():
             try:
@@ -222,7 +223,7 @@ class JobStore:
             pass
 
     def _persist_locked(self, record: Dict[str, Any]) -> None:
-        if READONLY_MODE:
+        if runtime.READONLY_MODE:
             return
         directory = Path(str(record["job_dir"]))
         if directory.is_dir():

@@ -215,7 +215,7 @@ class PermanentDeleteTest(unittest.TestCase):
         handler, responses, errors = self._handler()
         store = MagicMock()
         library = MagicMock()
-        with patch.object(server_module, "READONLY_MODE", True), patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library):
+        with patch.object(server_module.runtime, "READONLY_MODE", True), patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library):
             handler._permanently_delete_library_item("a" * 16)
         self.assertEqual(responses, [])
         self.assertEqual(errors, [("只读演示模式，暂不支持修改。", HTTPStatus.FORBIDDEN)])
@@ -875,7 +875,7 @@ class TranslationCacheTest(unittest.TestCase):
             with (
                 patch("server.STORE", StoreStub()),
                 patch("server.translation_profile_id", return_value=""),
-                patch.object(server_module, "READONLY_MODE", True),
+                patch.object(server_module.runtime, "READONLY_MODE", True),
             ):
                 handler.do_GET()
             self.assertEqual({item["cache_key"] for item in responses[0]["translations"]}, {"current", "legacy"})
@@ -2747,7 +2747,7 @@ class ReflowTest(unittest.TestCase):
                 store.update(record["job_id"], status="running")
                 handler._start_reflow(record["job_id"])
                 store.update(record["job_id"], status="completed")
-                with patch.object(server_module, "READONLY_MODE", True):
+                with patch.object(server_module.runtime, "READONLY_MODE", True):
                     handler._start_reflow(record["job_id"])
             self.assertEqual([status for _message, status in errors], [HTTPStatus.NOT_FOUND, HTTPStatus.CONFLICT, HTTPStatus.FORBIDDEN])
 
@@ -3101,7 +3101,7 @@ class MediaLayoutApiTest(unittest.TestCase):
             layout_path.write_text(original, encoding="utf-8")
             handler, responses, errors = self._handler(job_dir, {"items": {"block-1-image": {"width_percent": 80}}})
             handler._read_json_body = MagicMock(return_value={})
-            with handler._media_layout_store_patch, patch.object(server_module, "READONLY_MODE", True):
+            with handler._media_layout_store_patch, patch.object(server_module.runtime, "READONLY_MODE", True):
                 handler.do_PATCH()
             handler._read_json_body.assert_not_called()
             self.assertEqual(responses, [])
@@ -3141,7 +3141,7 @@ class ReadonlyHardeningTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="my-scholar-ro-write-") as temp:
             job_dir = Path(temp)
             (job_dir / "document.json").write_text("{}", encoding="utf-8")
-            with patch.object(server_module, "READONLY_MODE", True):
+            with patch.object(server_module.runtime, "READONLY_MODE", True):
                 server_module._ensure_content_layout(job_dir)
                 server_module._write_content_manifest(job_dir)
                 server_module._sync_content_file(job_dir, "notes/notes.md", "x")
@@ -3168,7 +3168,7 @@ class ReadonlyHardeningTest(unittest.TestCase):
         handler = object.__new__(ScholarHandler)
         blocked: list[tuple] = []
         handler._send_error_json = lambda message, status=None: blocked.append((message, status))
-        with patch.object(server_module, "READONLY_MODE", True):
+        with patch.object(server_module.runtime, "READONLY_MODE", True):
             handler._serve_job_artifact("a" * 16, "manifest.json", "")
         self.assertEqual(blocked[0][1], HTTPStatus.FORBIDDEN)
 
@@ -3176,7 +3176,7 @@ class ReadonlyHardeningTest(unittest.TestCase):
         handler = object.__new__(ScholarHandler)
         responses: list[dict] = []
         handler._send_json = lambda body, *_args, **_kwargs: responses.append(body)
-        with patch.object(server_module, "READONLY_MODE", True):
+        with patch.object(server_module.runtime, "READONLY_MODE", True):
             handler._account_status()
         self.assertNotIn("server", responses[0])
         self.assertNotIn("local_used_bytes", responses[0])
