@@ -1,8 +1,10 @@
 const { launchManagedChromium } = require('./playwright.cjs');
+const os = require('os');
 const path = require('path');
 
 const baseURL = process.argv[2] || 'http://127.0.0.1:8766';
-const screenshot = process.argv[3] || '/private/tmp/my-scholar-reader.png';
+// os.tmpdir() rather than /private/tmp, which only exists on macOS.
+const screenshot = process.argv[3] || path.join(os.tmpdir(), 'my-scholar-reader.png');
 const normalizeFontFamily = (value) => String(value || '').replace(/["']/gu, '').replace(/\s+/gu, '').toLowerCase();
 let browser;
 let browserSession;

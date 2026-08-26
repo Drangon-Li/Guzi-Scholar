@@ -35,7 +35,12 @@ BARE_IMPORT = re.compile(r"^\s*import fitz\b", re.M)
 
 class PyMuPDFRuntimeTest(unittest.TestCase):
     def test_loading_disables_the_python_diagnostic_callback(self) -> None:
-        fitz = load_fitz()
+        # PyMuPDF is an optional dependency and is absent on the CI runner.
+        # The static guard below is the one that has to hold everywhere.
+        try:
+            fitz = load_fitz()
+        except ImportError:
+            self.skipTest("PyMuPDF is not installed")
         # A no-argument call reads the current setting back.
         self.assertFalse(bool(fitz.TOOLS.mupdf_display_errors()))
         self.assertFalse(bool(fitz.TOOLS.mupdf_display_warnings()))

@@ -1,9 +1,13 @@
 'use strict';
 
+const os = require('os');
+const path = require('path');
 const { launchManagedChromium } = require('./playwright.cjs');
 
 const baseURL = process.argv[2] || 'http://127.0.0.1:8766';
-const screenshot = process.argv[3] || '/private/tmp/my-scholar-onboarding.png';
+// os.tmpdir() rather than /private/tmp: that path only exists on macOS, and
+// this suite also runs on the Linux CI runner.
+const screenshot = process.argv[3] || path.join(os.tmpdir(), 'my-scholar-onboarding.png');
 let browserSession;
 
 (async () => {
