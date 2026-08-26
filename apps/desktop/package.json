@@ -18,6 +18,8 @@
     "test:runtime": "node tests/python_runtime_test.js && node tests/macos_installation_test.js && node tests/mac_release_test.js",
     "test:deployment:tencent": "node tests/tencent_deploy_test.js",
     "test:ui": "node tests/run_ui_tests.js",
+    "test:ui:ci": "node tests/run_ui_tests.js --ci",
+    "fixture:ui": "python3 tests/fixtures/seed_library.py",
     "test:ui:document": "node tests/web_smoke.js",
     "test:ui:features": "node tests/feature_smoke.js",
     "test:ui:translation": "node tests/translation_smoke.js",
