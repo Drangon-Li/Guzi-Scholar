@@ -45,6 +45,7 @@ export default [
         ...globals.browser,
         // Attached by the sibling classic scripts, in load order.
         MyScholarCore: 'readonly',
+        MyScholarOnboarding: 'readonly',
         MyScholarGraphModel: 'readonly',
         MyScholarGraphView: 'readonly',
         cytoscape: 'readonly',
