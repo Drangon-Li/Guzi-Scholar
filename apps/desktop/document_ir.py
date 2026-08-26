@@ -1226,7 +1226,7 @@ def _prepare_pdf_span_indexes(
         raw_spans = pdf_page.get("spans", [])
         if not isinstance(raw_spans, list):
             raw_spans = []
-        for ordinal, span in enumerate(raw_spans):
+        for _ordinal, span in enumerate(raw_spans):
             if not isinstance(span, Mapping):
                 if not budget.checkpoint(1):
                     return None
@@ -1542,7 +1542,7 @@ def _drawing_marker_for_slot(
                 or not 0.72 <= shape_width / max(shape_height, 0.01) <= 1.28
                 or abs(_center_y(shape_box) - _center_y(line_box)) > 1.5
                 or not line_box[0] - 1.0 <= _center_x(shape_box) <= line_box[2] + 1.0
-                or max(abs(left - right) for left, right in zip(line_color, fill)) > 0.12
+                or max(abs(left - right) for left, right in zip(line_color, fill, strict=False)) > 0.12
             ):
                 continue
             if len(commands) >= 3 and all(command == "c" for command in commands):
@@ -1631,7 +1631,7 @@ def _drawing_marker_for_cue(
                 or not 0.72 <= shape_width / max(shape_height, 0.01) <= 1.28
                 or abs(_center_y(shape_box) - _center_y(line_box)) > 1.5
                 or not line_box[0] - 1.0 <= _center_x(shape_box) <= line_box[2] + 1.0
-                or max(abs(left - right) for left, right in zip(line_color, fill)) > 0.12
+                or max(abs(left - right) for left, right in zip(line_color, fill, strict=False)) > 0.12
             ):
                 continue
             if len(commands) >= 3 and all(command == "c" for command in commands):
@@ -2016,7 +2016,7 @@ def _recover_caption_continuations(
     recoveries: List[Dict[str, Any]] = []
     if len(pdf_pages) < len(pages) or len(span_indexes) < len(pages) or not budget.checkpoint():
         return recoveries
-    for previous_page, current_page in zip(pages, pages[1:]):
+    for previous_page, current_page in zip(pages, pages[1:], strict=False):
         if not budget.checkpoint():
             return recoveries
         previous = next(
@@ -2365,7 +2365,7 @@ def _merge_continuations(pages: List[Dict[str, Any]]) -> None:
         if left and right and _continues(left[-1], right[0]):
             _merge_elements(left[-1], right[0], "cross-column")
             elements.remove(right[0])
-    for previous_page, current_page in zip(pages, pages[1:]):
+    for previous_page, current_page in zip(pages, pages[1:], strict=False):
         previous = next((item for item in reversed(previous_page["elements"]) if item["type"] == "paragraph"), None)
         current = next((item for item in current_page["elements"] if item["type"] == "paragraph"), None)
         if previous and current and _continues(previous, current):

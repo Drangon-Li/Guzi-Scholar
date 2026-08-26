@@ -129,7 +129,7 @@ assert.doesNotMatch(releaseWorkflow, /gh release create[\s\S]*--prerelease/u, 's
 assert.match(releaseWorkflow, /stable GitHub release[\s\S]*ad-hoc signing[\s\S]*notarized by Apple/u, 'release notes must disclose the signing and notarization status');
 assert.match(releaseWorkflow, /Gatekeeper[\s\S]*right-click \*\*谷子学术\.app\*\*[\s\S]*Open/u, 'release notes must include the first-launch Gatekeeper guidance');
 assert.match(releaseWorkflow, /certifi==2025\.8\.3/u);
-assert.doesNotMatch(releaseWorkflow, /^  windows:/mu, 'Windows packaging must remain disabled until its runtime is self-contained');
+assert.doesNotMatch(releaseWorkflow, /^ {2}windows:/mu, 'Windows packaging must remain disabled until its runtime is self-contained');
 
 const prepareMacSource = fs.readFileSync(path.join(root, 'scripts', 'prepare-mac-release.sh'), 'utf8');
 assert.match(prepareMacSource, /import certifi; print\(certifi\.where\(\)\)/u);

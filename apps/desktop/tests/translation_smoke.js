@@ -156,7 +156,7 @@ let browserSession;
     const doc = source.ownerDocument;
     const walker = doc.createTreeWalker(source, NodeFilter.SHOW_TEXT);
     let textNode;
-    while ((textNode = walker.nextNode()) && !textNode.nodeValue.trim()) {}
+    while ((textNode = walker.nextNode()) && !textNode.nodeValue.trim()) { /* advance past blank text nodes */ }
     if (!textNode) return { ready: false, reason: 'source has no text node' };
     const range = doc.createRange();
     range.selectNodeContents(textNode);
@@ -178,7 +178,7 @@ let browserSession;
     const doc = translation.ownerDocument;
     const walker = doc.createTreeWalker(translation, NodeFilter.SHOW_TEXT);
     let textNode;
-    while ((textNode = walker.nextNode()) && !textNode.nodeValue.trim()) {}
+    while ((textNode = walker.nextNode()) && !textNode.nodeValue.trim()) { /* advance past blank text nodes */ }
     if (!textNode) return { ready: false, reason: 'translation has no text node' };
     const range = doc.createRange();
     range.selectNodeContents(textNode);

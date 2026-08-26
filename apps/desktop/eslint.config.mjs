@@ -1,33 +1,25 @@
 // Lint gate for the desktop JavaScript sources.
 //
-// Same philosophy as ruff.toml: a narrow set of rules that finds real defects
-// and can realistically stay at zero, rather than a style migration across a
-// 12k-line entrypoint. Stylistic rules are deliberately absent.
+// Same philosophy as ruff.toml: rules that find real defects and can stay at
+// zero, rather than a style migration across a 12k-line entrypoint. That is
+// exactly the remit of eslint's own recommended set ("problems", not "style"),
+// so this now takes it wholesale instead of hand-listing a subset of it.
 //
 // no-undef earns its place here more than anywhere else: web/app.js is one
 // closure with hundreds of functions, so a mistyped identifier is otherwise
 // only discovered at runtime, in whichever feature happens to touch it.
 
+import js from '@eslint/js';
 import globals from 'globals';
 
 const defects = {
-  'no-undef': 'error',
+  ...js.configs.recommended.rules,
+  // An empty catch is the deliberate idiom here for "this may fail and the
+  // failure is not interesting"; an empty block anywhere else is not.
+  'no-empty': ['error', { allowEmptyCatch: true }],
+  // Unused function arguments are usually positional placeholders, and a
+  // leading underscore is the existing convention for a deliberate discard.
   'no-unused-vars': ['error', { args: 'none', caughtErrors: 'none', varsIgnorePattern: '^_' }],
-  'no-const-assign': 'error',
-  'no-dupe-args': 'error',
-  'no-dupe-keys': 'error',
-  'no-dupe-class-members': 'error',
-  'no-duplicate-case': 'error',
-  'no-func-assign': 'error',
-  'no-import-assign': 'error',
-  'no-self-assign': 'error',
-  'no-self-compare': 'error',
-  'no-sparse-arrays': 'error',
-  'no-unreachable': 'error',
-  'no-unsafe-negation': 'error',
-  'no-unsafe-optional-chaining': 'error',
-  'use-isnan': 'error',
-  'valid-typeof': 'error',
 };
 
 export default [

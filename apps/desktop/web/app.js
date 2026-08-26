@@ -6391,7 +6391,7 @@
   });
 
   function escapeAnnotationMarkdownText(value) {
-    return String(value || '').replace(/\\/g, '\\\\').replace(/([*_`\[\]])/g, '\\$1');
+    return String(value || '').replace(/\\/g, '\\\\').replace(/([*_`[\]])/g, '\\$1');
   }
 
   function escapeAnnotationMarkdownBlockStart(value) {
@@ -9295,7 +9295,7 @@
     const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
     const inline = (value) => {
       const escaped = [];
-      const protectedValue = String(value || '').replace(/\\([\\*_`\[\]#>+\-.!()])/g, (_match, character) => {
+      const protectedValue = String(value || '').replace(/\\([\\*_`[\]#>+\-.!()])/g, (_match, character) => {
         escaped.push(character);
         return `\uE000${escaped.length - 1}\uE001`;
       });
@@ -10238,7 +10238,7 @@
       }
       if (clearKey) {
         clearKey.dataset.clearRequested = 'false';
-        clearKey.disabled = !Boolean(config.api_key_configured);
+        clearKey.disabled = !config.api_key_configured;
         clearKey.title = config.api_key_configured ? clearKey.getAttribute('aria-label') || '清除已保存的 API Key' : '当前没有已保存的 API Key';
       }
       aiModelLists[service] = [];

@@ -88,7 +88,7 @@
     const normalized = cleanText(value).toLowerCase();
     if (!normalized) return [];
     const tokens = [];
-    for (const match of normalized.matchAll(/[a-z0-9]+(?:[._+\-][a-z0-9]+)*/g)) {
+    for (const match of normalized.matchAll(/[a-z0-9]+(?:[._+-][a-z0-9]+)*/g)) {
       const token = match[0];
       if (token.length > 1 && !/^\d+$/.test(token) && !ENGLISH_STOPWORDS.has(token)) tokens.push(token);
     }

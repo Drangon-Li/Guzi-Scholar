@@ -3199,7 +3199,7 @@ class ReadonlyHardeningTest(unittest.TestCase):
         for verb in ("do_POST", "do_PUT", "do_PATCH", "do_DELETE"):
             handler = object.__new__(Handler)
             refused: list[tuple] = []
-            handler._send_error_json = lambda message, status=None: refused.append((message, status))
+            handler._send_error_json = lambda message, status=None, refused=refused: refused.append((message, status))
             getattr(handler, verb)()
             self.assertEqual(refused[0][1], HTTPStatus.FORBIDDEN, verb)
         self.assertIs(Handler.do_GET, ScholarHandler.do_GET)

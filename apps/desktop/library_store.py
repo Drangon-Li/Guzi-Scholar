@@ -112,7 +112,7 @@ def _normalize_column_width(value: Any, column_id: str, *, strict: bool = False)
         numeric = float(value)
     except (TypeError, ValueError):
         if strict:
-            raise LibraryValidationError("列宽必须是数字。")
+            raise LibraryValidationError("列宽必须是数字。") from None
         return None
     minimum = _column_min_width(column_id)
     if not math.isfinite(numeric):
