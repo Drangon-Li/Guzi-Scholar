@@ -96,7 +96,10 @@ jobs:
         run: npm ci --prefix apps/desktop
       - name: Install Playwright and Chromium
         run: |
-          npm install --global playwright
+          # Pinned: unpinned, CI silently tracked a newer Chromium than local
+          # runs used, and the two disagreed on whether a keepalive fetch is
+          # interceptable -- which is why a green local run could still fail here.
+          npm install --global playwright@1.58.2
           playwright install --with-deps chromium
           echo "MY_SCHOLAR_PLAYWRIGHT_MODULE=$(npm root -g)/playwright" >> "$GITHUB_ENV"
       # The runner seeds a fresh library and starts a dedicated server for each
