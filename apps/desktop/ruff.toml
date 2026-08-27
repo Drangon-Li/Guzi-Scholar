@@ -9,15 +9,20 @@
 #      This is the family that actually finds bugs; it caught a NameError in a
 #      test helper and a stale import left behind by a refactor.
 # E9 - syntax and IO errors that would fail at import time.
+# B  - bugbear: closures over loop variables, exceptions raised inside an
+#      except without an explicit chain, zip() over sequences of unequal
+#      length. Every site it reported was benign, but each one now says so.
 #
 # Widening this list is welcome, but do it one family at a time and land the
-# fixes in the same change.
+# fixes in the same change. The stylistic families remain out on purpose:
+# --select ALL reports 6980 findings, almost all of them assertion style,
+# type annotations and docstrings.
 
 target-version = "py311"
 line-length = 200
 
 [lint]
-select = ["F", "E9"]
+select = ["F", "E9", "B"]
 
 [format]
 # The formatter is not enabled; existing code does not follow its layout and

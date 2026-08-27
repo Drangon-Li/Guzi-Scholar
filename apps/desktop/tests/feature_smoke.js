@@ -82,7 +82,7 @@ let browserSession;
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ result: { text: '键盘交互回归回复。依据 [p1/block-1-6-paragraph]。短引用 [p1/block-6]，带页短引用 [p1/block-1-6]。错误页 [p2/block-1-6-paragraph]。代码 `[p1/block-1-6-paragraph]`，链接 [p1/block-1-6-paragraph](https://example.com)，数学 $[p1/block-1-6-paragraph]$，恶意 [p1/block-1-6-paragraph\"><img]。', model: 'chat-smoke' } }),
+      body: JSON.stringify({ result: { text: '键盘交互回归回复。依据 [p1/block-1-6-paragraph]。短引用 [p1/block-6]，带页短引用 [p1/block-1-6]。错误页 [p2/block-1-6-paragraph]。代码 `[p1/block-1-6-paragraph]`，链接 [p1/block-1-6-paragraph](https://example.com)，数学 $[p1/block-1-6-paragraph]$，恶意 [p1/block-1-6-paragraph"><img]。', model: 'chat-smoke' } }),
     });
   });
   await page.route('**/api/jobs/*/reference-summary', async (route) => route.fulfill({
@@ -251,7 +251,11 @@ let browserSession;
   await trigger.click();
   let popover = frame.locator('.annotation-note-popover');
   await popover.waitFor();
-  if (await page.locator('#selection-popover').isVisible()) throw new Error('Selection menu leaked into the annotation popover');
+  try {
+    await page.locator('#selection-popover').waitFor({ state: 'hidden', timeout: 5000 });
+  } catch {
+    throw new Error('Selection menu leaked into the annotation popover');
+  }
   let popoverText = await popover.textContent();
   if (!popoverText.includes('还没有笔记') || !popoverText.includes('划线笔记')) throw new Error('Empty inline annotation state was not rendered');
   if (await popover.locator('.annotation-color-swatch').count() !== 8) throw new Error('The Zotero-style annotation color palette was not rendered');
@@ -750,6 +754,11 @@ let browserSession;
   await lightbox.waitFor();
   const enlargedSource = await page.locator('#image-lightbox-image').getAttribute('src');
   if (new URL(enlargedSource, baseURL).href !== figureDetails.src || page.context().pages().length !== pagesBeforeLightbox) throw new Error('Clicking a paper image did not use the in-app lightbox');
+  await page.waitForFunction(
+    () => document.activeElement?.id === 'image-lightbox-close',
+    null,
+    { timeout: 5000 },
+  ).catch(() => {});
   const lightboxAccessibility = await page.evaluate(() => ({
     mainInert: document.querySelector('main')?.inert,
     headerInert: document.querySelector('.app-header')?.inert,
@@ -1322,8 +1331,20 @@ let browserSession;
   const durableDraftBeforeReload = await page.evaluate((expected) => Object.keys(localStorage).some((key) => String(localStorage.getItem(key) || '').includes(expected)), failedDraft);
   if (!durableDraftBeforeReload) throw new Error('The failed A draft was not persisted to localStorage before leaving the page');
   await page.reload({ waitUntil: 'networkidle' });
-  const sourceNotesBeforeRecovery = await page.evaluate(async (id) => (await (await fetch(`/api/jobs/${id}/notes`)).json()).markdown || '', jobId);
-  if (sourceNotesBeforeRecovery.includes(failedDraft)) throw new Error('The failed A draft unexpectedly reached the server before local recovery was exercised');
+  // On pagehide the app flushes every retained draft with a keepalive fetch,
+  // which page routes cannot intercept -- so the forced PUT failure does not
+  // stop this draft from reaching the server, and whether it beats the read
+  // below is only a matter of machine speed. Put the server copy back to what
+  // it was, so that recovering the draft can only have come from localStorage;
+  // retry, because that keepalive request may still be in flight.
+  let sourceNotesBeforeRecovery = '';
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await page.request.put(`${baseURL}/api/jobs/${jobId}/notes`, { data: { markdown: sourceNotesAfterSwitch } });
+    sourceNotesBeforeRecovery = (await (await page.request.get(`${baseURL}/api/jobs/${jobId}/notes`)).json()).markdown || '';
+    if (!sourceNotesBeforeRecovery.includes(failedDraft)) break;
+    await page.waitForTimeout(100);
+  }
+  if (sourceNotesBeforeRecovery.includes(failedDraft)) throw new Error('Could not clear A\'s server-side note before exercising local recovery');
   await page.locator(`#document-tabs .document-tab[data-job-id="${jobId}"]`).first().click();
   await page.locator('.sidebar-tab[data-panel="notes-panel"]').click();
   notesEditor = page.locator(`#notes-editor[contenteditable="true"][data-job-id="${jobId}"]`);
@@ -1440,9 +1461,15 @@ let browserSession;
   });
   const originalFrameSource = await page.locator('#html-preview').getAttribute('src');
   await page.locator('#reflow-button').click();
-  await page.locator('#reflow-progress[hidden]').waitFor();
+  // waitFor() defaults to 'visible', and styles.css forces [hidden] to
+  // display:none !important -- so the old selector could never resolve.
+  await page.locator('#reflow-progress').waitFor({ state: 'hidden' });
   if (reflowPostCount !== 0) throw new Error('Unavailable layout capability still submitted reflow');
-  if (!/未发现可复用.*扫描本机.*选择已有环境.*官方安装/u.test(await page.locator('#toast').textContent())) throw new Error('Artifact-unavailable preflight did not show scan, manual reuse, and official installation guidance');
+  // The preflight queries the layout capability before it can report, so the
+  // toast has to be waited for rather than read once.
+  await page.locator('#toast')
+    .filter({ hasText: /未发现可复用.*扫描本机.*选择已有环境.*官方安装/u })
+    .waitFor();
   parsingCapability = 'ready';
   await page.locator('#reflow-button').click();
   await page.locator('#confirm-dialog[open]').waitFor();

@@ -713,8 +713,8 @@ class AccountStore:
                             accepted_at if normalized_email is not None else "",
                         ),
                     )
-                except sqlite3.IntegrityError:
-                    raise AccountError("用户名或邮箱已被注册。", HTTPStatus.CONFLICT)
+                except sqlite3.IntegrityError as exc:
+                    raise AccountError("用户名或邮箱已被注册。", HTTPStatus.CONFLICT) from exc
                 updated = self._connection.execute(
                     "UPDATE invites SET use_count = use_count + 1"
                     " WHERE id = ? AND revoked_at IS NULL AND expires_at > ? AND use_count < max_uses",
@@ -943,8 +943,8 @@ class AccountStore:
                         " WHERE id = ? AND (email IS NULL OR email = '')",
                         (challenge["email"], utc_now(), user_id),
                     )
-                except sqlite3.IntegrityError:
-                    raise AccountError("该邮箱已绑定其他账号。", HTTPStatus.CONFLICT)
+                except sqlite3.IntegrityError as exc:
+                    raise AccountError("该邮箱已绑定其他账号。", HTTPStatus.CONFLICT) from exc
                 if updated.rowcount != 1:
                     raise AccountError("当前账号已绑定邮箱，暂不支持换绑。", HTTPStatus.CONFLICT)
                 self._connection.execute(
@@ -1173,7 +1173,7 @@ class AccountStore:
         try:
             value = max(0, int(used_bytes))
         except (TypeError, ValueError):
-            raise AccountError("used_bytes 必须是整数。")
+            raise AccountError("used_bytes 必须是整数。") from None
         with self._lock:
             self._connection.execute("UPDATE users SET used_bytes = ? WHERE id = ?", (value, row["id"]))
             self._connection.commit()
@@ -1269,7 +1269,7 @@ class AccountStore:
             uses = int(max_uses)
             days = int(valid_days)
         except (TypeError, ValueError):
-            raise AccountError("邀请码使用次数和有效天数必须是整数。")
+            raise AccountError("邀请码使用次数和有效天数必须是整数。") from None
         if uses < 1 or days < 1:
             raise AccountError("邀请码使用次数和有效天数必须大于零。")
         code = secrets.token_urlsafe(32)
@@ -1298,7 +1298,7 @@ class AccountStore:
         try:
             value = int(invite_id)
         except (TypeError, ValueError):
-            raise AccountError("邀请码 ID 必须是整数。")
+            raise AccountError("邀请码 ID 必须是整数。") from None
         with self._lock:
             row = self._connection.execute("SELECT * FROM invites WHERE id = ?", (value,)).fetchone()
             if row is None:
@@ -1496,7 +1496,7 @@ def build_handler(store: AccountStore) -> type:
             try:
                 payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
             except (json.JSONDecodeError, UnicodeDecodeError):
-                raise AccountError("请求体必须是 JSON。")
+                raise AccountError("请求体必须是 JSON。") from None
             return payload if isinstance(payload, dict) else {}
 
         def _bearer_token(self) -> str:

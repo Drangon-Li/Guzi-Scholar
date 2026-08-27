@@ -3516,7 +3516,29 @@
     $('#reader-chapter-list')?.replaceChildren();
     setChapterRailOpen(false);
     frame.src = url;
+    primeReaderAppearance(readerMount);
     return readerMount;
+  }
+
+  // wireFrame() pushes the reader's accent and fonts into the document, but it
+  // runs on the iframe's load event -- which waits for every image. Until then
+  // the document renders with its own stylesheet defaults, so a figure-heavy
+  // paper visibly opens in the wrong accent and font and then snaps. Push once
+  // as soon as the new document exists; wireFrame() re-applies at load.
+  function primeReaderAppearance(mount) {
+    const frame = $('#html-preview');
+    if (!frame || !mount) return;
+    const deadline = performance.now() + 10000;
+    const attempt = () => {
+      if (readerMount !== mount) return;
+      const doc = frame.contentDocument;
+      if (doc?.documentElement && readerURLIdentity(doc.URL) === mount.urlIdentity) {
+        setAppearanceVariables(doc.documentElement, state.appearance, { readerDocument: true, important: true });
+        return;
+      }
+      if (performance.now() < deadline) window.requestAnimationFrame(attempt);
+    };
+    window.requestAnimationFrame(attempt);
   }
 
   function readerScrollMetrics(doc = frameDocument()) {
@@ -6391,7 +6413,7 @@
   });
 
   function escapeAnnotationMarkdownText(value) {
-    return String(value || '').replace(/\\/g, '\\\\').replace(/([*_`\[\]])/g, '\\$1');
+    return String(value || '').replace(/\\/g, '\\\\').replace(/([*_`[\]])/g, '\\$1');
   }
 
   function escapeAnnotationMarkdownBlockStart(value) {
@@ -9295,7 +9317,7 @@
     const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
     const inline = (value) => {
       const escaped = [];
-      const protectedValue = String(value || '').replace(/\\([\\*_`\[\]#>+\-.!()])/g, (_match, character) => {
+      const protectedValue = String(value || '').replace(/\\([\\*_`[\]#>+\-.!()])/g, (_match, character) => {
         escaped.push(character);
         return `\uE000${escaped.length - 1}\uE001`;
       });
@@ -10238,7 +10260,7 @@
       }
       if (clearKey) {
         clearKey.dataset.clearRequested = 'false';
-        clearKey.disabled = !Boolean(config.api_key_configured);
+        clearKey.disabled = !config.api_key_configured;
         clearKey.title = config.api_key_configured ? clearKey.getAttribute('aria-label') || '清除已保存的 API Key' : '当前没有已保存的 API Key';
       }
       aiModelLists[service] = [];

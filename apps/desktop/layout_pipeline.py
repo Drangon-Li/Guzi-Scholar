@@ -47,8 +47,17 @@ CROSS_REF_RE = re.compile(
 )
 TAG_RE = re.compile(r"\\tag\s*\{([^{}]+)\}")
 SPECIAL_TOKEN_RE = re.compile(r"\[(?P<prefix>I|T)(?P<separator>\\?_)?(?P<suffix>CLS|SEP)\]", flags=re.IGNORECASE)
+# One local slot by default because the layout model, not the CPU, is the
+# constraint: on a 1GB card a 23-page paper spends ~10s in layout and ~9min in
+# Predict, since the batch size is forced to 1. A second concurrent run on that
+# card does not halve the wall clock, it runs both out of memory. Raise it with
+# MY_SCHOLAR_MINERU_WORKERS once the card has headroom -- see
+# mineru_worker_advice(), which says at startup whether it does.
 MINERU_WORKERS = max(1, min(2, int(os.environ.get("MY_SCHOLAR_MINERU_WORKERS", "1"))))
 MINERU_SEMAPHORE = threading.BoundedSemaphore(MINERU_WORKERS)
+# Below this a second concurrent run competes for memory instead of adding
+# throughput; above it the single slot is the limit rather than the card.
+MINERU_SECOND_WORKER_MIN_MB = 12_000
 # A remote run only uploads and waits, so the local single-slot limit would
 # throttle it for no reason; the GPU server does the queueing that matters.
 MINERU_REMOTE_WORKERS = max(1, min(8, int(os.environ.get("MY_SCHOLAR_MINERU_REMOTE_WORKERS", "4"))))
@@ -59,6 +68,50 @@ DEFAULT_MINERU_BACKEND = "pipeline"
 # OpenAI-compatible server (`mineru-openai-server`) and needs only CPU and
 # network. vlm-http-client does not need a local torch install at all.
 REMOTE_MINERU_BACKENDS = ("vlm-http-client", "hybrid-http-client")
+
+
+def detect_gpu_memory_mb() -> Optional[int]:
+    """Total memory of the largest local CUDA device, or None if there is none.
+
+    Shells out rather than importing torch: this runs at startup, on machines
+    that may have no torch install at all, and must never be the reason the
+    server is slow to answer.
+    """
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    sizes = []
+    for line in completed.stdout.splitlines():
+        try:
+            sizes.append(int(line.strip()))
+        except ValueError:
+            continue
+    return max(sizes) if sizes else None
+
+
+def mineru_worker_advice(memory_mb: Optional[int] = None) -> Optional[str]:
+    """One line on whether the local worker count still matches the hardware."""
+    if os.environ.get("MY_SCHOLAR_MINERU_WORKERS"):
+        return None
+    memory_mb = detect_gpu_memory_mb() if memory_mb is None else memory_mb
+    if memory_mb is None or memory_mb < MINERU_SECOND_WORKER_MIN_MB:
+        return None
+    return (
+        f"MinerU: {memory_mb // 1024}GB of GPU memory detected and "
+        f"MY_SCHOLAR_MINERU_WORKERS is unset, so layout runs one at a time. "
+        f"Set it to 2 to use the headroom."
+    )
+
+
 DISCOVERY_CACHE_LOCK = threading.RLock()
 DISCOVERY_CACHE: Dict[Tuple[str, str], Tuple[float, List[Path]]] = {}
 FIRST_PAGE_CACHE: Dict[Tuple[str, int, int], str] = {}
@@ -520,7 +573,7 @@ def _safe_inline_with_emphasis(value: Any, ranges: Optional[Sequence[Mapping[str
         return _safe_inline(raw)
     output: List[str] = []
     boundaries = sorted({0, len(raw), *(item["start"] for item in validated), *(item["end"] for item in validated)})
-    for start, end in zip(boundaries, boundaries[1:]):
+    for start, end in zip(boundaries, boundaries[1:], strict=False):
         if start >= end:
             continue
         active = [item for item in validated if item["start"] <= start and item["end"] >= end]
@@ -2372,6 +2425,122 @@ def _image_asset(source: Optional[str], alt: str) -> str:
     return f'<a class="asset-link" href="{html.escape(source, quote=True)}" target="_blank"><img src="{html.escape(source, quote=True)}" alt="{html.escape(alt, quote=True)}" loading="lazy"></a>'
 
 
+# The reading surface's stylesheet. Module level so the UI fixture can inline
+# the same bytes the pipeline emits; a copy in the fixture would drift.
+READER_DOCUMENT_CSS = r"""
+:root { color-scheme:light dark; --ink:#191919; --muted:#756b60; --line:#e7ded2; --paper:#fff; --soft:#fbf6ed; --accent:#d97706; --highlight-orange:#f59e0b; --user-highlight:#f59e0b; --reader-font-scale:1; --reader-line-height:1.72; --ui-font:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Segoe UI",sans-serif; --paper-font:"Times New Roman",Times,"Songti SC",STSong,"Noto Serif CJK SC",serif; }
+* { box-sizing:border-box; -webkit-user-select:none; user-select:none; } html { scroll-behavior:smooth; background:var(--paper); } body { margin:0; background:var(--paper); color:var(--ink); font-family:var(--ui-font); }
+.reader-topbar { position:sticky; top:0; z-index:5; display:flex; gap:14px; align-items:center; padding:13px 24px; background:rgba(255,255,255,.94); border-bottom:1px solid var(--line); backdrop-filter:blur(12px); } .reader-brand{font-weight:750}.reader-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:14px}
+.reader-shell{width:100%;max-width:none;margin:0;padding:0 24px 88px;background:var(--paper)}.reader-layout{display:block}
+.reader-content{max-width:1080px;margin:0 auto;background:var(--paper);font-family:var(--paper-font);font-size:calc(17px * var(--reader-font-scale));line-height:var(--reader-line-height);text-rendering:optimizeLegibility}.reader-content,.reader-content *{-webkit-user-select:text;user-select:text}
+.reader-embedded .reader-topbar{display:none}.reader-embedded .reader-shell{padding-top:0}
+.reader-nav,.source-crop,.page-source{display:none!important}.reader-content button,.reader-content button *,.reader-content input,.reader-content textarea,.reader-content select,.reader-content summary,.reader-content .paragraph-translate-trigger,.reader-content .paragraph-translate-trigger *,.reader-content .annotation-note-trigger,.reader-content .annotation-note-trigger *,.reader-content .annotation-note-popover,.reader-content .annotation-note-popover *{ -webkit-user-select:none; user-select:none; }
+.pdf-table figcaption[data-translate-block-id],.pdf-figure figcaption[data-translate-block-id]{position:relative}
+.annotation-note-popover{position:absolute}
+  .pdf-page{position:relative;margin:0;padding:0 clamp(30px,5vw,74px);background:var(--paper);border:0;border-radius:0;box-shadow:none}.pdf-page + .pdf-page{padding-top:0;border-top:0}.page-label{position:absolute;left:8px;top:12px;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}.page-content{max-width:960px;margin:0 auto}h1,h2,h3,h4,h5,h6{font-family:var(--paper-font);color:var(--ink);line-height:1.25}h1{margin:0 0 .7em;font-size:2.12rem}.paper-title{margin-bottom:.18em}.paper-metadata{margin:.38em 0;color:color-mix(in srgb,var(--ink) 42%,var(--paper));font-size:.92em;line-height:1.55}.paper-abstract-heading{font-style:normal;font-weight:700}.paper-abstract-body,.paper-abstract-translation{font-style:italic}.paper-section-label{font-weight:700}.paper-keywords,.paper-keywords-translation{font-style:italic;font-size:.95em}.paper-abstract-body .paragraph-translate-trigger,.paper-abstract-body .annotation-note-trigger,.paper-keywords .paragraph-translate-trigger,.paper-keywords .annotation-note-trigger{font-style:normal}h2{margin:1.3em 0 .55em;font-size:1.62rem}h3{margin:1.15em 0 .45em;font-size:1.28rem}p{margin:.72em 0}:is(p,ul,ol)[data-block-id]{position:relative}math,.math-inline,.pdf-equation{font-family:"Times New Roman",Times,serif}button,input,textarea,select,.reader-topbar,.paragraph-translate-trigger,.annotation-note-popover,.annotation-note-trigger{font-family:var(--ui-font)}a{color:var(--accent)}.pdf-figure,.pdf-table{margin:28px 0;padding:14px;border:1px solid var(--line);border-radius:9px;background:transparent}.pdf-figure img,.source-crop img,.page-source img{max-width:100%;height:auto;display:block;margin:0 auto}.pdf-figure .asset-link{display:block}.pdf-figure img{max-height:none;width:auto}.pdf-table figcaption,.pdf-figure figcaption{margin-top:12px;color:var(--muted);font-family:var(--paper-font);font-size:.96em;line-height:1.58}.inline-legend-marker{position:relative;display:inline-block;width:1.45em;height:.86em;margin:0 .12em;vertical-align:-.12em}.inline-legend-marker-gray{color:#9f9f9f}.inline-legend-line{position:absolute;left:.04em;right:.04em;top:50%;height:1px;background:currentColor}.inline-legend-shape{position:absolute;left:50%;top:50%;width:.48em;height:.48em;background:currentColor;transform:translate(-50%,-50%)}.inline-legend-marker-circle .inline-legend-shape{border-radius:50%}.table-scroll{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}.pdf-table table{width:max-content;min-width:100%;border-collapse:collapse;font-size:.86em}.pdf-table td,.pdf-table th{border:1px solid var(--line);padding:4px 6px;vertical-align:top;white-space:normal}.pdf-table th{background:var(--soft);font-weight:650}.pdf-equation{margin:22px 0;padding:10px 14px;border-left:4px solid var(--highlight-orange);background:var(--soft);overflow-x:auto}.equation-line{display:flex;align-items:center;justify-content:center;gap:16px;margin:9px 0;min-height:34px}.equation-line math[display="inline"],math.math-inline{vertical-align:-.16em;line-height:1.15}.equation-number{color:var(--muted);white-space:nowrap}.source-crop,.page-source{margin-top:10px;color:var(--muted);font-size:.85em}.source-crop summary,.page-source summary{cursor:pointer}.math-fallback code{white-space:pre-wrap}.references{list-style:none;padding-left:0}.references li{padding:.3em 0;line-height:1.62}.ref-number{color:var(--muted)}.citation,.cross-reference{white-space:nowrap}.block-selected{outline:2px solid var(--accent);outline-offset:3px}.reader-reflow .pdf-page{max-width:1080px;margin-left:auto;margin-right:auto}.reader-reflow .page-source{display:none}
+  .inline-legend-marker-gray{color:#8c8c8c}.inline-legend-marker-blue{color:#2f80ed}.inline-legend-marker-orange{color:#d97706}.inline-legend-marker-green{color:#2f855a}.inline-legend-marker-red{color:#d14343}.inline-legend-marker-purple{color:#805ad5}.inline-legend-marker-pink{color:#d53f8c}
+  .pdf-text-tone{font-weight:inherit}.pdf-text-tone-blue{color:#1769aa}.pdf-text-tone-orange{color:#a85d00}.pdf-text-tone-green{color:#237a4b}.pdf-text-tone-red{color:#b23a3a}.pdf-text-tone-purple{color:#7047a8}.pdf-text-tone-pink{color:#a93a6f}
+  .math-token{display:inline-block;white-space:nowrap;font-family:"Times New Roman",Times,serif;font-variant-ligatures:none}.math-token sub{font-size:.72em;line-height:0;vertical-align:-.32em}
+  .my-scholar-highlight{padding:.04em .08em;border-radius:.16em;background:rgba(246,166,35,.38);box-shadow:inset 0 -.09em 0 rgba(224,128,0,.42);color:inherit}
+  .my-scholar-underline{background:transparent;color:inherit;text-decoration:underline 2px var(--highlight-orange);text-underline-offset:3px}
+  .annotation-note-trigger{--annotation-color:var(--highlight-orange);display:inline-flex;width:17px;height:17px;align-items:center;justify-content:center;margin:0 3px;border:1px solid color-mix(in srgb,var(--annotation-color) 72%,var(--line));border-radius:50%;background:color-mix(in srgb,var(--annotation-color) 16%,transparent);color:color-mix(in srgb,var(--annotation-color) 72%,var(--ink));font-size:10px;line-height:1;vertical-align:2px;cursor:pointer}
+  .annotation-note-trigger:hover,.annotation-note-trigger:focus{border-color:var(--annotation-color);background:color-mix(in srgb,var(--annotation-color) 26%,transparent);outline:2px solid color-mix(in srgb,var(--annotation-color) 22%,transparent);outline-offset:1px}
+  .annotation-note-popover{--annotation-color:var(--highlight-orange);position:fixed;z-index:30;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:color-mix(in srgb,var(--paper) 97%,transparent);box-shadow:0 12px 32px rgba(30,48,65,.2);color:var(--ink);font-size:12px;line-height:1.5;transform-origin:top center;animation:annotation-popover-in 160ms cubic-bezier(.22,1,.36,1) both}
+  .annotation-note-popover.is-closing{opacity:0;transform:translateY(-2px) scale(.985);pointer-events:none;animation:none;transition:opacity 150ms ease-in,transform 150ms ease-in}
+  @keyframes annotation-popover-in{from{opacity:0;transform:translateY(3px) scale(.985)}to{opacity:1;transform:none}}
+  .annotation-note-popover-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:7px;color:color-mix(in srgb,var(--annotation-color) 72%,var(--ink))}
+  .annotation-note-popover-head span{color:var(--muted);font-size:10px}
+  .annotation-color-palette{display:flex;align-items:center;gap:5px;margin:0 0 9px;padding:2px 1px}
+  .annotation-color-swatch{position:relative;width:20px;height:20px;flex:0 0 20px;padding:0;border:2px solid var(--paper);border-radius:50%;background:var(--swatch-color);box-shadow:0 0 0 1px color-mix(in srgb,var(--swatch-color) 70%,var(--line));cursor:pointer;transition:transform .14s ease,box-shadow .14s ease}
+  .annotation-color-swatch:hover{transform:scale(1.08)}
+  .annotation-color-swatch:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+  .annotation-color-swatch:disabled{opacity:.55;cursor:wait}
+  .annotation-color-swatch[aria-pressed="true"]{box-shadow:0 0 0 2px var(--paper),0 0 0 4px var(--swatch-color)}
+  .annotation-color-swatch[aria-pressed="true"]::after{content:'✓';position:absolute;inset:0;display:grid;place-items:center;color:#20252a;font-size:11px;font-weight:800;text-shadow:0 1px rgba(255,255,255,.72)}
+  .annotation-note-popover-quote{max-height:100px;overflow:auto;padding:7px 8px;border-left:3px solid var(--annotation-color);background:color-mix(in srgb,var(--annotation-color) 9%,var(--paper));color:var(--ink);font-family:var(--paper-font);font-size:11px}
+  .annotation-note-popover.is-editing .annotation-note-popover-quote{display:none}
+  .annotation-note-popover-body,.annotation-note-editor{font-family:var(--paper-font)}
+  .annotation-note-popover-body{margin-top:8px;white-space:normal}
+  .annotation-note-popover-body p,.annotation-note-editor p{margin:.35em 0}
+  .annotation-note-popover-body ul,.annotation-note-popover-body ol,.annotation-note-editor ul,.annotation-note-editor ol{margin:.35em 0;padding-left:20px}
+  .annotation-note-popover-body blockquote,.annotation-note-editor blockquote{margin:.45em 0;padding-left:8px;border-left:3px solid var(--annotation-color);color:var(--muted)}
+  .annotation-note-popover-body h1,.annotation-note-popover-body h2,.annotation-note-popover-body h3,.annotation-note-editor h1,.annotation-note-editor h2,.annotation-note-editor h3{margin:.5em 0 .3em;font-family:inherit;font-size:1.12em;line-height:inherit}
+  .annotation-note-popover-body code,.annotation-note-editor code{padding:1px 3px;border-radius:3px;background:color-mix(in srgb,var(--annotation-color) 10%,var(--soft));font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em}
+  .annotation-note-popover-body a,.annotation-note-editor a{color:color-mix(in srgb,var(--annotation-color) 70%,var(--ink))}
+  .annotation-note-popover-body img,.annotation-note-editor img{display:block;max-width:100%;height:auto;margin:8px 0;border-radius:7px}
+  .annotation-note-editor-shell{overflow:hidden;border:1px solid var(--line);border-radius:8px;background:var(--paper)}
+  .annotation-note-formatbar{display:flex;flex-wrap:wrap;gap:3px;padding:5px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--annotation-color) 6%,var(--soft))}
+  .annotation-note-formatbar button{min-height:25px;padding:3px 6px;border:0;border-radius:5px;background:transparent;color:var(--ink);font:inherit;font-size:10px;cursor:pointer}
+  .annotation-note-formatbar button:hover,.annotation-note-formatbar button:focus-visible{background:color-mix(in srgb,var(--annotation-color) 16%,var(--paper));outline:none}
+  .annotation-note-formatbar button:disabled{opacity:.6;cursor:wait}
+  .annotation-note-editor{display:block;width:100%;min-height:108px;max-height:260px;overflow:auto;resize:vertical;padding:9px 10px;border:0;border-radius:0;outline:none;background:var(--paper);color:var(--ink);font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;caret-color:var(--annotation-color)}
+  .annotation-note-editor[contenteditable="true"],.annotation-note-editor[contenteditable="true"] *{-webkit-user-select:text!important;user-select:text!important}
+  .annotation-note-editor-shell:focus-within{border-color:var(--annotation-color);box-shadow:0 0 0 3px color-mix(in srgb,var(--annotation-color) 18%,transparent)}
+  .annotation-note-editor.is-empty::before{content:attr(data-placeholder);color:var(--muted);pointer-events:none}
+  .annotation-note-editor > :first-child{margin-top:0}
+  .annotation-note-editor > :last-child{margin-bottom:0}
+  .annotation-note-empty{color:var(--muted)}
+  .annotation-note-popover-actions{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}
+  .annotation-note-popover-actions button{padding:4px 7px;border:1px solid var(--line);border-radius:6px;background:var(--paper);color:var(--ink);font-size:10px;cursor:pointer}
+  .annotation-note-popover-actions button:hover{border-color:var(--annotation-color);background:color-mix(in srgb,var(--annotation-color) 12%,var(--paper))}
+  .paragraph-translate-trigger{position:absolute;right:-34px;top:50%;transform:translateY(-50%);opacity:0;padding:3px 7px;border:1px solid var(--line);border-radius:6px;background:var(--paper);color:var(--muted);font-size:11px;line-height:1.2;cursor:pointer;transition:opacity .15s ease,background .15s ease}
+  .paragraph-translate-trigger:hover,.paragraph-translate-trigger:focus,:is(p,ul,ol)[data-block-id]:hover .paragraph-translate-trigger{opacity:1;background:var(--soft);outline:none}
+  .my-scholar-translation{display:block;margin:.12em 0 .86em;padding:0 0 0 .92em;border-left:2px solid rgba(246,166,35,.58);background:transparent;color:color-mix(in srgb,var(--ink) 82%,var(--muted));font-family:var(--paper-font);font-size:.94em;line-height:1.68}
+  .my-scholar-translation.title-translation{margin:.1em 0 1.2em;padding-left:0;border-left:0;color:var(--ink);font-size:1.34em;line-height:1.48}
+  .my-scholar-translation .translation-text{white-space:pre-wrap}
+  .translation-text .translation-math{display:inline-block;margin:0 .08em;vertical-align:-.16em}
+  .translation-math-fallback{display:inline-block;white-space:nowrap}
+  .my-scholar-translation.is-pending{color:var(--muted)}
+  .my-scholar-translation.is-error{border-left-color:#d26b6b;color:#b24c4c}
+  .my-scholar-translation.is-cached{border-left-color:rgba(246,166,35,.58)}
+  .my-scholar-highlight[data-user-color="true"]{background:color-mix(in srgb,var(--user-highlight) 32%,transparent);box-shadow:inset 0 -.09em 0 color-mix(in srgb,var(--user-highlight) 62%,transparent)}.my-scholar-underline[data-user-color="true"]{text-decoration-color:var(--user-highlight)}
+.table-source-primary{padding:2px 0 8px}.table-source-primary img{width:auto;max-width:100%;height:auto}.table-image-only .table-source-primary img{display:block;max-height:none;margin:0 auto}.table-source-missing{margin-bottom:8px;padding:7px 9px;border-radius:6px;background:var(--soft);color:var(--muted);font-size:.82em}.table-structure{margin-top:8px}.table-structure summary{cursor:pointer;color:var(--muted);font-size:.86em}
+@media(prefers-color-scheme:dark){:root{--ink:#e8e8ea;--muted:#b9ad9d;--line:#493c2b;--paper:#111315;--soft:#241c12;--accent:#f3b34c;--user-highlight:#f3b34c}.reader-topbar{background:rgba(17,19,21,.94)}.my-scholar-highlight{background:rgba(246,166,35,.42);box-shadow:inset 0 -.09em 0 rgba(246,166,35,.55)}.my-scholar-highlight[data-user-color="true"]{background:color-mix(in srgb,var(--user-highlight) 42%,transparent);box-shadow:inset 0 -.09em 0 color-mix(in srgb,var(--user-highlight) 72%,transparent)}.annotation-note-popover{box-shadow:0 16px 40px rgba(0,0,0,.46)}.my-scholar-translation{color:#d3d3d5}.my-scholar-translation.is-error{color:#ff9b9b}.pdf-text-tone-blue{color:#7cc4ff}.pdf-text-tone-orange{color:#f0ad4e}.pdf-text-tone-green{color:#6fd39d}.pdf-text-tone-red{color:#ff8b8b}.pdf-text-tone-purple{color:#c4a5ff}.pdf-text-tone-pink{color:#ff93c1}}
+@media(prefers-reduced-motion:reduce){.annotation-note-popover{animation:none;transition:none}}
+@media(max-width:760px){.reader-layout{display:block}.pdf-page{padding:0 16px}.paragraph-translate-trigger{right:0;top:-22px;transform:none;opacity:.7}}
+
+/* My Scholar continuous reader overrides: page ids/data-page remain anchors, but
+   pagination must not become a visual card or inject a page-sized gap. */
+:root{--highlight-goal:#2f9d72;--highlight-method:#e39a22;--highlight-innovation:#8b6edb;--highlight-conclusion:#d15d79}
+.reader-content{padding:32px 0 48px}
+.pdf-page{padding-top:0;padding-bottom:0;border-top:0;border-bottom:0}
+.pdf-page + .pdf-page{padding-top:0;border-top:0}
+.pdf-page > :first-child{margin-top:0}
+.pdf-page > :last-child{margin-bottom:0}
+.pdf-page > .page-label + *{margin-top:0}
+.reader-content :is(h1.paper-title[data-block-id],h1[data-translate-block-id],p[data-block-id],figcaption[data-translate-block-id]):has(+ .my-scholar-translation){margin-bottom:0}
+.pdf-page > .my-scholar-translation:last-child{margin-bottom:.86em}
+.my-scholar-translation{border-left:0;padding-left:0}
+.highlight-group{--group-color:var(--highlight-method);--group-border:rgba(227,154,34,.42);--group-tint:rgba(227,154,34,.08);--group-label-bg:rgba(227,154,34,.18);--group-label-ink:#9a6208;border-color:var(--group-border);background:var(--group-tint)}
+.highlight-group-research_goal{--group-color:var(--highlight-goal);--group-border:rgba(47,157,114,.42);--group-tint:rgba(47,157,114,.08);--group-label-bg:rgba(47,157,114,.17);--group-label-ink:#237653}
+.highlight-group-innovation{--group-color:var(--highlight-innovation);--group-border:rgba(139,110,219,.45);--group-tint:rgba(139,110,219,.08);--group-label-bg:rgba(139,110,219,.17);--group-label-ink:#6950ae}
+.highlight-group-conclusion{--group-color:var(--highlight-conclusion);--group-border:rgba(209,93,121,.45);--group-tint:rgba(209,93,121,.08);--group-label-bg:rgba(209,93,121,.16);--group-label-ink:#a44661}
+.highlight-group h3{background:var(--group-label-bg);color:var(--group-label-ink)}
+.highlight-card{border-color:var(--group-border);border-left-color:var(--group-color)}
+.highlight-card:hover{background:color-mix(in srgb,var(--group-tint) 55%,var(--paper))}
+.my-scholar-highlight-research_goal{background:rgba(47,157,114,.24);box-shadow:inset 0 -.09em 0 rgba(47,157,114,.45)}
+.my-scholar-highlight-method{background:rgba(227,154,34,.28);box-shadow:inset 0 -.09em 0 rgba(227,154,34,.48)}
+.my-scholar-highlight-innovation{background:rgba(139,110,219,.24);box-shadow:inset 0 -.09em 0 rgba(139,110,219,.46)}
+.my-scholar-highlight-conclusion{background:rgba(209,93,121,.24);box-shadow:inset 0 -.09em 0 rgba(209,93,121,.46)}
+.highlight-filter[data-highlight-filter="research_goal"].active{border-color:var(--highlight-goal);background:rgba(47,157,114,.12);color:#237653}
+.highlight-filter[data-highlight-filter="method"].active{border-color:var(--highlight-method);background:rgba(227,154,34,.14);color:#9a6208}
+.highlight-filter[data-highlight-filter="innovation"].active{border-color:var(--highlight-innovation);background:rgba(139,110,219,.13);color:#6950ae}
+.highlight-filter[data-highlight-filter="conclusion"].active{border-color:var(--highlight-conclusion);background:rgba(209,93,121,.13);color:#a44661}
+@media(prefers-color-scheme:dark){
+  :root{--highlight-goal:#4fc58f;--highlight-method:#e3a44e;--highlight-innovation:#a894ef;--highlight-conclusion:#e77995}
+  .highlight-group{border-color:color-mix(in srgb,var(--group-color) 70%,var(--line));background:color-mix(in srgb,var(--group-color) 12%,var(--paper))}
+  .highlight-group h3{background:color-mix(in srgb,var(--group-color) 24%,var(--paper));color:color-mix(in srgb,var(--group-color) 66%,#fff)}
+  .highlight-card{border-color:color-mix(in srgb,var(--group-color) 66%,var(--line));background:var(--paper)}
+  .highlight-card:hover{background:color-mix(in srgb,var(--group-color) 16%,var(--paper))}
+  .my-scholar-highlight-research_goal{background:rgba(47,197,143,.34);box-shadow:inset 0 -.09em 0 rgba(47,197,143,.64)}
+  .my-scholar-highlight-method{background:rgba(227,164,78,.38);box-shadow:inset 0 -.09em 0 rgba(227,164,78,.68)}
+  .my-scholar-highlight-innovation{background:rgba(157,132,236,.36);box-shadow:inset 0 -.09em 0 rgba(157,132,236,.66)}
+  .my-scholar-highlight-conclusion{background:rgba(231,119,149,.36);box-shadow:inset 0 -.09em 0 rgba(231,119,149,.66)}
+}
+@media(max-width:760px){.reader-content{padding-top:22px;padding-bottom:32px}.pdf-page{padding-left:16px;padding-right:16px;padding-top:0;padding-bottom:0}}
+"""
+
+
 def _build_document_html(
     source_title: str,
     pages: List[List[Dict[str, Any]]],
@@ -2434,7 +2603,7 @@ def _build_document_html(
                 if page_no == 1 and block and not paper_title_seen:
                     block = re.sub(
                         r"<h([1-6])(?=[ >])",
-                        lambda match: f'<h{match.group(1)} class="paper-title" data-translate-block-id="{block_id}"',
+                        lambda match, block_id=block_id: f'<h{match.group(1)} class="paper-title" data-translate-block-id="{block_id}"',
                         block,
                         count=1,
                     )
@@ -2667,7 +2836,7 @@ def _build_document_html(
                 if "data-block-id=" not in block:
                     block = re.sub(
                         r"<(p|h[1-6]|ul|ol)(?=[ >])",
-                        lambda match: (
+                        lambda match, block_id=block_id, page_no=page_no, bbox=bbox: (
                             f'<{match.group(1)} data-block-id="{block_id}" data-page="{page_no}" '
                             f'data-bbox="{html.escape(json.dumps(bbox), quote=True)}"'
                         ),
@@ -2688,118 +2857,7 @@ def _build_document_html(
         html_pages.append("\n".join(rendered))
         manifest_pages.append({"page": page_no, "section_kind": section_kinds.get(page_no, "body"), "elements": records})
 
-    css = r"""
-:root { color-scheme:light dark; --ink:#191919; --muted:#756b60; --line:#e7ded2; --paper:#fff; --soft:#fbf6ed; --accent:#d97706; --highlight-orange:#f59e0b; --user-highlight:#f59e0b; --reader-font-scale:1; --reader-line-height:1.72; --ui-font:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Segoe UI",sans-serif; --paper-font:"Times New Roman",Times,"Songti SC",STSong,"Noto Serif CJK SC",serif; }
-* { box-sizing:border-box; -webkit-user-select:none; user-select:none; } html { scroll-behavior:smooth; background:var(--paper); } body { margin:0; background:var(--paper); color:var(--ink); font-family:var(--ui-font); }
-.reader-topbar { position:sticky; top:0; z-index:5; display:flex; gap:14px; align-items:center; padding:13px 24px; background:rgba(255,255,255,.94); border-bottom:1px solid var(--line); backdrop-filter:blur(12px); } .reader-brand{font-weight:750}.reader-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:14px}
-.reader-shell{width:100%;max-width:none;margin:0;padding:0 24px 88px;background:var(--paper)}.reader-layout{display:block}
-.reader-content{max-width:1080px;margin:0 auto;background:var(--paper);font-family:var(--paper-font);font-size:calc(17px * var(--reader-font-scale));line-height:var(--reader-line-height);text-rendering:optimizeLegibility}.reader-content,.reader-content *{-webkit-user-select:text;user-select:text}
-.reader-embedded .reader-topbar{display:none}.reader-embedded .reader-shell{padding-top:0}
-.reader-nav,.source-crop,.page-source{display:none!important}.reader-content button,.reader-content button *,.reader-content input,.reader-content textarea,.reader-content select,.reader-content summary,.reader-content .paragraph-translate-trigger,.reader-content .paragraph-translate-trigger *,.reader-content .annotation-note-trigger,.reader-content .annotation-note-trigger *,.reader-content .annotation-note-popover,.reader-content .annotation-note-popover *{ -webkit-user-select:none; user-select:none; }
-.pdf-table figcaption[data-translate-block-id],.pdf-figure figcaption[data-translate-block-id]{position:relative}
-.annotation-note-popover{position:absolute}
-  .pdf-page{position:relative;margin:0;padding:0 clamp(30px,5vw,74px);background:var(--paper);border:0;border-radius:0;box-shadow:none}.pdf-page + .pdf-page{padding-top:0;border-top:0}.page-label{position:absolute;left:8px;top:12px;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}.page-content{max-width:960px;margin:0 auto}h1,h2,h3,h4,h5,h6{font-family:var(--paper-font);color:var(--ink);line-height:1.25}h1{margin:0 0 .7em;font-size:2.12rem}.paper-title{margin-bottom:.18em}.paper-metadata{margin:.38em 0;color:color-mix(in srgb,var(--ink) 42%,var(--paper));font-size:.92em;line-height:1.55}.paper-abstract-heading{font-style:normal;font-weight:700}.paper-abstract-body,.paper-abstract-translation{font-style:italic}.paper-section-label{font-weight:700}.paper-keywords,.paper-keywords-translation{font-style:italic;font-size:.95em}.paper-abstract-body .paragraph-translate-trigger,.paper-abstract-body .annotation-note-trigger,.paper-keywords .paragraph-translate-trigger,.paper-keywords .annotation-note-trigger{font-style:normal}h2{margin:1.3em 0 .55em;font-size:1.62rem}h3{margin:1.15em 0 .45em;font-size:1.28rem}p{margin:.72em 0}:is(p,ul,ol)[data-block-id]{position:relative}math,.math-inline,.pdf-equation{font-family:"Times New Roman",Times,serif}button,input,textarea,select,.reader-topbar,.paragraph-translate-trigger,.annotation-note-popover,.annotation-note-trigger{font-family:var(--ui-font)}a{color:var(--accent)}.pdf-figure,.pdf-table{margin:28px 0;padding:14px;border:1px solid var(--line);border-radius:9px;background:transparent}.pdf-figure img,.source-crop img,.page-source img{max-width:100%;height:auto;display:block;margin:0 auto}.pdf-figure .asset-link{display:block}.pdf-figure img{max-height:none;width:auto}.pdf-table figcaption,.pdf-figure figcaption{margin-top:12px;color:var(--muted);font-family:var(--paper-font);font-size:.96em;line-height:1.58}.inline-legend-marker{position:relative;display:inline-block;width:1.45em;height:.86em;margin:0 .12em;vertical-align:-.12em}.inline-legend-marker-gray{color:#9f9f9f}.inline-legend-line{position:absolute;left:.04em;right:.04em;top:50%;height:1px;background:currentColor}.inline-legend-shape{position:absolute;left:50%;top:50%;width:.48em;height:.48em;background:currentColor;transform:translate(-50%,-50%)}.inline-legend-marker-circle .inline-legend-shape{border-radius:50%}.table-scroll{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}.pdf-table table{width:max-content;min-width:100%;border-collapse:collapse;font-size:.86em}.pdf-table td,.pdf-table th{border:1px solid var(--line);padding:4px 6px;vertical-align:top;white-space:normal}.pdf-table th{background:var(--soft);font-weight:650}.pdf-equation{margin:22px 0;padding:10px 14px;border-left:4px solid var(--highlight-orange);background:var(--soft);overflow-x:auto}.equation-line{display:flex;align-items:center;justify-content:center;gap:16px;margin:9px 0;min-height:34px}.equation-line math[display="inline"],math.math-inline{vertical-align:-.16em;line-height:1.15}.equation-number{color:var(--muted);white-space:nowrap}.source-crop,.page-source{margin-top:10px;color:var(--muted);font-size:.85em}.source-crop summary,.page-source summary{cursor:pointer}.math-fallback code{white-space:pre-wrap}.references{list-style:none;padding-left:0}.references li{padding:.3em 0;line-height:1.62}.ref-number{color:var(--muted)}.citation,.cross-reference{white-space:nowrap}.block-selected{outline:2px solid var(--accent);outline-offset:3px}.reader-reflow .pdf-page{max-width:1080px;margin-left:auto;margin-right:auto}.reader-reflow .page-source{display:none}
-  .inline-legend-marker-gray{color:#8c8c8c}.inline-legend-marker-blue{color:#2f80ed}.inline-legend-marker-orange{color:#d97706}.inline-legend-marker-green{color:#2f855a}.inline-legend-marker-red{color:#d14343}.inline-legend-marker-purple{color:#805ad5}.inline-legend-marker-pink{color:#d53f8c}
-  .pdf-text-tone{font-weight:inherit}.pdf-text-tone-blue{color:#1769aa}.pdf-text-tone-orange{color:#a85d00}.pdf-text-tone-green{color:#237a4b}.pdf-text-tone-red{color:#b23a3a}.pdf-text-tone-purple{color:#7047a8}.pdf-text-tone-pink{color:#a93a6f}
-  .math-token{display:inline-block;white-space:nowrap;font-family:"Times New Roman",Times,serif;font-variant-ligatures:none}.math-token sub{font-size:.72em;line-height:0;vertical-align:-.32em}
-  .my-scholar-highlight{padding:.04em .08em;border-radius:.16em;background:rgba(246,166,35,.38);box-shadow:inset 0 -.09em 0 rgba(224,128,0,.42);color:inherit}
-  .my-scholar-underline{background:transparent;color:inherit;text-decoration:underline 2px var(--highlight-orange);text-underline-offset:3px}
-  .annotation-note-trigger{--annotation-color:var(--highlight-orange);display:inline-flex;width:17px;height:17px;align-items:center;justify-content:center;margin:0 3px;border:1px solid color-mix(in srgb,var(--annotation-color) 72%,var(--line));border-radius:50%;background:color-mix(in srgb,var(--annotation-color) 16%,transparent);color:color-mix(in srgb,var(--annotation-color) 72%,var(--ink));font-size:10px;line-height:1;vertical-align:2px;cursor:pointer}
-  .annotation-note-trigger:hover,.annotation-note-trigger:focus{border-color:var(--annotation-color);background:color-mix(in srgb,var(--annotation-color) 26%,transparent);outline:2px solid color-mix(in srgb,var(--annotation-color) 22%,transparent);outline-offset:1px}
-  .annotation-note-popover{--annotation-color:var(--highlight-orange);position:fixed;z-index:30;padding:11px 12px;border:1px solid var(--line);border-radius:10px;background:color-mix(in srgb,var(--paper) 97%,transparent);box-shadow:0 12px 32px rgba(30,48,65,.2);color:var(--ink);font-size:12px;line-height:1.5;transform-origin:top center;animation:annotation-popover-in 160ms cubic-bezier(.22,1,.36,1) both}
-  .annotation-note-popover.is-closing{opacity:0;transform:translateY(-2px) scale(.985);pointer-events:none;animation:none;transition:opacity 150ms ease-in,transform 150ms ease-in}
-  @keyframes annotation-popover-in{from{opacity:0;transform:translateY(3px) scale(.985)}to{opacity:1;transform:none}}
-  .annotation-note-popover-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:7px;color:color-mix(in srgb,var(--annotation-color) 72%,var(--ink))}
-  .annotation-note-popover-head span{color:var(--muted);font-size:10px}
-  .annotation-color-palette{display:flex;align-items:center;gap:5px;margin:0 0 9px;padding:2px 1px}
-  .annotation-color-swatch{position:relative;width:20px;height:20px;flex:0 0 20px;padding:0;border:2px solid var(--paper);border-radius:50%;background:var(--swatch-color);box-shadow:0 0 0 1px color-mix(in srgb,var(--swatch-color) 70%,var(--line));cursor:pointer;transition:transform .14s ease,box-shadow .14s ease}
-  .annotation-color-swatch:hover{transform:scale(1.08)}
-  .annotation-color-swatch:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
-  .annotation-color-swatch:disabled{opacity:.55;cursor:wait}
-  .annotation-color-swatch[aria-pressed="true"]{box-shadow:0 0 0 2px var(--paper),0 0 0 4px var(--swatch-color)}
-  .annotation-color-swatch[aria-pressed="true"]::after{content:'✓';position:absolute;inset:0;display:grid;place-items:center;color:#20252a;font-size:11px;font-weight:800;text-shadow:0 1px rgba(255,255,255,.72)}
-  .annotation-note-popover-quote{max-height:100px;overflow:auto;padding:7px 8px;border-left:3px solid var(--annotation-color);background:color-mix(in srgb,var(--annotation-color) 9%,var(--paper));color:var(--ink);font-family:var(--paper-font);font-size:11px}
-  .annotation-note-popover.is-editing .annotation-note-popover-quote{display:none}
-  .annotation-note-popover-body,.annotation-note-editor{font-family:var(--paper-font)}
-  .annotation-note-popover-body{margin-top:8px;white-space:normal}
-  .annotation-note-popover-body p,.annotation-note-editor p{margin:.35em 0}
-  .annotation-note-popover-body ul,.annotation-note-popover-body ol,.annotation-note-editor ul,.annotation-note-editor ol{margin:.35em 0;padding-left:20px}
-  .annotation-note-popover-body blockquote,.annotation-note-editor blockquote{margin:.45em 0;padding-left:8px;border-left:3px solid var(--annotation-color);color:var(--muted)}
-  .annotation-note-popover-body h1,.annotation-note-popover-body h2,.annotation-note-popover-body h3,.annotation-note-editor h1,.annotation-note-editor h2,.annotation-note-editor h3{margin:.5em 0 .3em;font-family:inherit;font-size:1.12em;line-height:inherit}
-  .annotation-note-popover-body code,.annotation-note-editor code{padding:1px 3px;border-radius:3px;background:color-mix(in srgb,var(--annotation-color) 10%,var(--soft));font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em}
-  .annotation-note-popover-body a,.annotation-note-editor a{color:color-mix(in srgb,var(--annotation-color) 70%,var(--ink))}
-  .annotation-note-popover-body img,.annotation-note-editor img{display:block;max-width:100%;height:auto;margin:8px 0;border-radius:7px}
-  .annotation-note-editor-shell{overflow:hidden;border:1px solid var(--line);border-radius:8px;background:var(--paper)}
-  .annotation-note-formatbar{display:flex;flex-wrap:wrap;gap:3px;padding:5px;border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--annotation-color) 6%,var(--soft))}
-  .annotation-note-formatbar button{min-height:25px;padding:3px 6px;border:0;border-radius:5px;background:transparent;color:var(--ink);font:inherit;font-size:10px;cursor:pointer}
-  .annotation-note-formatbar button:hover,.annotation-note-formatbar button:focus-visible{background:color-mix(in srgb,var(--annotation-color) 16%,var(--paper));outline:none}
-  .annotation-note-formatbar button:disabled{opacity:.6;cursor:wait}
-  .annotation-note-editor{display:block;width:100%;min-height:108px;max-height:260px;overflow:auto;resize:vertical;padding:9px 10px;border:0;border-radius:0;outline:none;background:var(--paper);color:var(--ink);font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;caret-color:var(--annotation-color)}
-  .annotation-note-editor[contenteditable="true"],.annotation-note-editor[contenteditable="true"] *{-webkit-user-select:text!important;user-select:text!important}
-  .annotation-note-editor-shell:focus-within{border-color:var(--annotation-color);box-shadow:0 0 0 3px color-mix(in srgb,var(--annotation-color) 18%,transparent)}
-  .annotation-note-editor.is-empty::before{content:attr(data-placeholder);color:var(--muted);pointer-events:none}
-  .annotation-note-editor > :first-child{margin-top:0}
-  .annotation-note-editor > :last-child{margin-bottom:0}
-  .annotation-note-empty{color:var(--muted)}
-  .annotation-note-popover-actions{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}
-  .annotation-note-popover-actions button{padding:4px 7px;border:1px solid var(--line);border-radius:6px;background:var(--paper);color:var(--ink);font-size:10px;cursor:pointer}
-  .annotation-note-popover-actions button:hover{border-color:var(--annotation-color);background:color-mix(in srgb,var(--annotation-color) 12%,var(--paper))}
-  .paragraph-translate-trigger{position:absolute;right:-34px;top:50%;transform:translateY(-50%);opacity:0;padding:3px 7px;border:1px solid var(--line);border-radius:6px;background:var(--paper);color:var(--muted);font-size:11px;line-height:1.2;cursor:pointer;transition:opacity .15s ease,background .15s ease}
-  .paragraph-translate-trigger:hover,.paragraph-translate-trigger:focus,:is(p,ul,ol)[data-block-id]:hover .paragraph-translate-trigger{opacity:1;background:var(--soft);outline:none}
-  .my-scholar-translation{display:block;margin:.12em 0 .86em;padding:0 0 0 .92em;border-left:2px solid rgba(246,166,35,.58);background:transparent;color:color-mix(in srgb,var(--ink) 82%,var(--muted));font-family:var(--paper-font);font-size:.94em;line-height:1.68}
-  .my-scholar-translation.title-translation{margin:.1em 0 1.2em;padding-left:0;border-left:0;color:var(--ink);font-size:1.34em;line-height:1.48}
-  .my-scholar-translation .translation-text{white-space:pre-wrap}
-  .translation-text .translation-math{display:inline-block;margin:0 .08em;vertical-align:-.16em}
-  .translation-math-fallback{display:inline-block;white-space:nowrap}
-  .my-scholar-translation.is-pending{color:var(--muted)}
-  .my-scholar-translation.is-error{border-left-color:#d26b6b;color:#b24c4c}
-  .my-scholar-translation.is-cached{border-left-color:rgba(246,166,35,.58)}
-  .my-scholar-highlight[data-user-color="true"]{background:color-mix(in srgb,var(--user-highlight) 32%,transparent);box-shadow:inset 0 -.09em 0 color-mix(in srgb,var(--user-highlight) 62%,transparent)}.my-scholar-underline[data-user-color="true"]{text-decoration-color:var(--user-highlight)}
-.table-source-primary{padding:2px 0 8px}.table-source-primary img{width:auto;max-width:100%;height:auto}.table-image-only .table-source-primary img{display:block;max-height:none;margin:0 auto}.table-source-missing{margin-bottom:8px;padding:7px 9px;border-radius:6px;background:var(--soft);color:var(--muted);font-size:.82em}.table-structure{margin-top:8px}.table-structure summary{cursor:pointer;color:var(--muted);font-size:.86em}
-@media(prefers-color-scheme:dark){:root{--ink:#e8e8ea;--muted:#b9ad9d;--line:#493c2b;--paper:#111315;--soft:#241c12;--accent:#f3b34c;--user-highlight:#f3b34c}.reader-topbar{background:rgba(17,19,21,.94)}.my-scholar-highlight{background:rgba(246,166,35,.42);box-shadow:inset 0 -.09em 0 rgba(246,166,35,.55)}.my-scholar-highlight[data-user-color="true"]{background:color-mix(in srgb,var(--user-highlight) 42%,transparent);box-shadow:inset 0 -.09em 0 color-mix(in srgb,var(--user-highlight) 72%,transparent)}.annotation-note-popover{box-shadow:0 16px 40px rgba(0,0,0,.46)}.my-scholar-translation{color:#d3d3d5}.my-scholar-translation.is-error{color:#ff9b9b}.pdf-text-tone-blue{color:#7cc4ff}.pdf-text-tone-orange{color:#f0ad4e}.pdf-text-tone-green{color:#6fd39d}.pdf-text-tone-red{color:#ff8b8b}.pdf-text-tone-purple{color:#c4a5ff}.pdf-text-tone-pink{color:#ff93c1}}
-@media(prefers-reduced-motion:reduce){.annotation-note-popover{animation:none;transition:none}}
-@media(max-width:760px){.reader-layout{display:block}.pdf-page{padding:0 16px}.paragraph-translate-trigger{right:0;top:-22px;transform:none;opacity:.7}}
-
-/* My Scholar continuous reader overrides: page ids/data-page remain anchors, but
-   pagination must not become a visual card or inject a page-sized gap. */
-:root{--highlight-goal:#2f9d72;--highlight-method:#e39a22;--highlight-innovation:#8b6edb;--highlight-conclusion:#d15d79}
-.reader-content{padding:32px 0 48px}
-.pdf-page{padding-top:0;padding-bottom:0;border-top:0;border-bottom:0}
-.pdf-page + .pdf-page{padding-top:0;border-top:0}
-.pdf-page > :first-child{margin-top:0}
-.pdf-page > :last-child{margin-bottom:0}
-.pdf-page > .page-label + *{margin-top:0}
-.reader-content :is(h1.paper-title[data-block-id],h1[data-translate-block-id],p[data-block-id],figcaption[data-translate-block-id]):has(+ .my-scholar-translation){margin-bottom:0}
-.pdf-page > .my-scholar-translation:last-child{margin-bottom:.86em}
-.my-scholar-translation{border-left:0;padding-left:0}
-.highlight-group{--group-color:var(--highlight-method);--group-border:rgba(227,154,34,.42);--group-tint:rgba(227,154,34,.08);--group-label-bg:rgba(227,154,34,.18);--group-label-ink:#9a6208;border-color:var(--group-border);background:var(--group-tint)}
-.highlight-group-research_goal{--group-color:var(--highlight-goal);--group-border:rgba(47,157,114,.42);--group-tint:rgba(47,157,114,.08);--group-label-bg:rgba(47,157,114,.17);--group-label-ink:#237653}
-.highlight-group-innovation{--group-color:var(--highlight-innovation);--group-border:rgba(139,110,219,.45);--group-tint:rgba(139,110,219,.08);--group-label-bg:rgba(139,110,219,.17);--group-label-ink:#6950ae}
-.highlight-group-conclusion{--group-color:var(--highlight-conclusion);--group-border:rgba(209,93,121,.45);--group-tint:rgba(209,93,121,.08);--group-label-bg:rgba(209,93,121,.16);--group-label-ink:#a44661}
-.highlight-group h3{background:var(--group-label-bg);color:var(--group-label-ink)}
-.highlight-card{border-color:var(--group-border);border-left-color:var(--group-color)}
-.highlight-card:hover{background:color-mix(in srgb,var(--group-tint) 55%,var(--paper))}
-.my-scholar-highlight-research_goal{background:rgba(47,157,114,.24);box-shadow:inset 0 -.09em 0 rgba(47,157,114,.45)}
-.my-scholar-highlight-method{background:rgba(227,154,34,.28);box-shadow:inset 0 -.09em 0 rgba(227,154,34,.48)}
-.my-scholar-highlight-innovation{background:rgba(139,110,219,.24);box-shadow:inset 0 -.09em 0 rgba(139,110,219,.46)}
-.my-scholar-highlight-conclusion{background:rgba(209,93,121,.24);box-shadow:inset 0 -.09em 0 rgba(209,93,121,.46)}
-.highlight-filter[data-highlight-filter="research_goal"].active{border-color:var(--highlight-goal);background:rgba(47,157,114,.12);color:#237653}
-.highlight-filter[data-highlight-filter="method"].active{border-color:var(--highlight-method);background:rgba(227,154,34,.14);color:#9a6208}
-.highlight-filter[data-highlight-filter="innovation"].active{border-color:var(--highlight-innovation);background:rgba(139,110,219,.13);color:#6950ae}
-.highlight-filter[data-highlight-filter="conclusion"].active{border-color:var(--highlight-conclusion);background:rgba(209,93,121,.13);color:#a44661}
-@media(prefers-color-scheme:dark){
-  :root{--highlight-goal:#4fc58f;--highlight-method:#e3a44e;--highlight-innovation:#a894ef;--highlight-conclusion:#e77995}
-  .highlight-group{border-color:color-mix(in srgb,var(--group-color) 70%,var(--line));background:color-mix(in srgb,var(--group-color) 12%,var(--paper))}
-  .highlight-group h3{background:color-mix(in srgb,var(--group-color) 24%,var(--paper));color:color-mix(in srgb,var(--group-color) 66%,#fff)}
-  .highlight-card{border-color:color-mix(in srgb,var(--group-color) 66%,var(--line));background:var(--paper)}
-  .highlight-card:hover{background:color-mix(in srgb,var(--group-color) 16%,var(--paper))}
-  .my-scholar-highlight-research_goal{background:rgba(47,197,143,.34);box-shadow:inset 0 -.09em 0 rgba(47,197,143,.64)}
-  .my-scholar-highlight-method{background:rgba(227,164,78,.38);box-shadow:inset 0 -.09em 0 rgba(227,164,78,.68)}
-  .my-scholar-highlight-innovation{background:rgba(157,132,236,.36);box-shadow:inset 0 -.09em 0 rgba(157,132,236,.66)}
-  .my-scholar-highlight-conclusion{background:rgba(231,119,149,.36);box-shadow:inset 0 -.09em 0 rgba(231,119,149,.66)}
-}
-@media(max-width:760px){.reader-content{padding-top:22px;padding-bottom:32px}.pdf-page{padding-left:16px;padding-right:16px;padding-top:0;padding-bottom:0}}
-"""
+    css = READER_DOCUMENT_CSS
     document = f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(source_title)}</title><link rel="icon" href="data:,"><style>{css}</style></head><body><header class="reader-topbar"><span class="reader-brand">My Scholar</span><span class="reader-title">{html.escape(source_title)}</span></header><div class="reader-shell"><div class="reader-layout"><main class="reader-content">{"".join(html_pages)}</main></div></div></body></html>'''
     metadata = {
         "pages": manifest_pages,

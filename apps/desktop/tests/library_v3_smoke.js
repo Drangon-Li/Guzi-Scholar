@@ -18,6 +18,16 @@ let browserSession;
     const expectedImportPollError = expectingImportPollFailure && message.text().includes('503');
     if (message.type() === 'error' && !expectedImportanceError && !expectedImportPollError) errors.push(`console: ${message.text()}`);
   });
+  // The metadata follow-up this suite exercises only runs when automatic
+  // retrieval is on, and the CI fixture ships it off so a run never reaches
+  // the network. Declare the precondition here; online lookup stays off.
+  await page.route('**/api/settings', async (route) => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await page.request.get(route.request().url());
+    const settings = await response.json();
+    settings.metadata = { ...(settings.metadata || {}), auto_retrieve: true, online_lookup: false };
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify(settings) });
+  });
   await page.goto(baseURL, { waitUntil: 'networkidle' });
   await page.locator('#recent-list .library-row').first().waitFor();
   if (await page.locator('.library-import').count()) throw new Error('The large import panel is still rendered');

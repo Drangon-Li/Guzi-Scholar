@@ -58,7 +58,13 @@ from content_store import MAX_NOTE_ASSET_BYTES, _active_conversion_root, _atomic
 from content_store import MAX_MEDIA_LAYOUT_ITEMS, _write_content_manifest, _write_english_snapshot  # noqa: F401
 from job_store import JOB_ID_RE, RENDER_GENERATION_RE, JobStore, ReflowCancelledError, ReflowConflictError, _read_json_file, set_artifact_migrator
 from library_store import LibraryStore, LibraryValidationError
-from layout_pipeline import LayoutPipelineError, MathRenderer, normalize_mineru_backend, normalize_mineru_server_url
+from layout_pipeline import (
+    LayoutPipelineError,
+    MathRenderer,
+    mineru_worker_advice,
+    normalize_mineru_backend,
+    normalize_mineru_server_url,
+)
 from parsing_providers import ProviderError, ParsingRequest, create_default_registry
 from pipeline import PipelineError, process_pdf, utc_now
 from runtime import METADATA_PENDING, METADATA_STATE_LOCK
@@ -400,7 +406,7 @@ def _account_request(path: str, *, method: str = "GET", token: str = "", payload
             detail = json.loads(exc.read().decode("utf-8", errors="replace")).get("error", "")
         except Exception:
             detail = ""
-        raise PipelineError(detail or f"账号服务错误（HTTP {exc.code}）。")
+        raise PipelineError(detail or f"账号服务错误（HTTP {exc.code}）。") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise AccountServiceUnavailable("无法安全连接账号服务器，请检查网络或 HTTPS 服务配置。") from exc
     return data if isinstance(data, dict) else {}
@@ -1073,7 +1079,7 @@ def _deduplicate_figure_ids(document: str) -> str:
         number = re.search(r"(\d+)$", anchor)
         expected = number.group(1) if number else ""
 
-        def score(index: int) -> tuple[int, int]:
+        def score(index: int, expected: str = expected) -> tuple[int, int]:
             body = matches[index].group("body")
             caption_match = re.search(r"<figcaption\b[^>]*>(.*?)</figcaption\s*>", body, flags=re.IGNORECASE | re.DOTALL)
             caption = re.sub(r"<[^>]+>", " ", caption_match.group(1) if caption_match else "")
@@ -4071,6 +4077,9 @@ def main() -> None:
         print(f"State directory: {DATA_ROOT}", flush=True)
         print(f"Library directory: {LIBRARY_ROOT}", flush=True)
         print(f"Workers: conversion={CONVERSION_WORKERS}, metadata={METADATA_WORKERS}", flush=True)
+        advice = mineru_worker_advice()
+        if advice:
+            print(advice, flush=True)
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:
