@@ -131,7 +131,7 @@ class AIGatewayTest(unittest.TestCase):
     def test_proxy_requires_a_valid_member_session(self) -> None:
         calls: list[Any] = []
 
-        def unused_opener(*args: Any, **_kwargs: Any) -> None:
+        def unused_opener(*args: Any, **kwargs: Any) -> None:
             calls.append((args, kwargs))
             self.fail("unauthorized request must not reach upstream")
 

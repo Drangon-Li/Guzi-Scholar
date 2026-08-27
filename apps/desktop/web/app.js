@@ -2,113 +2,19 @@
   // Browser application composition (kept in one compatibility entrypoint):
   // shell/tabs -> import/library -> reader/annotations -> translation/AI ->
   // notes/settings -> startup. README.md documents the cross-file data flow.
-  const $ = (selector) => document.querySelector(selector);
-  const $$ = (selector) => [...document.querySelectorAll(selector)];
-  function formatBytes(value) {
-    const bytes = Math.max(0, Number(value) || 0);
-    if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-    if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-    if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
-    return `${bytes} B`;
-  }
-  const desktopPersistentState = window.myScholarDesktop?.state || null;
-  const isDesktopApp = Boolean(desktopPersistentState);
-  const onboardingStorageKey = 'my-scholar-onboarding-v2';
-  const onboardingVersion = 2;
-  const persistentStateValues = new Map();
-  const persistentStatePending = new Map();
-  const persistentStateFailures = new Map();
-  let persistentStateDrainPromise = null;
-  let persistentStateLoadError = null;
+  // Shared primitives live in core.js; see that file for the split rationale.
+  const {
+    $,
+    $$,
+    flushPersistentStateWrites,
+    formatBytes,
+    isDesktopApp,
+    persistentStateGet,
+    persistentStateRemove,
+    persistentStateSet,
+  } = window.MyScholarCore;
+  await window.MyScholarCore.ready;
 
-  if (desktopPersistentState) {
-    try {
-      const values = await desktopPersistentState.loadAll();
-      Object.entries(values || {}).forEach(([key, value]) => {
-        if (typeof value === 'string') persistentStateValues.set(key, value);
-      });
-    } catch (error) {
-      persistentStateLoadError = error;
-    }
-  }
-
-  function drainPersistentStateWrites() {
-    if (!desktopPersistentState || persistentStateDrainPromise) return persistentStateDrainPromise || Promise.resolve();
-    persistentStateDrainPromise = (async () => {
-      while (persistentStatePending.size) {
-        const batch = [...persistentStatePending.entries()];
-        persistentStatePending.clear();
-        for (const [key, operation] of batch) {
-          try {
-            if (operation.type === 'remove') await desktopPersistentState.remove(key);
-            else await desktopPersistentState.set(key, operation.value);
-            persistentStateFailures.delete(key);
-            localStorage.removeItem(key);
-          } catch (error) {
-            persistentStateFailures.set(key, { error, operation });
-          }
-        }
-      }
-    })().finally(() => {
-      persistentStateDrainPromise = null;
-      if (persistentStatePending.size) void drainPersistentStateWrites();
-    });
-    return persistentStateDrainPromise;
-  }
-
-  function persistentStateGet(key) {
-    if (!desktopPersistentState) return localStorage.getItem(key);
-    const pending = persistentStatePending.get(key);
-    if (pending) return pending.type === 'remove' ? null : pending.value;
-    if (persistentStateValues.has(key)) return persistentStateValues.get(key);
-    const legacy = localStorage.getItem(key);
-    if (legacy !== null) persistentStateSet(key, legacy);
-    return legacy;
-  }
-
-  function persistentStateSet(key, value) {
-    const text = String(value);
-    if (!desktopPersistentState) {
-      localStorage.setItem(key, text);
-      return;
-    }
-    persistentStateValues.set(key, text);
-    persistentStatePending.set(key, { type: 'set', value: text });
-    void drainPersistentStateWrites();
-  }
-
-  function persistentStateRemove(key) {
-    localStorage.removeItem(key);
-    if (!desktopPersistentState) return;
-    persistentStateValues.delete(key);
-    persistentStatePending.set(key, { type: 'remove' });
-    void drainPersistentStateWrites();
-  }
-
-  async function flushPersistentStateWrites() {
-    if (!desktopPersistentState) return true;
-    if (persistentStateLoadError) {
-      try {
-        await desktopPersistentState.loadAll();
-        persistentStateLoadError = null;
-      } catch (error) {
-        persistentStateLoadError = error;
-      }
-    }
-    for (const [key, failure] of persistentStateFailures) persistentStatePending.set(key, failure.operation);
-    persistentStateFailures.clear();
-    await drainPersistentStateWrites();
-    if (persistentStateLoadError || persistentStateFailures.size) {
-      const errors = [persistentStateLoadError, ...[...persistentStateFailures.values()].map((failure) => failure.error)]
-        .filter(Boolean)
-        .map((error) => String(error?.message || error));
-      if (errors.some((message) => message.includes('界面状态键无效') || message.includes('No handler registered'))) {
-        throw new Error('应用组件版本不一致，请完全退出谷子学术后重新打开。');
-      }
-      throw new Error('部分界面状态无法保存，请检查磁盘空间或应用数据目录权限。');
-    }
-    return true;
-  }
   const appearanceDefaults = Object.freeze({ app_font: 'system', reader_font: 'academic', accent: 'amber' });
   const appearanceOptions = Object.freeze({
     app_font: new Set(['system', 'pingfang', 'songti']),
@@ -382,197 +288,7 @@
   };
   const jsonOptions = (body, method = 'POST') => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 
-  let onboardingStepIndex = 0;
-  let onboardingPreviousFocus = null;
-  let onboardingFinishing = false;
-  let onboardingStartupContext = null;
-
-  function renderOnboardingStorage(report = onboardingStartupContext?.storage) {
-    const card = $('#onboarding-library-recovery');
-    const title = $('#onboarding-library-recovery-title');
-    const detail = $('#onboarding-library-recovery-detail');
-    const actions = $('#onboarding-library-conflict-actions');
-    if (!card || !title || !detail || !actions) return;
-    const legacy = Array.isArray(report?.legacy) ? report.legacy.filter((candidate) => candidate?.valid && !candidate.empty) : [];
-    const selected = report?.selected || legacy[0] || null;
-    const currentCount = Number(report?.current?.itemCount) || 0;
-    const legacyCount = Number(selected?.itemCount) || 0;
-    const currentUsable = Boolean(report?.current?.valid);
-    const keepCurrent = $('#onboarding-keep-current-library');
-    const useLegacy = $('#onboarding-use-legacy-library');
-    card.hidden = false;
-    card.classList.toggle('is-warning', ['conflict', 'invalid'].includes(report?.state));
-    actions.hidden = true;
-    if (keepCurrent) keepCurrent.hidden = false;
-    if (useLegacy) useLegacy.hidden = false;
-    if (report?.state === 'adopted') {
-      title.textContent = `已恢复 ${legacyCount} 篇旧版文献`;
-      detail.textContent = '继续使用原来的本地目录，没有复制、合并或删除任何文件。';
-    } else if (report?.state === 'conflict') {
-      title.textContent = currentUsable ? '发现两个都有内容的文献库' : '当前文献库无法安全读取';
-      detail.textContent = currentUsable
-        ? `当前库 ${currentCount} 篇，旧版库 ${legacyCount} 篇。为避免覆盖，请选择本次继续使用哪一个。`
-        : `另一个旧版文献库包含 ${legacyCount} 篇文献，可以安全切换使用；当前目录会原样保留。`;
-      actions.hidden = false;
-      if (keepCurrent) {
-        keepCurrent.hidden = !currentUsable;
-        keepCurrent.dataset.path = report?.current?.path || '';
-      }
-      if (useLegacy) {
-        useLegacy.hidden = !selected;
-        useLegacy.dataset.path = selected?.path || '';
-      }
-    } else if (report?.state === 'invalid') {
-      title.textContent = '发现旧版目录，但没有自动切换';
-      detail.textContent = report?.legacy?.find((candidate) => candidate?.error)?.error || '旧版文献库结构无法安全识别，请稍后在设置中检查。';
-    } else if (['already-selected', 'kept-current', 'selected-legacy'].includes(report?.state) && currentCount > 0) {
-      title.textContent = `已连接包含 ${currentCount} 篇文献的本地库`;
-      detail.textContent = '重复安装不会清除这个目录中的文献、笔记和标注。';
-    } else {
-      title.textContent = '本地文献库已准备好';
-      detail.textContent = '没有发现需要恢复的旧版文献；以后重复安装仍会继续使用同一数据目录。';
-    }
-  }
-  function hasCompletedOnboarding() {
-    try {
-      const payload = JSON.parse(persistentStateGet(onboardingStorageKey) || 'null');
-      return Number(payload?.version) >= onboardingVersion && ['completed', 'skipped'].includes(payload?.action);
-    } catch (_) {
-      return false;
-    }
-  }
-  function updateOnboardingStep(nextIndex, { focus = true } = {}) {
-    const dialog = $('#onboarding-dialog');
-    const slides = $$('[data-onboarding-step]');
-    if (!dialog || !slides.length) return;
-    onboardingStepIndex = Math.max(0, Math.min(slides.length - 1, Number(nextIndex) || 0));
-    slides.forEach((slide, index) => {
-      slide.classList.toggle('is-active', index === onboardingStepIndex);
-      slide.classList.toggle('is-before', index < onboardingStepIndex);
-      slide.classList.toggle('is-after', index > onboardingStepIndex);
-      slide.setAttribute('aria-hidden', String(index !== onboardingStepIndex));
-    });
-    const activeSlide = slides[onboardingStepIndex];
-    const heading = activeSlide.querySelector('h1');
-    const description = activeSlide.querySelector('p[id]');
-    if (heading) dialog.setAttribute('aria-labelledby', heading.id);
-    if (description) dialog.setAttribute('aria-describedby', description.id);
-    const current = onboardingStepIndex + 1;
-    const label = $('#onboarding-step-label');
-    if (label) label.textContent = `第 ${current} 步，共 ${slides.length} 步`;
-    const progress = $('#onboarding-progress');
-    if (progress) {
-      progress.setAttribute('aria-valuemax', String(slides.length));
-      progress.setAttribute('aria-valuenow', String(current));
-      progress.querySelector('span').style.width = `${(current / slides.length) * 100}%`;
-    }
-    $$('#onboarding-dots span').forEach((dot, index) => dot.classList.toggle('is-active', index === onboardingStepIndex));
-    const back = $('#onboarding-back');
-    if (back) back.disabled = onboardingStepIndex === 0;
-    const next = $('#onboarding-next');
-    if (next) next.textContent = onboardingStepIndex === slides.length - 1 ? '进入谷子学术' : '下一步';
-    if (focus && heading) heading.focus({ preventScroll: true });
-  }
-  function showOnboarding() {
-    if (!isDesktopApp) return;
-    const dialog = $('#onboarding-dialog');
-    if (!dialog) return;
-    onboardingPreviousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    onboardingFinishing = false;
-    dialog.classList.remove('is-closing');
-    const status = $('#onboarding-status');
-    if (status) { status.hidden = true; status.textContent = ''; }
-    renderOnboardingStorage();
-    updateOnboardingStep(0, { focus: false });
-    if (!dialog.open) dialog.showModal();
-    window.requestAnimationFrame(() => dialog.querySelector('.onboarding-slide.is-active h1')?.focus({ preventScroll: true }));
-  }
-  async function finishOnboarding(action) {
-    const dialog = $('#onboarding-dialog');
-    if (!dialog?.open || onboardingFinishing) return;
-    onboardingFinishing = true;
-    const controls = [$('#onboarding-skip'), $('#onboarding-back'), $('#onboarding-next')].filter(Boolean);
-    controls.forEach((control) => { control.disabled = true; });
-    const status = $('#onboarding-status');
-    if (status) { status.hidden = true; status.textContent = ''; }
-    persistentStateSet(onboardingStorageKey, JSON.stringify({ version: onboardingVersion, action, completedAt: new Date().toISOString() }));
-    try {
-      await flushPersistentStateWrites();
-    } catch (error) {
-      onboardingFinishing = false;
-      controls.forEach((control) => { control.disabled = false; });
-      updateOnboardingStep(onboardingStepIndex, { focus: false });
-      if (status) { status.textContent = error.message || '引导状态暂时无法保存，请重试。'; status.hidden = false; }
-      return;
-    }
-    dialog.classList.add('is-closing');
-    if (!reducedMotionQuery.matches) await new Promise((resolve) => window.setTimeout(resolve, 170));
-    dialog.close(action);
-    dialog.classList.remove('is-closing');
-    onboardingFinishing = false;
-    controls.forEach((control) => { control.disabled = false; });
-    onboardingPreviousFocus?.focus?.({ preventScroll: true });
-  }
-  async function initializeOnboarding() {
-    const settingsRow = $('#onboarding-settings-row');
-    if (settingsRow) settingsRow.hidden = !isDesktopApp;
-    if (!isDesktopApp) return;
-    $('#onboarding-back')?.addEventListener('click', () => updateOnboardingStep(onboardingStepIndex - 1));
-    $('#onboarding-next')?.addEventListener('click', () => {
-      const finalStep = onboardingStepIndex >= $$('[data-onboarding-step]').length - 1;
-      if (finalStep) void finishOnboarding('completed');
-      else updateOnboardingStep(onboardingStepIndex + 1);
-    });
-    $('#onboarding-skip')?.addEventListener('click', () => { void finishOnboarding('skipped'); });
-    $('#replay-onboarding')?.addEventListener('click', showOnboarding);
-    $('#onboarding-dialog')?.addEventListener('cancel', (event) => {
-      event.preventDefault();
-      void finishOnboarding('skipped');
-    });
-    $('#onboarding-dialog')?.addEventListener('keydown', (event) => {
-      if (event.target instanceof Element && event.target.closest('input,textarea,select,button,a')) return;
-      if (event.key === 'ArrowLeft' && onboardingStepIndex > 0) { event.preventDefault(); updateOnboardingStep(onboardingStepIndex - 1); }
-      if (event.key === 'ArrowRight' && onboardingStepIndex < $$('[data-onboarding-step]').length - 1) { event.preventDefault(); updateOnboardingStep(onboardingStepIndex + 1); }
-    });
-    const selectStartupLibrary = async (button) => {
-      const selectedPath = String(button?.dataset.path || '');
-      const desktop = window.myScholarDesktop;
-      if (!selectedPath || typeof desktop?.selectStartupLibrary !== 'function') return;
-      const controls = [$('#onboarding-keep-current-library'), $('#onboarding-use-legacy-library')].filter(Boolean);
-      controls.forEach((control) => { control.disabled = true; });
-      const title = $('#onboarding-library-recovery-title');
-      const detail = $('#onboarding-library-recovery-detail');
-      if (title) title.textContent = '正在安全切换文献库';
-      if (detail) detail.textContent = '谷子学术会先等待保存完成，再切换路径并核对文献数量。';
-      try {
-        const result = await desktop.selectStartupLibrary(selectedPath);
-        if (!result?.ok) throw new Error(result?.error || '文献库没有切换完成。');
-        if (!result.reloading) {
-          onboardingStartupContext.storage = {
-            ...onboardingStartupContext.storage,
-            state: 'kept-current',
-            selected: { path: result.currentPath, itemCount: result.items, jobCount: result.jobs },
-          };
-          renderOnboardingStorage(onboardingStartupContext.storage);
-        }
-      } catch (error) {
-        if (title) title.textContent = '文献库切换失败';
-        if (detail) detail.textContent = error.message || '仍在使用原来的文献库，未覆盖任何文件。';
-        controls.forEach((control) => { control.disabled = false; });
-      }
-    };
-    $('#onboarding-keep-current-library')?.addEventListener('click', (event) => { void selectStartupLibrary(event.currentTarget); });
-    $('#onboarding-use-legacy-library')?.addEventListener('click', (event) => { void selectStartupLibrary(event.currentTarget); });
-
-    try {
-      const response = await window.myScholarDesktop.getStartupContext();
-      if (response?.ok) onboardingStartupContext = response;
-    } catch (_) {
-      onboardingStartupContext = { app: null, storage: { state: 'invalid', current: null, legacy: [] } };
-    }
-    renderOnboardingStorage(onboardingStartupContext?.storage);
-    if (!hasCompletedOnboarding()) showOnboarding();
-  }
+  const onboarding = window.MyScholarOnboarding.create({ reducedMotionQuery });
 
   function healthAIService(service) {
     return state.health?.ai?.services?.[service] || null;
@@ -1882,7 +1598,7 @@
     const columns = visibleLibraryColumns();
     const propertyMap = new Map(libraryProperties().map((property) => [property.id, property]));
     return entries.map((entry) => {
-      const values = itemValues(entry); const metadata = itemMetadata(entry); const job = entry.job || {}; const counts = job.manifest?.counts || {};
+      const values = itemValues(entry); const job = entry.job || {}; const counts = job.manifest?.counts || {};
       const topics = Array.isArray(values.research_topic) ? values.research_topic : [];
       const title = itemTitle(entry);
       const cell = (column) => {
@@ -4613,7 +4329,7 @@
     // Read-only showcase deployments have no annotation/translation/chat
     // actions, so the selection popover has nothing to offer.
     if (state.health?.readonly) return;
-    const frame = $('#html-preview'); const doc = frameDocument();
+    const doc = frameDocument();
     if (!doc) return;
     if (isAnnotationInteraction(event?.target)) {
       clearSelectionPopover({ clearState: true, immediate: true });
@@ -10292,9 +10008,9 @@
     try {
       const context = await desktop.getStartupContext();
       if (!context?.ok) throw new Error(context?.error || '无法读取应用版本。');
-      onboardingStartupContext = context;
+      onboarding.setStartupContext(context);
       renderAppInfo(context);
-      renderOnboardingStorage(context.storage);
+      onboarding.renderOnboardingStorage(context.storage);
       return context;
     } catch (error) {
       if ($('#app-current-version')) $('#app-current-version').textContent = '读取失败';
@@ -11331,6 +11047,8 @@
       if ($('#setting-metadata-email')) $('#setting-metadata-email').value = metadata.contact_email || '';
       const parsingBackend = settings.parsing?.backend || 'pipeline';
       if ($('#setting-parsing-backend')) $('#setting-parsing-backend').value = parsingBackend;
+      if ($('#setting-parsing-server-url')) $('#setting-parsing-server-url').value = settings.parsing?.server_url || '';
+      syncParsingServerField();
       const shortcuts = settings.shortcuts || {};
       const normalizedShortcuts = Object.fromEntries(Object.entries({ ...state.shortcuts, ...shortcuts }).map(([key, value]) => [key, normalizeShortcut(value) || state.shortcuts[key]]));
       state.shortcuts = { ...state.shortcuts, ...normalizedShortcuts };
@@ -11361,6 +11079,13 @@
     }
   }
 
+  function syncParsingServerField() {
+    const field = $('#setting-parsing-server-field');
+    const select = $('#setting-parsing-backend');
+    if (!field || !select) return;
+    field.hidden = !String(select.value || '').endsWith('-http-client');
+  }
+
   function settingsPayload() {
     const shortcutValidation = validateShortcutInputs();
     return {
@@ -11374,6 +11099,7 @@
       },
       parsing: {
         backend: $('#setting-parsing-backend')?.value || 'pipeline',
+        server_url: $('#setting-parsing-server-url')?.value.trim() || '',
       },
     };
   }
@@ -11476,6 +11202,7 @@
   $('#settings-form').addEventListener('submit', (event) => event.preventDefault());
   $('#settings-form').addEventListener('change', (event) => {
     if (event.target.closest('.shortcut-grid')) return;
+    if (event.target.id === 'setting-parsing-backend') syncParsingServerField();
     queueSettingsSave(true);
   });
   $('#settings-form').addEventListener('input', (event) => {
@@ -12032,7 +11759,7 @@
   });
 
   const isDesktopShell = /Electron\//u.test(navigator.userAgent);
-  void initializeOnboarding();
+  void onboarding.initializeOnboarding();
   if ('serviceWorker' in navigator && !isDesktopShell && location.protocol !== 'file:') {
     window.addEventListener('load', () => {
       navigator.serviceWorker.register('/sw.js', { scope: '/' }).catch(() => { /* installability is optional */ });

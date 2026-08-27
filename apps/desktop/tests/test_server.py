@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT))
 from pipeline import PipelineError  # noqa: E402
 from library_store import LibraryStore  # noqa: E402
 import server as server_module  # noqa: E402
-from server import AI_STATUS_HISTORY_LIMIT, DataRootLock, MAX_CHAT_IMAGE_BYTES, MAX_NOTE_ASSET_BYTES, JobStore, ReflowConflictError, ScholarHandler, _ai_status_history, _chat_image_context, _copy_ai_profile, _deduplicate_figure_ids, _migrate_job_artifacts, _note_image_type, _public_job, _public_settings, _record_ai_status, _runtime_lock_roots, _store_note_asset, _sync_ai_annotations, _translation_key, _translation_records, _write_content_manifest, _write_settings, _write_translation_records  # noqa: E402
+from server import AI_STATUS_HISTORY_LIMIT, DataRootLock, MAX_CHAT_IMAGE_BYTES, MAX_NOTE_ASSET_BYTES, JobStore, ScholarHandler, _ai_status_history, _chat_image_context, _copy_ai_profile, _deduplicate_figure_ids, _migrate_job_artifacts, _note_image_type, _public_job, _public_settings, _record_ai_status, _runtime_lock_roots, _store_note_asset, _sync_ai_annotations, _translation_key, _translation_records, _write_content_manifest, _write_settings, _write_translation_records  # noqa: E402
 
 
 class PDFEvidenceWorkerTest(unittest.TestCase):
@@ -215,7 +215,7 @@ class PermanentDeleteTest(unittest.TestCase):
         handler, responses, errors = self._handler()
         store = MagicMock()
         library = MagicMock()
-        with patch.object(server_module, "READONLY_MODE", True), patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library):
+        with patch.object(server_module.runtime, "READONLY_MODE", True), patch.object(server_module, "STORE", store), patch.object(server_module, "LIBRARY", library):
             handler._permanently_delete_library_item("a" * 16)
         self.assertEqual(responses, [])
         self.assertEqual(errors, [("只读演示模式，暂不支持修改。", HTTPStatus.FORBIDDEN)])
@@ -875,7 +875,7 @@ class TranslationCacheTest(unittest.TestCase):
             with (
                 patch("server.STORE", StoreStub()),
                 patch("server.translation_profile_id", return_value=""),
-                patch.object(server_module, "READONLY_MODE", True),
+                patch.object(server_module.runtime, "READONLY_MODE", True),
             ):
                 handler.do_GET()
             self.assertEqual({item["cache_key"] for item in responses[0]["translations"]}, {"current", "legacy"})
@@ -1544,7 +1544,7 @@ class AccountProxyTest(unittest.TestCase):
         services = {"translation": {"enabled": True, "model": "m"}, "chat": {"enabled": True, "model": "n"}}
         with tempfile.TemporaryDirectory(prefix="my-scholar-account-") as temp:
             account_file = Path(temp) / "account.json"
-            with patch.object(server_module, "ACCOUNT_FILE", account_file), patch.object(server_module, "AI_REQUIRES_MEMBER", True):
+            with patch.object(server_module, "ACCOUNT_FILE", account_file), patch.object(server_module.runtime, "AI_REQUIRES_MEMBER", True):
                 gated = server_module._apply_member_gate(services)
                 self.assertFalse(gated["translation"]["enabled"])
                 self.assertIn("登录", gated["translation"]["note"])
@@ -1556,24 +1556,24 @@ class AccountProxyTest(unittest.TestCase):
 
                 account_file.write_text(json.dumps({"token": "t", "profile": {"username": "u", "member": True, "beta_access": True}}), encoding="utf-8")
                 self.assertTrue(server_module._apply_member_gate(services)["translation"]["enabled"])
-            with patch.object(server_module, "AI_REQUIRES_MEMBER", False):
+            with patch.object(server_module.runtime, "AI_REQUIRES_MEMBER", False):
                 self.assertTrue(server_module._apply_member_gate(services)["chat"]["enabled"])
 
     def test_account_transport_requires_https_except_explicit_loopback_development(self) -> None:
         self.assertTrue(server_module._account_service_configuration("https://accounts.example.test")["available"])
         self.assertFalse(server_module._account_service_configuration("http://accounts.example.test")["available"])
-        with patch.object(server_module, "ALLOW_INSECURE_LOOPBACK_ACCOUNT", False):
+        with patch.object(server_module.runtime, "ALLOW_INSECURE_LOOPBACK_ACCOUNT", False):
             status = server_module._account_service_configuration("http://127.0.0.1:8478")
             self.assertFalse(status["available"])
             self.assertIn("显式设置", status["error"])
-        with patch.object(server_module, "ALLOW_INSECURE_LOOPBACK_ACCOUNT", True):
+        with patch.object(server_module.runtime, "ALLOW_INSECURE_LOOPBACK_ACCOUNT", True):
             status = server_module._account_service_configuration("http://localhost:8478")
             self.assertTrue(status["available"])
             self.assertTrue(status["development_only"])
 
     def test_remote_http_account_request_is_rejected_before_network_io(self) -> None:
         with (
-            patch.object(server_module, "ACCOUNT_SERVICE_URL", "http://accounts.example.test"),
+            patch.object(server_module.runtime, "ACCOUNT_SERVICE_URL", "http://accounts.example.test"),
             patch.object(server_module.urllib.request, "build_opener") as build_opener,
             self.assertRaisesRegex(server_module.AccountServiceUnavailable, "必须使用 HTTPS"),
         ):
@@ -1623,7 +1623,7 @@ class AIEntitlementTest(unittest.TestCase):
         handler._send_error_json = lambda message, status=None: responses.append((message, status))
         with (
             patch.object(server_module, "ACCOUNT_FILE", account_file),
-            patch.object(server_module, "AI_REQUIRES_MEMBER", True),
+            patch.object(server_module.runtime, "AI_REQUIRES_MEMBER", True),
         ):
             handler.do_POST()
         return responses[0]
@@ -1664,9 +1664,9 @@ class AIEntitlementTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="my-scholar-ai-gate-") as temp:
             account_file = Path(temp) / "account.json"
             account_file.write_text(json.dumps({"token": "t", "profile": {"member": True, "beta_access": True}}), encoding="utf-8")
-            with patch.object(server_module, "ACCOUNT_FILE", account_file), patch.object(server_module, "AI_REQUIRES_MEMBER", True):
+            with patch.object(server_module, "ACCOUNT_FILE", account_file), patch.object(server_module.runtime, "AI_REQUIRES_MEMBER", True):
                 self.assertTrue(handler._require_ai_entitlement())
-        with patch.object(server_module, "AI_REQUIRES_MEMBER", False):
+        with patch.object(server_module.runtime, "AI_REQUIRES_MEMBER", False):
             self.assertTrue(handler._require_ai_entitlement())
 
 
@@ -1680,11 +1680,11 @@ class LocalRequestSecurityTest(unittest.TestCase):
 
     def test_valid_loopback_host_and_origin_are_accepted(self) -> None:
         handler = self._handler({"Host": "127.0.0.1:8765", "Origin": "http://localhost:8765"})
-        with patch.object(server_module, "API_ACCESS_TOKEN", ""):
+        with patch.object(server_module.runtime, "API_ACCESS_TOKEN", ""):
             self.assertIsNone(server_module._request_security_failure(handler))
 
     def test_forged_host_and_origin_are_rejected(self) -> None:
-        with patch.object(server_module, "API_ACCESS_TOKEN", ""):
+        with patch.object(server_module.runtime, "API_ACCESS_TOKEN", ""):
             host_failure = server_module._request_security_failure(self._handler({"Host": "evil.example:8765"}))
             origin_failure = server_module._request_security_failure(self._handler({
                 "Host": "127.0.0.1:8765",
@@ -1695,7 +1695,7 @@ class LocalRequestSecurityTest(unittest.TestCase):
 
     def test_electron_token_is_required_when_configured(self) -> None:
         valid_headers = {"Host": "127.0.0.1:8765", "X-My-Scholar-Api-Token": "secret"}
-        with patch.object(server_module, "API_ACCESS_TOKEN", "secret"):
+        with patch.object(server_module.runtime, "API_ACCESS_TOKEN", "secret"):
             missing = server_module._request_security_failure(self._handler({"Host": "127.0.0.1:8765"}))
             wrong = server_module._request_security_failure(self._handler({
                 "Host": "127.0.0.1:8765",
@@ -1708,7 +1708,7 @@ class LocalRequestSecurityTest(unittest.TestCase):
     def test_non_loopback_deployment_keeps_existing_host_policy(self) -> None:
         handler = self._handler({"Host": "reader.example.test"})
         handler.server.server_address = ("0.0.0.0", 8765)
-        with patch.object(server_module, "API_ACCESS_TOKEN", ""):
+        with patch.object(server_module.runtime, "API_ACCESS_TOKEN", ""):
             self.assertIsNone(server_module._request_security_failure(handler))
 
 
@@ -1736,6 +1736,39 @@ class SettingsBoundaryTest(unittest.TestCase):
                 "reader_font": "academic",
                 "accent": "amber",
             })
+
+    def test_remote_parsing_server_url_round_trips_and_is_normalised(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-parsing-url-") as temp:
+            settings_path = Path(temp) / "settings.json"
+            with patch("server.SETTINGS_PATH", settings_path), patch("server.ai_services", return_value={}):
+                public = _write_settings({
+                    "parsing": {"backend": "vlm-http-client", "server_url": "  http://gpu-box:30000/  "},
+                })
+            self.assertEqual(public["parsing"]["backend"], "vlm-http-client")
+            self.assertEqual(public["parsing"]["server_url"], "http://gpu-box:30000")
+
+    def test_a_non_http_parsing_server_url_is_refused_on_write(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-parsing-url-reject-") as temp:
+            settings_path = Path(temp) / "settings.json"
+            with patch("server.SETTINGS_PATH", settings_path), patch("server.ai_services", return_value={}):
+                for rejected in ("file:///etc/passwd", "ftp://host", "gpu-box:30000"):
+                    with self.assertRaises(PipelineError, msg=rejected):
+                        _write_settings({"parsing": {"backend": "vlm-http-client", "server_url": rejected}})
+                self.assertFalse(settings_path.is_file())
+
+    def test_an_unreadable_stored_parsing_url_does_not_break_the_settings_read(self) -> None:
+        # A bad value already on disk must degrade to "unset" rather than take
+        # the whole settings endpoint down.
+        with tempfile.TemporaryDirectory(prefix="my-scholar-parsing-url-stored-") as temp:
+            settings_path = Path(temp) / "settings.json"
+            settings_path.write_text(
+                json.dumps({"parsing": {"backend": "vlm-http-client", "server_url": "file:///etc/passwd"}}),
+                encoding="utf-8",
+            )
+            with patch("server.SETTINGS_PATH", settings_path), patch("server.ai_services", return_value={}):
+                public = _public_settings()
+            self.assertEqual(public["parsing"]["server_url"], "")
+            self.assertEqual(public["parsing"]["backend"], "vlm-http-client")
 
     def test_public_settings_exposes_service_status_without_ai_configuration(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-settings-public-") as temp:
@@ -2029,7 +2062,7 @@ class SettingsBoundaryTest(unittest.TestCase):
         with (
             patch("server.ai_status", return_value={"service": "chat", "enabled": False}),
             patch("server.ai_services", return_value=services),
-            patch.object(server_module, "AI_REQUIRES_MEMBER", False),
+            patch.object(server_module.runtime, "AI_REQUIRES_MEMBER", False),
         ):
             handler.do_GET()
         self.assertEqual(responses[0]["ai"]["service"], "chat")
@@ -2051,7 +2084,7 @@ class SettingsBoundaryTest(unittest.TestCase):
             patch("server.ai_status", return_value={"service": "chat", "enabled": True}),
             patch("server.ai_services", return_value=services),
             patch.object(server_module, "ACCOUNT_FILE", Path(temp) / "account.json"),
-            patch.object(server_module, "AI_REQUIRES_MEMBER", True),
+            patch.object(server_module.runtime, "AI_REQUIRES_MEMBER", True),
         ):
             handler.do_GET()
         self.assertFalse(responses[0]["ai"]["services"]["translation"]["enabled"])
@@ -2585,7 +2618,7 @@ class ReflowTest(unittest.TestCase):
         handler.path = f"/api/jobs/{'a' * 16}/reflow"
         dispatched: list[str] = []
         handler._start_reflow = lambda job_id: dispatched.append(job_id)
-        with patch.object(server_module, "AI_REQUIRES_MEMBER", False):
+        with patch.object(server_module.runtime, "AI_REQUIRES_MEMBER", False):
             handler.do_POST()
         self.assertEqual(dispatched, ["a" * 16])
 
@@ -2747,7 +2780,7 @@ class ReflowTest(unittest.TestCase):
                 store.update(record["job_id"], status="running")
                 handler._start_reflow(record["job_id"])
                 store.update(record["job_id"], status="completed")
-                with patch.object(server_module, "READONLY_MODE", True):
+                with patch.object(server_module.runtime, "READONLY_MODE", True):
                     handler._start_reflow(record["job_id"])
             self.assertEqual([status for _message, status in errors], [HTTPStatus.NOT_FOUND, HTTPStatus.CONFLICT, HTTPStatus.FORBIDDEN])
 
@@ -2937,6 +2970,40 @@ class MigrationRequestGateTest(unittest.TestCase):
             server_module.MIGRATION_ACTIVE_MUTATIONS = 0
             server_module.MIGRATION_REQUEST_CONDITION.notify_all()
 
+    @staticmethod
+    def _migration_handler(token_header: str | None):
+        handler = object.__new__(ScholarHandler)
+        handler.headers = {} if token_header is None else {"X-My-Scholar-Migration-Token": token_header}
+        errors: list[tuple] = []
+        handler._send_error_json = lambda message, status=None, **_kwargs: errors.append((message, status))
+        return handler, errors
+
+    def test_migration_control_is_refused_when_no_token_is_configured(self) -> None:
+        # Fail closed: with no token set, nothing may drive a library migration.
+        with patch.object(server_module.runtime, "MIGRATION_CONTROL_TOKEN", ""):
+            handler, _errors = self._migration_handler("anything")
+            self.assertFalse(handler._migration_control_authorized())
+            handler, _errors = self._migration_handler(None)
+            self.assertFalse(handler._migration_control_authorized())
+
+    def test_migration_control_rejects_a_wrong_token_and_accepts_the_configured_one(self) -> None:
+        with patch.object(server_module.runtime, "MIGRATION_CONTROL_TOKEN", "s3cret"):
+            handler, _errors = self._migration_handler("wrong")
+            self.assertFalse(handler._migration_control_authorized())
+            handler, _errors = self._migration_handler(None)
+            self.assertFalse(handler._migration_control_authorized())
+            handler, _errors = self._migration_handler("s3cret")
+            self.assertTrue(handler._migration_control_authorized())
+
+    def test_prepare_migration_refuses_an_unauthorized_caller(self) -> None:
+        with patch.object(server_module.runtime, "MIGRATION_CONTROL_TOKEN", "s3cret"), patch.object(
+            server_module, "_quiesce_library_requests"
+        ) as quiesce:
+            handler, errors = self._migration_handler("wrong")
+            handler._prepare_library_migration()
+            quiesce.assert_not_called()
+        self.assertEqual(errors, [("无权控制文献库迁移。", HTTPStatus.FORBIDDEN)])
+
     def test_quiesce_waits_for_active_request_and_rejects_new_work(self) -> None:
         self.assertTrue(server_module._migration_request_enter(mutation=True))
         store = MagicMock()
@@ -3101,7 +3168,7 @@ class MediaLayoutApiTest(unittest.TestCase):
             layout_path.write_text(original, encoding="utf-8")
             handler, responses, errors = self._handler(job_dir, {"items": {"block-1-image": {"width_percent": 80}}})
             handler._read_json_body = MagicMock(return_value={})
-            with handler._media_layout_store_patch, patch.object(server_module, "READONLY_MODE", True):
+            with handler._media_layout_store_patch, patch.object(server_module.runtime, "READONLY_MODE", True):
                 handler.do_PATCH()
             handler._read_json_body.assert_not_called()
             self.assertEqual(responses, [])
@@ -3141,7 +3208,7 @@ class ReadonlyHardeningTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="my-scholar-ro-write-") as temp:
             job_dir = Path(temp)
             (job_dir / "document.json").write_text("{}", encoding="utf-8")
-            with patch.object(server_module, "READONLY_MODE", True):
+            with patch.object(server_module.runtime, "READONLY_MODE", True):
                 server_module._ensure_content_layout(job_dir)
                 server_module._write_content_manifest(job_dir)
                 server_module._sync_content_file(job_dir, "notes/notes.md", "x")
@@ -3168,7 +3235,7 @@ class ReadonlyHardeningTest(unittest.TestCase):
         handler = object.__new__(ScholarHandler)
         blocked: list[tuple] = []
         handler._send_error_json = lambda message, status=None: blocked.append((message, status))
-        with patch.object(server_module, "READONLY_MODE", True):
+        with patch.object(server_module.runtime, "READONLY_MODE", True):
             handler._serve_job_artifact("a" * 16, "manifest.json", "")
         self.assertEqual(blocked[0][1], HTTPStatus.FORBIDDEN)
 
@@ -3176,7 +3243,7 @@ class ReadonlyHardeningTest(unittest.TestCase):
         handler = object.__new__(ScholarHandler)
         responses: list[dict] = []
         handler._send_json = lambda body, *_args, **_kwargs: responses.append(body)
-        with patch.object(server_module, "READONLY_MODE", True):
+        with patch.object(server_module.runtime, "READONLY_MODE", True):
             handler._account_status()
         self.assertNotIn("server", responses[0])
         self.assertNotIn("local_used_bytes", responses[0])

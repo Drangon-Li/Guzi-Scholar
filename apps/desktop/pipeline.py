@@ -823,6 +823,7 @@ def _process_layout_candidate(
     layout_executable: Optional[Path],
     layout_runtime_root: Optional[Path],
     layout_backend: Optional[str],
+    layout_server_url: Optional[str],
     cancel_event: Any,
 ) -> Optional[dict]:
     """Serialize layout execution while keeping backend selection request-scoped."""
@@ -842,6 +843,7 @@ def _process_layout_candidate(
             progress=progress,
             layout_source=layout_source,
             mineru_backend=layout_backend,
+            mineru_server_url=layout_server_url,
             runtime_root=layout_runtime_root,
             cancel_event=cancel_event,
         )
@@ -859,6 +861,7 @@ def process_pdf(
     layout_executable: Optional[Path] = None,
     layout_runtime_root: Optional[Path] = None,
     layout_backend: Optional[str] = None,
+    layout_server_url: Optional[str] = None,
     cancel_event: Any = None,
 ) -> dict:
     """Convert a PDF with the layout-aware adapter, falling back to ODL.
@@ -890,6 +893,7 @@ def process_pdf(
                     layout_executable=layout_executable,
                     layout_runtime_root=layout_runtime_root,
                     layout_backend=layout_backend,
+                    layout_server_url=layout_server_url,
                     cancel_event=cancel_event,
                 )
                 if manifest is not None:

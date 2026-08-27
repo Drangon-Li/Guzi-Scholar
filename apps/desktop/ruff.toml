@@ -1,0 +1,25 @@
+# Lint gate for the desktop Python sources.
+#
+# Deliberately narrow. The goal is a check that stays at zero and only fires on
+# real defects, not a style migration: enabling the stylistic rule families
+# would report well over a thousand findings on existing code and the gate
+# would be switched off within a week.
+#
+# F  - pyflakes: undefined names, unused imports and locals, broken f-strings.
+#      This is the family that actually finds bugs; it caught a NameError in a
+#      test helper and a stale import left behind by a refactor.
+# E9 - syntax and IO errors that would fail at import time.
+#
+# Widening this list is welcome, but do it one family at a time and land the
+# fixes in the same change.
+
+target-version = "py311"
+line-length = 200
+
+[lint]
+select = ["F", "E9"]
+
+[format]
+# The formatter is not enabled; existing code does not follow its layout and
+# reformatting the tree would bury real diffs.
+exclude = ["*"]

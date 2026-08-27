@@ -42,6 +42,8 @@ from layout_pipeline import (  # noqa: E402
     LayoutPipelineCancelled,
     LayoutPipelineError,
     normalize_mineru_backend,
+    normalize_mineru_server_url,
+    is_remote_mineru_backend,
     process_layout_pdf,
 )
 
@@ -130,6 +132,107 @@ class LayoutPipelineTest(unittest.TestCase):
                 )
             command = popen.call_args.args[0]
             self.assertEqual(command[command.index("-b") + 1], "hybrid-engine")
+            self.assertNotIn("-u", command)
+
+    @staticmethod
+    def _complete_process():
+        class CompleteProcess:
+            pid = 43213
+            returncode = 0
+            stdout = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        return CompleteProcess()
+
+    def test_remote_backend_sends_the_pdf_to_the_configured_server(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="guzi-mineru-remote-") as temp, patch(
+            "layout_pipeline.subprocess.Popen", return_value=self._complete_process(),
+        ) as popen:
+            root = Path(temp)
+            with self.assertRaisesRegex(LayoutPipelineError, "content_list_v2"):
+                _run_mineru(
+                    root / "mineru",
+                    root / "source.pdf",
+                    root / "output",
+                    backend="vlm-http-client",
+                    server_url="http://gpu-box.internal:30000/",
+                )
+            command = popen.call_args.args[0]
+            self.assertEqual(command[command.index("-b") + 1], "vlm-http-client")
+            # the trailing slash is normalised away
+            self.assertEqual(command[command.index("-u") + 1], "http://gpu-box.internal:30000")
+
+    def test_remote_backend_without_a_server_url_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="guzi-mineru-remote-missing-") as temp, patch(
+            "layout_pipeline.subprocess.Popen"
+        ) as popen, patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MY_SCHOLAR_MINERU_SERVER_URL", None)
+            root = Path(temp)
+            with self.assertRaisesRegex(LayoutPipelineError, "服务器地址"):
+                _run_mineru(
+                    root / "mineru",
+                    root / "source.pdf",
+                    root / "output",
+                    backend="vlm-http-client",
+                )
+            popen.assert_not_called()
+
+    def test_server_url_accepts_http_and_rejects_everything_else(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MY_SCHOLAR_MINERU_SERVER_URL", None)
+            self.assertEqual(normalize_mineru_server_url("https://gpu.example.com:30000"), "https://gpu.example.com:30000")
+            self.assertEqual(normalize_mineru_server_url("  http://127.0.0.1:30000/  "), "http://127.0.0.1:30000")
+            self.assertEqual(normalize_mineru_server_url(None), "")
+            self.assertEqual(normalize_mineru_server_url(""), "")
+            for rejected in (
+                "file:///etc/passwd",
+                "ftp://gpu.example.com",
+                "http://",
+                "gpu.example.com:30000",
+                "http://gpu.example.com?x=1",
+            ):
+                with self.assertRaises(LayoutPipelineError, msg=rejected):
+                    normalize_mineru_server_url(rejected)
+
+    def test_server_url_falls_back_to_the_environment(self) -> None:
+        with patch.dict(os.environ, {"MY_SCHOLAR_MINERU_SERVER_URL": "http://env-host:30000"}):
+            self.assertEqual(normalize_mineru_server_url(None), "http://env-host:30000")
+            self.assertEqual(normalize_mineru_server_url("http://caller:1234"), "http://caller:1234")
+
+    def test_remote_backends_are_reported_as_remote(self) -> None:
+        self.assertTrue(is_remote_mineru_backend("vlm-http-client"))
+        self.assertTrue(is_remote_mineru_backend("hybrid-http-client"))
+        self.assertFalse(is_remote_mineru_backend("pipeline"))
+        self.assertFalse(is_remote_mineru_backend("hybrid-engine"))
+
+    def test_remote_runs_do_not_queue_behind_the_local_single_slot(self) -> None:
+        import layout_pipeline
+
+        # The local engine is deliberately limited to one concurrent run; a
+        # remote run only uploads and waits, so it must use its own budget.
+        self.assertGreater(layout_pipeline.MINERU_REMOTE_WORKERS, layout_pipeline.MINERU_WORKERS)
+        layout_pipeline.MINERU_SEMAPHORE.acquire()
+        try:
+            with tempfile.TemporaryDirectory(prefix="guzi-mineru-remote-slot-") as temp, patch(
+                "layout_pipeline.subprocess.Popen", return_value=self._complete_process(),
+            ):
+                root = Path(temp)
+                # Would block forever if the remote path shared the local slot.
+                with self.assertRaisesRegex(LayoutPipelineError, "content_list_v2"):
+                    _run_mineru(
+                        root / "mineru",
+                        root / "source.pdf",
+                        root / "output",
+                        backend="vlm-http-client",
+                        server_url="http://gpu-box.internal:30000",
+                    )
+        finally:
+            layout_pipeline.MINERU_SEMAPHORE.release()
 
     def test_mineru_progress_lines_parse_stage_and_counts(self) -> None:
         from layout_pipeline import _mineru_progress_update

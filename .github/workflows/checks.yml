@@ -50,3 +50,75 @@ jobs:
         run: |
           npm --prefix apps/desktop run test:graph
           npm --prefix apps/desktop run test:storage
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+      - name: Install ruff
+        # Pinned: a new ruff release can add rules and turn this job red on an
+        # unrelated pull request.
+        run: python3 -m pip install --quiet ruff==0.16.4
+      - name: Lint JavaScript and Python
+        run: npm --prefix apps/desktop run lint
+
+  ui:
+    name: UI smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+      - name: Install Playwright and Chromium
+        run: |
+          npm install --global playwright
+          playwright install --with-deps chromium
+          echo "MY_SCHOLAR_PLAYWRIGHT_MODULE=$(npm root -g)/playwright" >> "$GITHUB_ENV"
+      - name: Seed the fixture library
+        run: python3 apps/desktop/tests/fixtures/seed_library.py "${RUNNER_TEMP}/ui-data"
+      - name: Start the local server
+        run: |
+          MY_SCHOLAR_DATA_DIR="${RUNNER_TEMP}/ui-data" \
+            nohup python3 apps/desktop/server.py --port 8766 > "${RUNNER_TEMP}/server.log" 2>&1 &
+          disown || true
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8766/api/health > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "server did not become healthy in time"
+          cat "${RUNNER_TEMP}/server.log"
+          exit 1
+      - name: Run UI smoke tests
+        env:
+          MY_SCHOLAR_TEST_DATA: ${{ runner.temp }}/ui-data
+        run: npm --prefix apps/desktop run test:ui:ci
+      - name: Show server log on failure
+        if: failure()
+        run: cat "${RUNNER_TEMP}/server.log" || true

@@ -21,15 +21,17 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from document_ir import _marker_drawing_pages, mineru_to_ir, render_pages, serializable_ir
 from mineru_discovery import discover_mineru
 from toolchain_paths import tool_path_candidates
+from pymupdf_runtime import load_fitz
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -47,8 +49,16 @@ TAG_RE = re.compile(r"\\tag\s*\{([^{}]+)\}")
 SPECIAL_TOKEN_RE = re.compile(r"\[(?P<prefix>I|T)(?P<separator>\\?_)?(?P<suffix>CLS|SEP)\]", flags=re.IGNORECASE)
 MINERU_WORKERS = max(1, min(2, int(os.environ.get("MY_SCHOLAR_MINERU_WORKERS", "1"))))
 MINERU_SEMAPHORE = threading.BoundedSemaphore(MINERU_WORKERS)
-MINERU_BACKENDS = ("pipeline", "hybrid-engine")
+# A remote run only uploads and waits, so the local single-slot limit would
+# throttle it for no reason; the GPU server does the queueing that matters.
+MINERU_REMOTE_WORKERS = max(1, min(8, int(os.environ.get("MY_SCHOLAR_MINERU_REMOTE_WORKERS", "4"))))
+MINERU_REMOTE_SEMAPHORE = threading.BoundedSemaphore(MINERU_REMOTE_WORKERS)
+MINERU_BACKENDS = ("pipeline", "hybrid-engine", "vlm-http-client", "hybrid-http-client")
 DEFAULT_MINERU_BACKEND = "pipeline"
+# MinerU's own client/server split: the client sends the PDF to an
+# OpenAI-compatible server (`mineru-openai-server`) and needs only CPU and
+# network. vlm-http-client does not need a local torch install at all.
+REMOTE_MINERU_BACKENDS = ("vlm-http-client", "hybrid-http-client")
 DISCOVERY_CACHE_LOCK = threading.RLock()
 DISCOVERY_CACHE: Dict[Tuple[str, str], Tuple[float, List[Path]]] = {}
 FIRST_PAGE_CACHE: Dict[Tuple[str, int, int], str] = {}
@@ -957,7 +967,7 @@ def _first_page_text(path: Path) -> str:
         if cache_key in FIRST_PAGE_CACHE:
             return FIRST_PAGE_CACHE[cache_key]
     try:
-        import fitz  # type: ignore
+        fitz = load_fitz()
 
         with fitz.open(path) as doc:
             text = doc[0].get_text("text") if doc.page_count else ""
@@ -1239,23 +1249,55 @@ def normalize_mineru_backend(value: Any) -> str:
     return DEFAULT_MINERU_BACKEND
 
 
+def is_remote_mineru_backend(value: Any) -> bool:
+    return normalize_mineru_backend(value) in REMOTE_MINERU_BACKENDS
+
+
+def normalize_mineru_server_url(value: Any) -> str:
+    """Validate the MinerU server address, preferring the caller over the env.
+
+    Only http and https are accepted: the value becomes a subprocess argument,
+    so anything else (file://, a shell fragment) must be rejected here rather
+    than handed to the CLI.
+    """
+    for candidate in (value, os.environ.get("MY_SCHOLAR_MINERU_SERVER_URL")):
+        raw = str(candidate or "").strip()
+        if not raw:
+            continue
+        parsed = urllib.parse.urlsplit(raw)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise LayoutPipelineError(f"版面引擎服务器地址无效：{raw}")
+        if parsed.query or parsed.fragment:
+            raise LayoutPipelineError("版面引擎服务器地址不能包含查询参数或片段。")
+        return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+    return ""
+
+
 def _run_mineru(
     executable: Path,
     pdf_path: Path,
     output: Path,
     *,
     backend: Optional[str] = None,
+    server_url: Optional[str] = None,
     runtime_root: Optional[Path] = None,
     cancel_event: Any = None,
     progress: Optional[Callable[[str, float], None]] = None,
 ) -> Path:
     executable = Path(executable).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
+    resolved_backend = normalize_mineru_backend(backend)
     command = [
         str(executable), "-p", str(pdf_path), "-o", str(output),
-        "-b", normalize_mineru_backend(backend),
+        "-b", resolved_backend,
         "-m", "auto", "-f", "true", "-t", "true",
     ]
+    if resolved_backend in REMOTE_MINERU_BACKENDS:
+        resolved_url = normalize_mineru_server_url(server_url)
+        if not resolved_url:
+            raise LayoutPipelineError("远程版面解析需要先在设置中填写服务器地址。")
+        command += ["-u", resolved_url]
+    semaphore = MINERU_REMOTE_SEMAPHORE if resolved_backend in REMOTE_MINERU_BACKENDS else MINERU_SEMAPHORE
     acquired = False
     process: Optional[subprocess.Popen] = None
     monitor: Optional[_MineruOutputMonitor] = None
@@ -1263,7 +1305,7 @@ def _run_mineru(
         waiting_reported = False
         while not acquired:
             _raise_if_cancelled(cancel_event)
-            acquired = MINERU_SEMAPHORE.acquire(timeout=0.2)
+            acquired = semaphore.acquire(timeout=0.2)
             if not acquired and not waiting_reported and progress is not None:
                 progress("排队等待版面引擎空闲", 0.0)
                 waiting_reported = True
@@ -1329,7 +1371,7 @@ def _run_mineru(
         if monitor is not None:
             monitor.close()
         if acquired:
-            MINERU_SEMAPHORE.release()
+            semaphore.release()
         if process is not None:
             (output / "mineru.log").write_text(monitor.transcript() if monitor else "", encoding="utf-8")
     if process is None or process.returncode != 0:
@@ -1429,7 +1471,7 @@ def _render_pages(pdf_path: Path, target: Path, page_count: int, dpi: int = 144)
         existing.unlink(missing_ok=True)
     rendered: List[str] = []
     try:
-        import fitz  # type: ignore
+        fitz = load_fitz()
 
         with fitz.open(pdf_path) as doc:
             if len(doc) < page_count:
@@ -1753,7 +1795,7 @@ def _render_pdf_visual_crops(
     except (TypeError, ValueError):
         pixel_limit = VISUAL_CROP_MAX_PIXELS
     try:
-        import fitz  # type: ignore
+        fitz = load_fitz()
     except Exception:
         return _render_pdf_visual_crops_java(
             pdf_path,
@@ -1933,7 +1975,7 @@ def _visual_crop_base_dpi(value: Any = None) -> int:
 
 def _page_count(pdf_path: Path) -> int:
     try:
-        import fitz  # type: ignore
+        fitz = load_fitz()
 
         doc = fitz.open(pdf_path)
         count = len(doc)
@@ -2920,6 +2962,7 @@ def process_layout_pdf(
     render_budget: Optional[LayoutRenderBudget] = None,
     layout_source: Optional[Tuple[Optional[Path], str]] = None,
     mineru_backend: Optional[str] = None,
+    mineru_server_url: Optional[str] = None,
     runtime_root: Optional[Path] = None,
     cancel_event: Any = None,
 ) -> Optional[dict]:
@@ -2948,11 +2991,13 @@ def process_layout_pdf(
             source_copy,
             layout_dir,
             backend=resolved_backend,
+            server_url=mineru_server_url,
             runtime_root=runtime_root,
             cancel_event=cancel_event,
             progress=mineru_progress,
         )
-        backend_name = f"MinerU local {resolved_backend}"
+        placement = "remote" if resolved_backend in REMOTE_MINERU_BACKENDS else "local"
+        backend_name = f"MinerU {placement} {resolved_backend}"
     else:
         sidecar = sidecar_or_bin
         backend_name = "MinerU cached layout sidecar"
