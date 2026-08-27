@@ -28,7 +28,7 @@ let browserSession;
         platform: 'darwin',
         getStartupContext: async () => ({
           ok: true,
-          app: { name: '谷子学术', version: '0.1.8', platform: 'darwin', arch: 'arm64', channel: 'internal' },
+          app: { name: '谷子学术', version: '0.1.9', platform: 'darwin', arch: 'arm64', channel: 'internal' },
           storage: {
             state: 'conflict',
             adopted: false,
@@ -39,12 +39,12 @@ let browserSession;
         selectStartupLibrary: async (selectedPath) => ({ ok: true, reloading: false, currentPath: selectedPath, items: 0, jobs: 0 }),
         checkForUpdates: async () => {
           window.__updateCheckCount += 1;
-          if (window.__updateCheckCount === 1) return { ok: true, status: 'current', currentVersion: '0.1.8', version: '0.1.8', checkedAt: new Date().toISOString() };
+          if (window.__updateCheckCount === 1) return { ok: true, status: 'current', currentVersion: '0.1.9', version: '0.1.9', checkedAt: new Date().toISOString() };
           return {
             ok: true,
             status: 'available',
-            currentVersion: '0.1.8',
-            version: '0.1.8',
+            currentVersion: '0.1.9',
+            version: '0.1.9',
             publishedAt: '2026-08-07T00:00:00Z',
             notes: '验证设置中的下载入口。',
             sha256: 'a'.repeat(64),
@@ -124,14 +124,14 @@ let browserSession;
   await page.locator('[data-view="settings-view"]').click();
   await page.locator('#settings-view.active-view').waitFor();
   if (await page.locator('#onboarding-settings-row').isHidden()) throw new Error('桌面设置没有提供重新查看新手引导的入口');
-  await page.waitForFunction(() => document.querySelector('#app-current-version')?.textContent.trim() === 'v0.1.8');
+  await page.waitForFunction(() => document.querySelector('#app-current-version')?.textContent.trim() === 'v0.1.9');
   if (await page.locator('a[href="#settings-updates"]').count() !== 1) throw new Error('设置导航缺少“关于与更新”入口');
   await page.locator('a[href="#settings-updates"]').click();
   await page.locator('#check-updates').click();
   await page.waitForFunction(() => document.querySelector('#update-status-title')?.textContent.trim() === '当前已是最新版本');
   if (!await page.locator('#download-update').isHidden()) throw new Error('当前版本没有隐藏不必要的下载按钮');
   await page.locator('#check-updates').click();
-  await page.waitForFunction(() => document.querySelector('#update-status-title')?.textContent.trim() === '发现新版本 v0.1.8');
+  await page.waitForFunction(() => document.querySelector('#update-status-title')?.textContent.trim() === '发现新版本 v0.1.9');
   if (await page.locator('#download-update').isHidden()) throw new Error('发现新版本后没有提供下载入口');
   if (await page.locator('#update-release-sha').textContent() !== `SHA-256 · ${'a'.repeat(64)}`) throw new Error('更新详情没有展示安装包校验值');
   await page.locator('#download-update').click();
