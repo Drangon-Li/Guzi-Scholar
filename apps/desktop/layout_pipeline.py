@@ -69,6 +69,31 @@ DEFAULT_MINERU_BACKEND = "pipeline"
 # network. vlm-http-client does not need a local torch install at all.
 REMOTE_MINERU_BACKENDS = ("vlm-http-client", "hybrid-http-client")
 
+# One wall-clock budget cannot fit both sizes of run. The hybrid backend decodes
+# block by block, so on a card MinerU reports as 1GB (batch_size 1) a 23-page
+# paper took 820s while a 65-page one needs roughly three times that and was
+# killed at 78% of its Predict bar by the flat 900s cap this replaces. The floor
+# keeps short documents on exactly the previous budget, which also makes an
+# unreadable page count the strictest outcome rather than a shorter one.
+MINERU_TIMEOUT_BASE_SECONDS = 300
+MINERU_TIMEOUT_PER_PAGE_SECONDS = 25
+MINERU_TIMEOUT_FLOOR_SECONDS = 900
+MINERU_TIMEOUT_CEILING_SECONDS = 3600
+
+
+def mineru_timeout_seconds(page_count: Optional[int]) -> int:
+    """Wall-clock budget for one MinerU run, scaled by document length."""
+    override = str(os.environ.get("MY_SCHOLAR_MINERU_TIMEOUT") or "").strip()
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            # An unusable override must not be the reason a conversion dies.
+            pass
+    pages = max(1, int(page_count or 1))
+    budget = MINERU_TIMEOUT_BASE_SECONDS + MINERU_TIMEOUT_PER_PAGE_SECONDS * pages
+    return max(MINERU_TIMEOUT_FLOOR_SECONDS, min(MINERU_TIMEOUT_CEILING_SECONDS, budget))
+
 
 def detect_gpu_memory_mb() -> Optional[int]:
     """Total memory of the largest local CUDA device, or None if there is none.
@@ -1174,6 +1199,16 @@ def _stop_mineru_process(process: subprocess.Popen) -> None:
 MINERU_PROGRESS_RE = re.compile(
     r"^(?P<stage>[A-Za-z][A-Za-z0-9 ()/_-]{0,48}):\s+\d{1,3}%\|.*\|\s*(?P<done>\d+)/(?P<total>\d+)\b"
 )
+# PyMuPDF is not part of the packaged runtime, so _page_count() there always
+# reports 1 and the budget would silently collapse to its floor. MinerU states
+# the page count on stdout within seconds of starting, which is the one source
+# available wherever it actually runs.
+MINERU_PAGES_RE = re.compile(r"(?:(\d+)\s+pages\s+total|total_pages=(\d+)|page_count=(\d+))")
+
+
+def _mineru_reported_pages(line: str) -> Optional[int]:
+    reported = [int(value) for match in MINERU_PAGES_RE.finditer(line) for value in match.groups() if value]
+    return max(reported) if reported else None
 
 # Window boundaries follow the measured share of a hybrid-engine run, where
 # the VLM "Predict" bars consume ~90% of the wall time; unknown bars keep the
@@ -1188,6 +1223,14 @@ _MINERU_STAGE_WINDOWS = (
     ("ocr-rec", "文字识别", 0.94, 0.96),
     ("predict", "AI 深度解析", 0.16, 0.88),
 )
+
+
+def _mineru_stage_label(stage: str) -> str:
+    lowered = stage.lower()
+    for prefix, name, _start, _end in _MINERU_STAGE_WINDOWS:
+        if lowered.startswith(prefix):
+            return name
+    return stage
 
 
 def _mineru_progress_update(line: str) -> Optional[Tuple[str, int, int]]:
@@ -1216,6 +1259,7 @@ class _MineruOutputMonitor:
         self._pending = b""
         self._thread: Optional[threading.Thread] = None
         self._latest: Optional[Tuple[str, int, int]] = None
+        self._pages: Optional[int] = None
         self._reported: Optional[Tuple[str, int, int]] = None
         self._reported_at = 0.0
         self._floor = 0.0
@@ -1242,9 +1286,14 @@ class _MineruOutputMonitor:
             self._pending += chunk
             *lines, self._pending = re.split(rb"[\r\n]", self._pending)
             for raw in lines:
-                update = _mineru_progress_update(raw.decode("utf-8", "replace").strip())
+                line = raw.decode("utf-8", "replace").strip()
+                update = _mineru_progress_update(line)
                 if update is not None:
                     self._latest = update
+                    continue
+                pages = _mineru_reported_pages(line)
+                if pages is not None:
+                    self._pages = max(pages, self._pages or 0)
 
     def emit(self) -> None:
         # Runs on the polling thread so a cancellation raised by the progress
@@ -1265,15 +1314,25 @@ class _MineruOutputMonitor:
 
     def _describe(self, stage: str, done: int, total: int) -> Tuple[str, float]:
         lowered = stage.lower()
-        label = stage
         fraction = self._floor
-        for prefix, name, start, end in _MINERU_STAGE_WINDOWS:
+        for prefix, _name, start, end in _MINERU_STAGE_WINDOWS:
             if lowered.startswith(prefix):
-                label = name
                 fraction = start + (end - start) * (done / total)
                 break
         self._floor = max(self._floor, min(1.0, fraction))
-        return f"{label} {done}/{total}", self._floor
+        return f"{_mineru_stage_label(stage)} {done}/{total}", self._floor
+
+    def page_count(self) -> Optional[int]:
+        """Pages as MinerU itself reported them, once it has said so."""
+        return self._pages
+
+    def progress_summary(self) -> Optional[str]:
+        """How far MinerU got, for a failure the transcript will not explain."""
+        latest = self._latest
+        if latest is None:
+            return None
+        stage, done, total = latest
+        return f"{_mineru_stage_label(stage)} {done}/{total}（{round(100 * done / total)}%）"
 
     def close(self) -> None:
         if self._thread is not None:
@@ -1286,6 +1345,23 @@ class _MineruOutputMonitor:
 
     def transcript(self) -> str:
         return b"".join(self._chunks).decode("utf-8", "replace")
+
+
+def _format_budget(seconds: float) -> str:
+    """A budget reads as whole minutes; the odd seconds carry no information."""
+    minutes = max(1, round(max(0, seconds) / 60))
+    return f"{minutes} 分钟"
+
+
+def _mineru_timeout_message(limit_seconds: int, monitor: Optional["_MineruOutputMonitor"]) -> str:
+    summary = monitor.progress_summary() if monitor is not None else None
+    reached = f"，中断时停在「{summary}」" if summary else "，期间没有收到任何进度"
+    # Short enough for the status panel: how the budget is derived belongs in
+    # the log, what to do about it belongs here.
+    return (
+        f"MinerU 运行超时：已达到 {_format_budget(limit_seconds)}上限{reached}。"
+        "可在设置中改用 pipeline 后端，或调大 MY_SCHOLAR_MINERU_TIMEOUT 后重试。"
+    )
 
 
 def normalize_mineru_backend(value: Any) -> str:
@@ -1403,13 +1479,21 @@ def _run_mineru(
         monitor.start()
         if progress is not None:
             progress("启动本地版面引擎", 0.0)
-        deadline = time.monotonic() + int(os.environ.get("MY_SCHOLAR_MINERU_TIMEOUT", "900"))
+        started_at = time.monotonic()
+        budgeted_pages = _page_count(pdf_path)
+        timeout = mineru_timeout_seconds(budgeted_pages)
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 raise LayoutPipelineCancelled("AI 重排已取消。")
-            remaining = deadline - time.monotonic()
+            # MinerU announces the page count a few seconds in, and where
+            # PyMuPDF is absent it is the only count available at all.
+            reported = monitor.page_count()
+            if reported is not None and reported > (budgeted_pages or 0):
+                budgeted_pages = reported
+                timeout = mineru_timeout_seconds(reported)
+            remaining = started_at + timeout - time.monotonic()
             if remaining <= 0:
-                raise LayoutPipelineError("MinerU 运行超时。")
+                raise LayoutPipelineError(_mineru_timeout_message(timeout, monitor))
             if process.poll() is not None:
                 break
             monitor.emit()

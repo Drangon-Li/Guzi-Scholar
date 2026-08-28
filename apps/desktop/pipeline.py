@@ -812,6 +812,25 @@ def _fresh_layout_backend(layout_module: Any) -> Tuple[Optional[Path], str]:
     return None, "unavailable"
 
 
+def _preserve_layout_transcript(candidate_dir: Path, job_dir: Path) -> None:
+    """Copy MinerU's transcript out of the candidate directory before it dies.
+
+    Layout runs in a TemporaryDirectory that is promoted only on success, so a
+    failure destroys the one record of what the engine was doing when it
+    stopped. Landing it where a successful run would have put it lets the
+    caller treat both outcomes the same way.
+    """
+    source = candidate_dir / "layout" / "mineru.log"
+    try:
+        if not source.is_file() or source.stat().st_size == 0:
+            return
+        target = job_dir / "layout" / "mineru.log"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+    except OSError as error:
+        print(f"[layout] 无法保留 MinerU 日志：{error}", flush=True)
+
+
 def _process_layout_candidate(
     pdf_path: Path,
     candidate_dir: Path,
@@ -879,23 +898,30 @@ def process_pdf(
     selection: Dict[str, Any] = {}
     if backend != "odl":
         try:
-            from layout_pipeline import LayoutPipelineError
+            from layout_pipeline import LayoutPipelineCancelled, LayoutPipelineError
 
             with tempfile.TemporaryDirectory(prefix=f".{job_id}-layout-", dir=str(job_dir.parent)) as temp:
                 candidate_dir = Path(temp)
-                manifest = _process_layout_candidate(
-                    pdf_path,
-                    candidate_dir,
-                    job_id=job_id,
-                    source_name=source_name,
-                    progress=_scaled_progress(progress, 0.0, 0.82) if backend == "auto" else progress,
-                    refresh_layout_sidecar=refresh_layout_sidecar,
-                    layout_executable=layout_executable,
-                    layout_runtime_root=layout_runtime_root,
-                    layout_backend=layout_backend,
-                    layout_server_url=layout_server_url,
-                    cancel_event=cancel_event,
-                )
+                try:
+                    manifest = _process_layout_candidate(
+                        pdf_path,
+                        candidate_dir,
+                        job_id=job_id,
+                        source_name=source_name,
+                        progress=_scaled_progress(progress, 0.0, 0.82) if backend == "auto" else progress,
+                        refresh_layout_sidecar=refresh_layout_sidecar,
+                        layout_executable=layout_executable,
+                        layout_runtime_root=layout_runtime_root,
+                        layout_backend=layout_backend,
+                        layout_server_url=layout_server_url,
+                        cancel_event=cancel_event,
+                    )
+                except LayoutPipelineCancelled:
+                    # A cancellation explains itself; it is not a diagnostic.
+                    raise
+                except LayoutPipelineError:
+                    _preserve_layout_transcript(candidate_dir, job_dir)
+                    raise
                 if manifest is not None:
                     quality = _semantic_validation(candidate_dir)
                     rejection = _semantic_rejection_reason(quality)
