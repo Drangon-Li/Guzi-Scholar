@@ -2157,7 +2157,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._send_json({
                 "ok": True,
                 "service": "my-scholar",
-                "version": "0.1.9",
+                "version": "0.1.10",
                 "readonly": runtime.READONLY_MODE,
                 "shell": os.environ.get("MY_SCHOLAR_SHELL", "reference"),
                 "ai": ai,
