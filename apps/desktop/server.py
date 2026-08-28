@@ -1800,6 +1800,34 @@ def _run_provider_import(provider_id: str, source: Path) -> None:
             PARSING_INSTALL_THREAD = None
 
 
+def _reflow_failure_error(exc: BaseException, preserved: Optional[Path]) -> str:
+    """The stored message, naming the transcript when one was kept."""
+    message = str(exc)
+    if preserved is not None:
+        message = f"{message}（解析日志：{preserved.name}）"
+    return message[:500]
+
+
+def _preserve_layout_error_log(attempt_dir: Path, renders_root: Path, generation: int) -> Optional[Path]:
+    """Copy a failed attempt's MinerU transcript out before the attempt is removed.
+
+    The transcript is written inside the attempt directory, which the failure
+    path deletes, so until now the only run that kept a log was the one that
+    succeeded -- the one nobody needs to read.
+    """
+    source = attempt_dir / "layout" / "mineru.log"
+    target = renders_root / f"layout-error-{generation}.log"
+    try:
+        if not source.is_file() or source.stat().st_size == 0:
+            return None
+        renders_root.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+    except OSError as error:
+        print(f"[reflow] 无法保留 generation {generation} 的 MinerU 日志：{error}", flush=True)
+        return None
+    return target
+
+
 def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
     cancel_event = _reflow_cancel_event(job_id, generation)
     # Claim under the document mutation lock so a queued worker cannot race a
@@ -1892,6 +1920,12 @@ def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
         except Exception as metadata_error:
             print(f"[metadata] 无法安排任务 {job_id} 的本地摘要刷新：{metadata_error}", flush=True)
     except Exception as exc:
+        # A cancellation is not a diagnostic; only real failures leave a log.
+        preserved = (
+            None
+            if cancel_event.is_set() or isinstance(exc, ReflowCancelledError)
+            else _preserve_layout_error_log(attempt_dir, renders_root, generation)
+        )
         shutil.rmtree(attempt_dir, ignore_errors=True)
         try:
             with _job_mutation(job_id):
@@ -1908,7 +1942,7 @@ def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
                     expected_statuses={"running", "cancelling"},
                     status="cancelled" if cancelled else "failed",
                     stage="重新排版已取消" if cancelled else "重新排版失败",
-                    error="用户已取消重新排版，当前阅读版本未受影响。" if cancelled else str(exc)[:500],
+                    error="用户已取消重新排版，当前阅读版本未受影响。" if cancelled else _reflow_failure_error(exc, preserved),
                 )
         except Exception as persist_error:
             print(f"[reflow] 无法保存任务 {job_id} 的失败状态：{persist_error}", flush=True)

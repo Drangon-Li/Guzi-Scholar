@@ -69,6 +69,31 @@ DEFAULT_MINERU_BACKEND = "pipeline"
 # network. vlm-http-client does not need a local torch install at all.
 REMOTE_MINERU_BACKENDS = ("vlm-http-client", "hybrid-http-client")
 
+# One wall-clock budget cannot fit both sizes of run. The hybrid backend decodes
+# block by block, so on a card MinerU reports as 1GB (batch_size 1) a 23-page
+# paper took 820s while a 65-page one needs roughly three times that and was
+# killed at 78% of its Predict bar by the flat 900s cap this replaces. The floor
+# keeps short documents on exactly the previous budget, which also makes an
+# unreadable page count the strictest outcome rather than a shorter one.
+MINERU_TIMEOUT_BASE_SECONDS = 300
+MINERU_TIMEOUT_PER_PAGE_SECONDS = 25
+MINERU_TIMEOUT_FLOOR_SECONDS = 900
+MINERU_TIMEOUT_CEILING_SECONDS = 3600
+
+
+def mineru_timeout_seconds(page_count: Optional[int]) -> int:
+    """Wall-clock budget for one MinerU run, scaled by document length."""
+    override = str(os.environ.get("MY_SCHOLAR_MINERU_TIMEOUT") or "").strip()
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            # An unusable override must not be the reason a conversion dies.
+            pass
+    pages = max(1, int(page_count or 1))
+    budget = MINERU_TIMEOUT_BASE_SECONDS + MINERU_TIMEOUT_PER_PAGE_SECONDS * pages
+    return max(MINERU_TIMEOUT_FLOOR_SECONDS, min(MINERU_TIMEOUT_CEILING_SECONDS, budget))
+
 
 def detect_gpu_memory_mb() -> Optional[int]:
     """Total memory of the largest local CUDA device, or None if there is none.
@@ -1190,6 +1215,14 @@ _MINERU_STAGE_WINDOWS = (
 )
 
 
+def _mineru_stage_label(stage: str) -> str:
+    lowered = stage.lower()
+    for prefix, name, _start, _end in _MINERU_STAGE_WINDOWS:
+        if lowered.startswith(prefix):
+            return name
+    return stage
+
+
 def _mineru_progress_update(line: str) -> Optional[Tuple[str, int, int]]:
     match = MINERU_PROGRESS_RE.match(line)
     if not match:
@@ -1265,15 +1298,21 @@ class _MineruOutputMonitor:
 
     def _describe(self, stage: str, done: int, total: int) -> Tuple[str, float]:
         lowered = stage.lower()
-        label = stage
         fraction = self._floor
-        for prefix, name, start, end in _MINERU_STAGE_WINDOWS:
+        for prefix, _name, start, end in _MINERU_STAGE_WINDOWS:
             if lowered.startswith(prefix):
-                label = name
                 fraction = start + (end - start) * (done / total)
                 break
         self._floor = max(self._floor, min(1.0, fraction))
-        return f"{label} {done}/{total}", self._floor
+        return f"{_mineru_stage_label(stage)} {done}/{total}", self._floor
+
+    def progress_summary(self) -> Optional[str]:
+        """How far MinerU got, for a failure the transcript will not explain."""
+        latest = self._latest
+        if latest is None:
+            return None
+        stage, done, total = latest
+        return f"{_mineru_stage_label(stage)} {done}/{total}（{round(100 * done / total)}%）"
 
     def close(self) -> None:
         if self._thread is not None:
@@ -1286,6 +1325,24 @@ class _MineruOutputMonitor:
 
     def transcript(self) -> str:
         return b"".join(self._chunks).decode("utf-8", "replace")
+
+
+def _format_budget(seconds: float) -> str:
+    """A budget reads as whole minutes; the odd seconds carry no information."""
+    minutes = max(1, round(max(0, seconds) / 60))
+    return f"{minutes} 分钟"
+
+
+def _mineru_timeout_message(limit_seconds: int, monitor: Optional["_MineruOutputMonitor"]) -> str:
+    summary = monitor.progress_summary() if monitor is not None else None
+    reached = f"，中断时停在「{summary}」" if summary else "，期间没有收到任何进度"
+    return (
+        f"MinerU 运行超时：已达到 {_format_budget(limit_seconds)}上限{reached}。"
+        f"上限按页数计算（{MINERU_TIMEOUT_BASE_SECONDS} 秒 + 每页 {MINERU_TIMEOUT_PER_PAGE_SECONDS} 秒，"
+        f"最长 {_format_budget(MINERU_TIMEOUT_CEILING_SECONDS)}）。"
+        "本机运行 hybrid-engine 偏慢时，可在设置中改用 pipeline 后端，"
+        "或调大 MY_SCHOLAR_MINERU_TIMEOUT 后重试。"
+    )
 
 
 def normalize_mineru_backend(value: Any) -> str:
@@ -1403,13 +1460,14 @@ def _run_mineru(
         monitor.start()
         if progress is not None:
             progress("启动本地版面引擎", 0.0)
-        deadline = time.monotonic() + int(os.environ.get("MY_SCHOLAR_MINERU_TIMEOUT", "900"))
+        timeout = mineru_timeout_seconds(_page_count(pdf_path))
+        deadline = time.monotonic() + timeout
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 raise LayoutPipelineCancelled("AI 重排已取消。")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise LayoutPipelineError("MinerU 运行超时。")
+                raise LayoutPipelineError(_mineru_timeout_message(timeout, monitor))
             if process.poll() is not None:
                 break
             monitor.emit()
