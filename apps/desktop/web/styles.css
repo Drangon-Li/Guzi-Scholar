@@ -159,9 +159,12 @@ h2 { margin: 0; font-size: 22px; line-height: 1.2; letter-spacing: -.02em; }
 .translation-progress-dots span:nth-child(3) { animation-delay: .3s; }
 .translation-progress:is([data-state="complete"],[data-state="completed"],[data-state="failed"],[data-state="cancelled"]) .translation-progress-dots { display: none; }
 .translation-progress-main { display: grid; flex: 1; min-width: 0; gap: 4px; }
-.translation-progress-head { display: flex; align-items: baseline; gap: 8px; }
-.translation-progress-head #translation-progress-label { font-weight: 640; }
-.translation-progress-head #reflow-progress-label { font-weight: 640; }
+/* The head is a grid item, and a grid item will not shrink below its own
+   content without this -- so a long status line pushed the label and the
+   percentage out of the panel instead of the text truncating inside it. */
+.translation-progress-head { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
+.translation-progress-head #translation-progress-label { flex: 0 0 auto; font-weight: 640; }
+.translation-progress-head #reflow-progress-label { flex: 0 0 auto; font-weight: 640; }
 .translation-progress-count { overflow: hidden; color: color-mix(in srgb, currentColor 72%, transparent); white-space: nowrap; text-overflow: ellipsis; }
 .translation-progress-head #translation-progress-value { margin-left: auto; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 .translation-progress-head #reflow-progress-value { margin-left: auto; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
@@ -175,6 +178,10 @@ h2 { margin: 0; font-size: 22px; line-height: 1.2; letter-spacing: -.02em; }
 @keyframes translation-scan { from { background-position: -40% 0; } to { background-position: 140% 0; } }
 .translation-progress .tiny-button { margin-left: 3px; }
 .reflow-progress[data-state="failed"] { border-color: color-mix(in srgb,#bd3b47 55%,var(--line)); color: #bd3b47; }
+/* A failure is the one status worth reading in full, so it wraps rather than
+   truncating to a fragment nobody can act on. */
+.translation-progress[data-state="failed"] .translation-progress-head { align-items: flex-start; }
+.translation-progress[data-state="failed"] .translation-progress-count { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
 .reflow-progress[data-state="cancelled"] { color: var(--muted); }
 #translation-progress:not([hidden]) + #reflow-progress { bottom: 94px; }
 .toast { position: fixed; z-index: 100; right: 26px; bottom: 25px; max-width: 360px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--material-overlay); backdrop-filter: var(--material-filter); box-shadow: var(--shadow-pop); color: var(--ink); font-size: 12px; animation: rise-in var(--motion-panel) var(--motion-ease-out); transition: opacity var(--motion-fast) ease, transform var(--motion-fast) ease; }

@@ -1199,6 +1199,16 @@ def _stop_mineru_process(process: subprocess.Popen) -> None:
 MINERU_PROGRESS_RE = re.compile(
     r"^(?P<stage>[A-Za-z][A-Za-z0-9 ()/_-]{0,48}):\s+\d{1,3}%\|.*\|\s*(?P<done>\d+)/(?P<total>\d+)\b"
 )
+# PyMuPDF is not part of the packaged runtime, so _page_count() there always
+# reports 1 and the budget would silently collapse to its floor. MinerU states
+# the page count on stdout within seconds of starting, which is the one source
+# available wherever it actually runs.
+MINERU_PAGES_RE = re.compile(r"(?:(\d+)\s+pages\s+total|total_pages=(\d+)|page_count=(\d+))")
+
+
+def _mineru_reported_pages(line: str) -> Optional[int]:
+    reported = [int(value) for match in MINERU_PAGES_RE.finditer(line) for value in match.groups() if value]
+    return max(reported) if reported else None
 
 # Window boundaries follow the measured share of a hybrid-engine run, where
 # the VLM "Predict" bars consume ~90% of the wall time; unknown bars keep the
@@ -1249,6 +1259,7 @@ class _MineruOutputMonitor:
         self._pending = b""
         self._thread: Optional[threading.Thread] = None
         self._latest: Optional[Tuple[str, int, int]] = None
+        self._pages: Optional[int] = None
         self._reported: Optional[Tuple[str, int, int]] = None
         self._reported_at = 0.0
         self._floor = 0.0
@@ -1275,9 +1286,14 @@ class _MineruOutputMonitor:
             self._pending += chunk
             *lines, self._pending = re.split(rb"[\r\n]", self._pending)
             for raw in lines:
-                update = _mineru_progress_update(raw.decode("utf-8", "replace").strip())
+                line = raw.decode("utf-8", "replace").strip()
+                update = _mineru_progress_update(line)
                 if update is not None:
                     self._latest = update
+                    continue
+                pages = _mineru_reported_pages(line)
+                if pages is not None:
+                    self._pages = max(pages, self._pages or 0)
 
     def emit(self) -> None:
         # Runs on the polling thread so a cancellation raised by the progress
@@ -1305,6 +1321,10 @@ class _MineruOutputMonitor:
                 break
         self._floor = max(self._floor, min(1.0, fraction))
         return f"{_mineru_stage_label(stage)} {done}/{total}", self._floor
+
+    def page_count(self) -> Optional[int]:
+        """Pages as MinerU itself reported them, once it has said so."""
+        return self._pages
 
     def progress_summary(self) -> Optional[str]:
         """How far MinerU got, for a failure the transcript will not explain."""
@@ -1336,12 +1356,11 @@ def _format_budget(seconds: float) -> str:
 def _mineru_timeout_message(limit_seconds: int, monitor: Optional["_MineruOutputMonitor"]) -> str:
     summary = monitor.progress_summary() if monitor is not None else None
     reached = f"，中断时停在「{summary}」" if summary else "，期间没有收到任何进度"
+    # Short enough for the status panel: how the budget is derived belongs in
+    # the log, what to do about it belongs here.
     return (
         f"MinerU 运行超时：已达到 {_format_budget(limit_seconds)}上限{reached}。"
-        f"上限按页数计算（{MINERU_TIMEOUT_BASE_SECONDS} 秒 + 每页 {MINERU_TIMEOUT_PER_PAGE_SECONDS} 秒，"
-        f"最长 {_format_budget(MINERU_TIMEOUT_CEILING_SECONDS)}）。"
-        "本机运行 hybrid-engine 偏慢时，可在设置中改用 pipeline 后端，"
-        "或调大 MY_SCHOLAR_MINERU_TIMEOUT 后重试。"
+        "可在设置中改用 pipeline 后端，或调大 MY_SCHOLAR_MINERU_TIMEOUT 后重试。"
     )
 
 
@@ -1460,12 +1479,19 @@ def _run_mineru(
         monitor.start()
         if progress is not None:
             progress("启动本地版面引擎", 0.0)
-        timeout = mineru_timeout_seconds(_page_count(pdf_path))
-        deadline = time.monotonic() + timeout
+        started_at = time.monotonic()
+        budgeted_pages = _page_count(pdf_path)
+        timeout = mineru_timeout_seconds(budgeted_pages)
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 raise LayoutPipelineCancelled("AI 重排已取消。")
-            remaining = deadline - time.monotonic()
+            # MinerU announces the page count a few seconds in, and where
+            # PyMuPDF is absent it is the only count available at all.
+            reported = monitor.page_count()
+            if reported is not None and reported > (budgeted_pages or 0):
+                budgeted_pages = reported
+                timeout = mineru_timeout_seconds(reported)
+            remaining = started_at + timeout - time.monotonic()
             if remaining <= 0:
                 raise LayoutPipelineError(_mineru_timeout_message(timeout, monitor))
             if process.poll() is not None:
