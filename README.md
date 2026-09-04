@@ -17,7 +17,7 @@ English documentation is coming soon. See [README.en.md](README.en.md) for the c
 
 ## 下载
 
-前往 [Releases](https://github.com/Chinese-Dragon-Li/Guzi-Scholar/releases) 下载对应平台的安装包：
+前往 [Releases](https://github.com/Drangon-Li/Guzi-Scholar/releases) 下载对应平台的安装包：
 
 | 平台 | 产物 | 当前状态 |
 | --- | --- | --- |

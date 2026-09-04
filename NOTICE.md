@@ -7,7 +7,7 @@
 二次开发、再发布或制作衍生作品时，请保留以下来源信息：
 
 > 谷子学术（Guzi Scholar）\
-> Source: https://github.com/Chinese-Dragon-Li/Guzi-Scholar
+> Source: https://github.com/Drangon-Li/Guzi-Scholar
 
 构建或发行包中可能包含 OpenDataLoader PDF CLI；该第三方组件按其自身 Apache-2.0 许可证及 NOTICE/THIRD_PARTY 文件发行。
 
