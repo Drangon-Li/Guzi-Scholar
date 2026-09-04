@@ -547,7 +547,7 @@ body.resizing-reader-assistant * { cursor: col-resize !important; }
 .details-abstract { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.68; }
 .copyable-data { -webkit-user-select: text; user-select: text; cursor: text; }
 .library-details-close { display: none; }
-.row-stars { color: #b77914; font-size: 13px; letter-spacing: 1px; white-space: nowrap; }
+.row-stars { color: #8f5c0d; font-size: 13px; letter-spacing: 1px; white-space: nowrap; }
 .row-stars .star-empty { color: color-mix(in srgb, var(--text-tertiary) 46%, transparent); }
 .row-status { color: var(--text-secondary); font-size: 12.5px; }
 .row-status::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--text-tertiary); vertical-align: 1px; }
