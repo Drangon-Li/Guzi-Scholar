@@ -3,10 +3,10 @@
   "platform": "darwin",
   "arch": "arm64",
   "channel": "internal",
-  "version": "0.1.11",
-  "download_url": "https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.1.11/Guzi-Scholar-0.1.11-arm64-internal.dmg",
-  "sha256": "ce259b9436a54583ecdcf7567a2bed97c9ed9b270997ea292274f021dac344be",
-  "notes": "Guzi Scholar 0.1.11 macOS Apple Silicon GitHub release; ad-hoc signed and not notarized",
-  "published_at": "2026-09-04T15:25:06Z",
+  "version": "0.1.12",
+  "download_url": "https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.1.12/Guzi-Scholar-0.1.12-arm64-internal.dmg",
+  "sha256": "2af1ebe685a331d8d3deadd0bd3d02f742168fbdc8a0b8c2da988ef64dfddadc",
+  "notes": "Guzi Scholar 0.1.12 macOS Apple Silicon GitHub release; ad-hoc signed and not notarized",
+  "published_at": "2026-09-04T16:12:27Z",
   "minimum_system_version": "12.0"
 }
