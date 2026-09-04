@@ -337,7 +337,7 @@ let browserSession;
   });
   if (!libraryLocationFallback.buttonDisabled || !/浏览器服务/u.test(libraryLocationFallback.path || '') || !/桌面客户端/u.test(libraryLocationFallback.status || '')) throw new Error(`Browser settings did not expose the desktop-only library location fallback (${JSON.stringify(libraryLocationFallback)})`);
   const aiSourceText = await page.locator('#settings-updates').textContent();
-  const sourceHref = await page.locator('#settings-updates a[href*="github.com/Chinese-Dragon-Li/Guzi-Scholar"]').getAttribute('href');
+  const sourceHref = await page.locator('#settings-updates a[href*="github.com/Drangon-Li/Guzi-Scholar"]').getAttribute('href');
   if (!/谷子学术|Guzi Scholar/u.test(aiSourceText) || !sourceHref) throw new Error('Open-source attribution was missing from the settings page');
   await page.locator('.settings-navigation a[href="#settings-ai"]').click();
   const translationBaseURL = page.locator('#setting-translation-base-url');

@@ -24,7 +24,7 @@ const { consumeInstallationMarker, requestMacInstallation } = require('./macos-i
 
 const PRODUCT_NAME = '谷子学术';
 const UPDATE_CHANNEL = 'internal';
-const UPDATE_MANIFEST_URL = process.env.MY_SCHOLAR_UPDATE_MANIFEST_URL || 'https://raw.githubusercontent.com/Chinese-Dragon-Li/Guzi-Scholar/main/release-manifests/macos-arm64.json';
+const UPDATE_MANIFEST_URL = process.env.MY_SCHOLAR_UPDATE_MANIFEST_URL || 'https://raw.githubusercontent.com/Drangon-Li/Guzi-Scholar/main/release-manifests/macos-arm64.json';
 const UPDATE_ALLOWED_ORIGINS = Object.freeze(['https://raw.githubusercontent.com', 'https://github.com']);
 const defaultUserDataPath = app.getPath('userData');
 app.setName(PRODUCT_NAME);
