@@ -21,11 +21,11 @@ English documentation is coming soon. See [README.en.md](README.en.md) for the c
 
 | 平台 | 产物 | 当前状态 |
 | --- | --- | --- |
-| macOS Apple Silicon | `.dmg` | `v0.1.10` GitHub 发布版（未公证） |
+| macOS Apple Silicon | `.dmg` | `v0.1.11` GitHub 发布版（未公证） |
 | Windows x64 | NSIS `.exe` | 等待实机验证 |
 | Windows x64 | 便携版 `.zip` | 等待实机验证 |
 
-macOS `v0.1.10` 发布包内置 Python、Java、Pandoc 和 OpenDataLoader 运行时，使用 ad-hoc 签名，尚未通过 Apple Developer ID 签名或 Apple 公证。首次打开时如果遇到 Gatekeeper 提示，请在 Finder 中右键“谷子学术.app”并选择“打开”，再确认提示。当前版本只提供主动检查和浏览器下载，不承诺可靠的应用内自动更新。Windows 开发版当前需要 Python 3.9 或更高版本，正式安装包将在实机验证后发布。
+macOS `v0.1.11` 发布包内置 Python、Java、Pandoc 和 OpenDataLoader 运行时，使用 ad-hoc 签名，尚未通过 Apple Developer ID 签名或 Apple 公证。首次打开时如果遇到 Gatekeeper 提示，请在 Finder 中右键“谷子学术.app”并选择“打开”，再确认提示。当前版本只提供主动检查和浏览器下载，不承诺可靠的应用内自动更新。Windows 开发版当前需要 Python 3.9 或更高版本，正式安装包将在实机验证后发布。
 
 ## 本地开发
 

@@ -12,7 +12,7 @@ The project code is licensed under [Apache License 2.0](LICENSE). Third-party de
 
 ## Downloads
 
-Download the latest macOS Apple Silicon DMG from the [Releases](https://github.com/Chinese-Dragon-Li/Guzi-Scholar/releases) page. The current macOS package is the `v0.1.10` GitHub release: it uses ad-hoc signing and has not been signed with an Apple Developer ID or notarized by Apple. If Gatekeeper blocks the first launch, right-click `Guzi Scholar.app` in Finder, choose **Open**, and confirm the prompt. Updates are manual downloads from the Releases page; reliable in-app automatic replacement is not promised. Windows packages are coming after real-machine verification.
+Download the latest macOS Apple Silicon DMG from the [Releases](https://github.com/Chinese-Dragon-Li/Guzi-Scholar/releases) page. The current macOS package is the `v0.1.11` GitHub release: it uses ad-hoc signing and has not been signed with an Apple Developer ID or notarized by Apple. If Gatekeeper blocks the first launch, right-click `Guzi Scholar.app` in Finder, choose **Open**, and confirm the prompt. Updates are manual downloads from the Releases page; reliable in-app automatic replacement is not promised. Windows packages are coming after real-machine verification.
 
 ## Development
 
