@@ -627,6 +627,9 @@ body.library-marquee-selecting { -webkit-user-select: none; user-select: none; }
 
 @media (prefers-color-scheme: dark) {
   .library-sidebar,.views-sidebar { border-color: var(--line); }.folder-row:hover,.library-row:hover { background: color-mix(in srgb,var(--accent-soft) 52%,var(--paper)); }.view-form { background: var(--paper); }.library-main-actions select { background: var(--paper); color: var(--ink); }.folder-action.folder-delete:hover { background: #3b202a; }.property-row button { color: #ffb0b0; }
+  /* The light-theme amber only cleared the 4.5:1 floor against the old
+     near-black surface. Stars stay gold whatever accent the user picks. */
+  .row-stars { color: #f3b34c; }
 }
 @media (max-width: 1360px) {
   /* Give the title a full row before the desktop grid leaves it at min-content width. */
