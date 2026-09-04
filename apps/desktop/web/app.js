@@ -10370,6 +10370,8 @@
     }));
   }
 
+  const readerDarkSurface = Object.freeze({ '--paper': '#1e2124', '--ink': '#dcdcde', '--line': '#55462f', '--soft': '#32281a' });
+
   function appearanceVariables(appearance) {
     const normalized = normalizeAppearance(appearance);
     const palette = accentTokens[colorSchemeQuery.matches ? 'dark' : 'light'][normalized.accent];
@@ -10393,6 +10395,11 @@
     if (readerDocument) {
       variables['--ui-font'] = appFontStacks[normalized.app_font];
       variables['--paper-font'] = readerFontStacks[normalized.reader_font];
+      // Documents parsed before the dark surface was lifted still carry the old
+      // near-black palette in their own stylesheet, so push the current surface
+      // onto the reader document instead of asking the library to re-parse.
+      if (colorSchemeQuery.matches) Object.assign(variables, readerDarkSurface);
+      else Object.keys(readerDarkSurface).forEach((name) => root.style.removeProperty(name));
     }
     Object.entries(variables).forEach(([name, value]) => root.style.setProperty(name, value, important ? 'important' : ''));
   }

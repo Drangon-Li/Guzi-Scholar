@@ -470,7 +470,7 @@ body.resizing-reader-assistant * { cursor: col-resize !important; }
 .settings-test-button { margin-top: 8px; }.settings-gateway-hint { min-height: 14px; }
 
 @media (prefers-color-scheme: dark) {
-  :root { --ink:#f2f4f7; --muted:#aeb8c2; --text-secondary:#c7ced6; --text-tertiary:#aeb8c2; --line:#353b42; --paper:#151719; --canvas:#0f1113; --soft:#1b1e21; --accent:#8d98ff; --accent-dark:#aab2ff; --accent-soft:#24283d; --accent-fill:#8d98ff; --on-accent:#11131d; --shadow:0 16px 42px rgba(0,0,0,.34); --shadow-pop:0 0 0 .5px rgba(0,0,0,.45), 0 2px 10px rgba(0,0,0,.35), 0 12px 40px rgba(0,0,0,.5); --shadow-window:0 0 0 .5px rgba(0,0,0,.55), 0 10px 30px rgba(0,0,0,.42), 0 28px 90px rgba(0,0,0,.6); }
+  :root { --ink:#dfe3e7; --muted:#aeb8c2; --text-secondary:#c7ced6; --text-tertiary:#aeb8c2; --line:#3e444b; --paper:#1e2124; --canvas:#17191c; --soft:#262a2e; --accent:#8d98ff; --accent-dark:#aab2ff; --accent-soft:#24283d; --accent-fill:#8d98ff; --on-accent:#11131d; --shadow:0 16px 42px rgba(0,0,0,.34); --shadow-pop:0 0 0 .5px rgba(0,0,0,.45), 0 2px 10px rgba(0,0,0,.35), 0 12px 40px rgba(0,0,0,.5); --shadow-window:0 0 0 .5px rgba(0,0,0,.55), 0 10px 30px rgba(0,0,0,.42), 0 28px 90px rgba(0,0,0,.6); }
   body,body.reader-mode { background:var(--canvas); }
   .reader-sidebar,.reader-frame-wrap,#html-preview { background:var(--paper); }
   .app-header,.reader-action-bar { background:var(--material-bar); }
@@ -627,6 +627,9 @@ body.library-marquee-selecting { -webkit-user-select: none; user-select: none; }
 
 @media (prefers-color-scheme: dark) {
   .library-sidebar,.views-sidebar { border-color: var(--line); }.folder-row:hover,.library-row:hover { background: color-mix(in srgb,var(--accent-soft) 52%,var(--paper)); }.view-form { background: var(--paper); }.library-main-actions select { background: var(--paper); color: var(--ink); }.folder-action.folder-delete:hover { background: #3b202a; }.property-row button { color: #ffb0b0; }
+  /* The light-theme amber only cleared the 4.5:1 floor against the old
+     near-black surface. Stars stay gold whatever accent the user picks. */
+  .row-stars { color: #f3b34c; }
 }
 @media (max-width: 1360px) {
   /* Give the title a full row before the desktop grid leaves it at min-content width. */
