@@ -964,7 +964,7 @@ input, textarea, [contenteditable="true"] { -webkit-user-select: text !important
   .pdf-page { padding-left: 16px !important; padding-right: 16px !important; }
 }
 @media (prefers-color-scheme: dark) {
-  :root { --accent: #f3b34c !important; --accent-dark: #ffd07a !important; --highlight-orange: #f3b34c !important; --user-highlight: #f3b34c !important; --muted: #b9ad9d !important; --line: #493c2b !important; --soft: #241c12 !important; }
+  :root { --accent: #f3b34c !important; --accent-dark: #ffd07a !important; --highlight-orange: #f3b34c !important; --user-highlight: #f3b34c !important; --ink: #dcdcde !important; --muted: #b9ad9d !important; --line: #55462f !important; --paper: #1e2124 !important; --soft: #32281a !important; }
   a, .citation, .cross-reference { color: var(--accent, #f3b34c) !important; }
 }
 """

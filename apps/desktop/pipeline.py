@@ -284,7 +284,7 @@ code { padding: .12em .35em; background: #f1f4f6; border-radius: 4px; }
 .pdf-page > .my-scholar-translation:last-child { margin-bottom: .86em; }
 .translation-text .translation-math { display: inline-block; margin: 0 .08em; vertical-align: -.16em; }
 .translation-math-fallback { display: inline-block; white-space: nowrap; }
-@media (prefers-color-scheme: dark) { :root { --ink:#e8e8ea; --muted:#b9ad9d; --line:#493c2b; --paper:#111315; --accent:#f3b34c; --user-highlight:#f3b34c; --soft:#241c12; } body { background:var(--paper); } h1,h2,h3 { color:var(--ink); } th { background:var(--soft); } }
+@media (prefers-color-scheme: dark) { :root { --ink:#dcdcde; --muted:#b9ad9d; --line:#55462f; --paper:#1e2124; --accent:#f3b34c; --user-highlight:#f3b34c; --soft:#32281a; } body { background:var(--paper); } h1,h2,h3 { color:var(--ink); } th { background:var(--soft); } }
 @media (max-width: 760px) { .pdf-page { padding: 26px 18px 34px; } }
 """
 
