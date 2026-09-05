@@ -144,9 +144,7 @@ let browserSession;
   }
   await page.setViewportSize({ width: 1440, height: 900 });
 
-  await page.emulateMedia({ colorScheme: 'dark' });
-  await page.waitForTimeout(250);
-  const darkContrasts = await page.evaluate(() => {
+  const measureContrasts = () => page.evaluate(() => {
     const parseColor = (value) => {
       const parts = value.match(/[\d.]+/g)?.map(Number) || [];
       return { r: parts[0] || 0, g: parts[1] || 0, b: parts[2] || 0, a: parts.length > 3 ? parts[3] : 1 };
@@ -193,10 +191,20 @@ let browserSession;
       inactiveSidebarIcon: measure('.system-filter:not(.active) .sidebar-item-icon'),
     };
   });
+  // Both themes are gated. Dark alone left the light ramp unchecked long
+  // enough for its faintest text token to sit under the floor unnoticed.
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.waitForTimeout(250);
+  const darkContrasts = await measureContrasts();
   for (const [name, metric] of Object.entries(darkContrasts)) {
     if (metric.contrast < 4.5) throw new Error(`Dark-mode contrast regressed for ${name}: ${JSON.stringify(metric)}`);
   }
   await page.emulateMedia({ colorScheme: 'light' });
+  await page.waitForTimeout(250);
+  const lightContrasts = await measureContrasts();
+  for (const [name, metric] of Object.entries(lightContrasts)) {
+    if (metric.contrast < 4.5) throw new Error(`Light-mode contrast regressed for ${name}: ${JSON.stringify(metric)}`);
+  }
 
   // Exercise bounded uploads and the shared job poller without starting a real
   // conversion. Keep each POST open briefly so the observed request peak is
