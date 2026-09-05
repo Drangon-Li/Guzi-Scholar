@@ -906,7 +906,7 @@ def retrieve_bibliographic_metadata(
     result = extract_local_metadata(pdf_path, document_json_path, source_filename)
     if not online:
         return result
-    user_agent = "MyScholar/0.1.12 (local research reader"
+    user_agent = "MyScholar/0.1.13 (local research reader"
     if contact_email.strip():
         user_agent += f"; mailto:{contact_email.strip()}"
     user_agent += ")"
@@ -1014,7 +1014,7 @@ def retrieve_reference_evidence(reference_text: str, *, contact_email: str = "")
     citation = re.sub(r"\s+", " ", str(reference_text or "")).strip()[:6000]
     if not citation:
         raise ValueError("参考文献条目为空。")
-    user_agent = "MyScholar/0.1.12 (reference quick read"
+    user_agent = "MyScholar/0.1.13 (reference quick read"
     if contact_email.strip():
         user_agent += f"; mailto:{contact_email.strip()}"
     user_agent += ")"
