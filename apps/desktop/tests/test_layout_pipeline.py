@@ -640,6 +640,43 @@ class LayoutPipelineTest(unittest.TestCase):
         self.assertIn("Appendix A", appendix_html)
         self.assertIn("References", reference_html)
 
+    def test_numbered_subsection_deepens_the_flat_extractor_level(self) -> None:
+        # MinerU labels every section level 2, so 7.3.1 used to render as the
+        # sibling of 7 and the outline was flat.
+        state = BuildState()
+        cases = {"7 Methods": "h2", "7.3 Dataset construction": "h3", "7.3.1 SwissProt-Annot": "h4"}
+        for text, tag in cases.items():
+            html, _ = _title_html({"content": {"title_content": text, "level": 2}}, state)
+            self.assertTrue(html.startswith(f"<{tag}>"), f"{text!r} -> {html[:12]}")
+
+    def test_heading_level_is_never_promoted_by_numbering(self) -> None:
+        state = BuildState()
+        # A top-level heading keeps the level the extractor gave it.
+        html, _ = _title_html({"content": {"title_content": "1 Introduction", "level": 1}}, state)
+        self.assertTrue(html.startswith("<h1>"))
+        # An unnumbered heading is left alone.
+        html, _ = _title_html({"content": {"title_content": "Abstract", "level": 2}}, state)
+        self.assertTrue(html.startswith("<h2>"))
+
+    def test_inline_formula_drops_multiline_environment(self) -> None:
+        from layout_pipeline import _flatten_inline_tex, _normalize_tex
+
+        tex = r"\begin{array}{rl} { ~ } & { \log \prod _ { n = 1 } ^ { N } p ( c _ { n } ) } \end{array}"
+        flattened = _flatten_inline_tex(_normalize_tex(tex))
+        self.assertNotIn(r"\begin{array}", flattened)
+        self.assertNotIn("&", flattened)
+        self.assertIn(r"\prod", flattened)
+        # A formula without a multiline environment is untouched.
+        plain = r"p ( s , c | t )"
+        self.assertEqual(_flatten_inline_tex(plain), plain)
+
+    def test_text_mode_commands_are_normalized_for_texmath(self) -> None:
+        from layout_pipeline import _normalize_tex
+
+        self.assertIn(r"\mu", _normalize_tex(r"\mathrm { \textmu { g } }"))
+        self.assertNotIn(r"\textmu", _normalize_tex(r"\mathrm { \textmu { g } }"))
+        self.assertIn(r"\mathrm", _normalize_tex(r"p \textmd { - }"))
+
     def test_document_section_audit_keeps_appendix_and_references(self) -> None:
         pages = [
             [{"type": "title", "content": {"title_content": "Appendix A. Additional Results"}}],

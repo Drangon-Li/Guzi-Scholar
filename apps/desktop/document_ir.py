@@ -704,7 +704,19 @@ def _order_first_page(elements: List[Dict[str, Any]], page_width: float) -> List
     body = [item for item in elements if item not in metadata]
     ordered = _order_page(body, page_width)
     metadata.sort(key=lambda item: (_center_y(item["bbox"]), item["bbox"][0], item["source_index"]))
-    insert_at = 1 if ordered and _is_barrier(ordered[0], page_width) else 0
+    # A title that wraps arrives as several elements, and only counting the
+    # first one dropped the author block between the title's two lines.
+    # Everything sitting wholly above the metadata belongs ahead of it.
+    if metadata:
+        metadata_top = min(float(item["bbox"][1]) for item in metadata)
+        insert_at = 0
+        for index, item in enumerate(ordered):
+            box = item.get("bbox")
+            if not box or float(box[3]) > metadata_top + 2.0:
+                break
+            insert_at = index + 1
+    else:
+        insert_at = 1 if ordered and _is_barrier(ordered[0], page_width) else 0
     ordered[insert_at:insert_at] = metadata
     if abstract_body is not None and abstract in ordered and abstract_body in ordered:
         ordered.remove(abstract_body)
@@ -2516,6 +2528,68 @@ def _quality(pages: List[Dict[str, Any]], suppressed: List[Dict[str, Any]], back
     }
 
 
+# A running header or preprint watermark repeats on page after page at the
+# same edge. MinerU labels most of them page_header but misses some, and the
+# missed ones land in the reading text, so repetition is the backstop.
+MINERU_EDGE_REPEAT_MIN_PAGES = 3
+
+
+LINE_NUMBER_GUTTER_RE = re.compile(r"^\s*\d{1,4}\s+(?=\S)")
+
+
+def _line_number_gutter(items: List[Dict[str, Any]], page_width: float, page_height: float) -> Optional[float]:
+    """Return the right edge of a LaTeX ``lineno`` gutter, when the page has one.
+
+    The gutter is a tall, very narrow strip; MinerU reports it as
+    ``page_aside_text``. Body blocks that start left of its right edge pick up
+    the line number as leading text.
+    """
+    for item in items:
+        if not isinstance(item, dict) or str(item.get("type") or "").strip() != "page_aside_text":
+            continue
+        box = _bbox(item.get("bbox"))
+        if not box:
+            continue
+        if _width(box) <= page_width * 0.05 and _height(box) >= page_height * 0.5:
+            return float(box[2])
+    return None
+
+
+def _mineru_edge_repeats(pages: List[List[Dict[str, Any]]]) -> Counter:
+    """Count how many pages carry each edge-anchored text, normalised."""
+    keys: Counter = Counter()
+    seen: set[Tuple[int, str]] = set()
+    for page_index, items in enumerate(pages, 1):
+        boxes = [_bbox(item.get("bbox")) for item in items if isinstance(item, dict) and _bbox(item.get("bbox"))]
+        if not boxes:
+            continue
+        height = max(box[3] for box in boxes)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            box = _bbox(item.get("bbox"))
+            text = _flatten_text(item.get("content"))
+            if not box or not text or not height:
+                continue
+            if _is_edge_banner(box, height):
+                key = _edge_key(text)
+                if key and (page_index, key) not in seen:
+                    keys[key] += 1
+                    seen.add((page_index, key))
+    return keys
+
+
+def _is_edge_banner(box: Sequence[float], page_height: float) -> bool:
+    """A short strip pinned to the top or bottom margin.
+
+    The height bound matters as much as the position: a body block running to
+    the foot of the page also touches the bottom margin.
+    """
+    if not page_height or _height(box) > page_height * 0.08:
+        return False
+    return box[1] <= page_height * 0.075 or box[3] >= page_height * 0.94
+
+
 def mineru_to_ir(
     pages: List[List[Dict[str, Any]]],
     *,
@@ -2532,19 +2606,36 @@ def mineru_to_ir(
     )
     ir_pages: List[Dict[str, Any]] = []
     suppressed: List[Dict[str, Any]] = []
+    edge_repeats = _mineru_edge_repeats(pages)
     for page_index, items in enumerate(pages, 1):
         elements: List[Dict[str, Any]] = []
         max_x = max((_bbox(item.get("bbox"))[2] for item in items if isinstance(item, dict) and _bbox(item.get("bbox"))), default=1000.0)
         max_y = max((_bbox(item.get("bbox"))[3] for item in items if isinstance(item, dict) and _bbox(item.get("bbox"))), default=1000.0)
+        gutter_right = _line_number_gutter(items, max_x, max_y)
         for source_index, raw in enumerate(items):
             if not isinstance(raw, dict):
                 continue
             raw_kind = str(raw.get("type") or "").strip()
             box = _bbox(raw.get("bbox"))
             text = _flatten_text(raw.get("content"))
+            if (
+                gutter_right is not None
+                and box
+                and raw_kind in {"title", "text", "paragraph", "list"}
+                and box[0] <= gutter_right
+            ):
+                text = LINE_NUMBER_GUTTER_RE.sub("", text, count=1)
             recovered_body = raw_kind == "page_footnote" and _recoverable_mineru_footnote(text, box, max_y)
             kind = "image" if raw_kind == "chart" else ("paragraph" if recovered_body else raw_kind)
             role = "furniture" if raw_kind in FURNITURE_TYPES and not recovered_body else "body"
+            if (
+                role == "body"
+                and raw_kind != "chart"
+                and box
+                and _is_edge_banner(box, max_y)
+                and edge_repeats.get(_edge_key(text), 0) >= MINERU_EDGE_REPEAT_MIN_PAGES
+            ):
+                role = "furniture"
             source_id = str(source_index)
             render = copy.deepcopy(raw)
             element_flags = {"recovered-body"} if recovered_body else set()

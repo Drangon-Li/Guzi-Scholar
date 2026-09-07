@@ -934,6 +934,67 @@ class DocumentIRTest(unittest.TestCase):
             4,
         )
 
+    def test_mineru_repeated_edge_banner_is_suppressed_as_furniture(self) -> None:
+        # A preprint watermark that the extractor labels inconsistently: header
+        # on one page, body text on the next. Repetition at the same edge is
+        # what identifies it.
+        banner = "bioRxiv preprint doi: https://doi.org/10.1101/2024.08.01.606258; this version posted August 31, 2026."
+        pages = []
+        for index in range(5):
+            kind = "page_header" if index == 0 else "text"
+            pages.append([
+                {"type": kind, "bbox": [80, 5, 900, 28], "content": {"paragraph_content": banner}},
+                {"type": "text", "bbox": [90, 100, 900, 800], "content": {"paragraph_content": "Body paragraph " * 30}},
+            ])
+
+        ir = mineru_to_ir(pages, backend="fixture")
+
+        kept = [e for p in ir["pages"] for e in p["elements"] if str(e.get("text") or "").startswith("bioRxiv")]
+        self.assertEqual(kept, [])
+        self.assertEqual(len([s for s in ir["suppressed"] if str(s.get("text") or "").startswith("bioRxiv")]), 5)
+        # the real body survives untouched
+        bodies = [e for p in ir["pages"] for e in p["elements"] if str(e.get("text") or "").startswith("Body paragraph")]
+        self.assertEqual(len(bodies), 5)
+
+    def test_mineru_edge_text_on_few_pages_stays_body(self) -> None:
+        # Below the repeat floor an edge-anchored line is ordinary content.
+        pages = [
+            [{"type": "text", "bbox": [80, 5, 900, 28], "content": {"paragraph_content": "A one-off note at the top."}}],
+            [{"type": "text", "bbox": [80, 100, 900, 400], "content": {"paragraph_content": "Body " * 40}}],
+        ]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+
+        kept = [e for p in ir["pages"] for e in p["elements"] if "one-off" in str(e.get("text") or "")]
+        self.assertEqual(len(kept), 1)
+
+    def test_mineru_line_number_gutter_is_stripped_from_body(self) -> None:
+        # LaTeX lineno puts a tall narrow column of numbers beside the text;
+        # blocks that start inside it pick the number up as leading text.
+        pages = [[
+            {"type": "page_aside_text", "bbox": [89, 54, 110, 916], "content": {"paragraph_content": ""}},
+            {"type": "title", "bbox": [92, 30, 368, 47], "content": {"title_content": "74 1 The Pinal network", "level": 2}},
+            {"type": "text", "bbox": [92, 68, 900, 512], "content": {"paragraph_content": "75 The architecture of Pinal is motivated by the idea."}},
+            {"type": "text", "bbox": [115, 519, 900, 845], "content": {"paragraph_content": "The first stage is handled by T2struct."}},
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        texts = [str(e.get("text") or "") for e in ir["pages"][0]["elements"]]
+
+        self.assertIn("1 The Pinal network", texts)
+        self.assertIn("The architecture of Pinal is motivated by the idea.", texts)
+        # a block clear of the gutter keeps its text verbatim
+        self.assertIn("The first stage is handled by T2struct.", texts)
+
+    def test_mineru_without_a_gutter_keeps_leading_numbers(self) -> None:
+        pages = [[
+            {"type": "text", "bbox": [90, 68, 900, 200], "content": {"paragraph_content": "20 candidates were selected for synthesis."}},
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+
+        self.assertEqual(ir["pages"][0]["elements"][0]["text"], "20 candidates were selected for synthesis.")
+
     def test_mineru_plate_merges_when_the_caption_lives_on_another_page(self) -> None:
         # "Fig. 5: (previous page) …" leaves no figure number on any panel, so
         # nothing seeds the numbered grouping and the page used to reach the
@@ -1493,6 +1554,25 @@ class DocumentIRTest(unittest.TestCase):
         self.assertIn("recovered-body", contribution["flags"])
         self.assertFalse(any(text.startswith("Permission to make") for text in texts))
         self.assertNotIn("WPES ’26, Venue 2026.", texts)
+
+    def test_mineru_wrapped_title_keeps_both_lines_before_the_authors(self) -> None:
+        # A title that wraps arrives as two title elements. Counting only the
+        # first put the author block between the title's two lines.
+        pages = [[
+            {"type": "title", "bbox": [163, 112, 860, 137], "content": {"title_content": "Programmable design of functional proteins from", "level": 1}},
+            {"type": "title", "bbox": [391, 158, 633, 181], "content": {"title_content": "natural language", "level": 1}},
+            {"type": "paragraph", "bbox": [159, 202, 865, 324], "content": {"paragraph_content": "Fengyuan Dai, Shiyang You, Yudian Zhu"}},
+            {"type": "paragraph", "bbox": [142, 331, 884, 443], "content": {"paragraph_content": "School of Engineering, Westlake University, Hangzhou, China."}},
+            {"type": "title", "bbox": [477, 643, 551, 657], "content": {"title_content": "Abstract", "level": 2}},
+            {"type": "paragraph", "bbox": [120, 670, 880, 900], "content": {"paragraph_content": "Programming biological function is a foundational goal of molecular engineering. " * 3}},
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        order = [item["text"] for item in ir["pages"][0]["elements"]]
+
+        self.assertEqual(order[0], "Programmable design of functional proteins from")
+        self.assertEqual(order[1], "natural language")
+        self.assertTrue(order[2].startswith("Fengyuan Dai"))
 
 
 if __name__ == "__main__":
