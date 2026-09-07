@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 from pipeline import PipelineError  # noqa: E402
 from library_store import LibraryStore  # noqa: E402
 import server as server_module  # noqa: E402
+from ai import TranslationQualityError  # noqa: E402
 from server import AI_STATUS_HISTORY_LIMIT, DataRootLock, MAX_CHAT_IMAGE_BYTES, MAX_NOTE_ASSET_BYTES, JobStore, ScholarHandler, _ai_status_history, _chat_image_context, _copy_ai_profile, _deduplicate_figure_ids, _migrate_job_artifacts, _note_image_type, _public_job, _public_settings, _record_ai_status, _runtime_lock_roots, _store_note_asset, _sync_ai_annotations, _translation_key, _translation_records, _write_content_manifest, _write_settings, _write_translation_records  # noqa: E402
 
 
@@ -910,6 +911,36 @@ class TranslationCacheTest(unittest.TestCase):
             self.assertEqual([response["result"]["cached"] for response in responses], [False, True])
             self.assertEqual({item["cache_key"] for item in records if item.get("profile_id") != "profile-current"}, {"other", "legacy"})
 
+    def test_translate_refresh_bypasses_the_stored_record(self) -> None:
+        # Without this the reader has no way to redo a translation it judges
+        # wrong: every path answers from the same cache entry.
+        with tempfile.TemporaryDirectory(prefix="my-scholar-translate-refresh-") as temp:
+            job_dir = Path(temp)
+            payload = {"text": "Source text.", "block_id": "block-1", "target_language": "中文", "source_hash": "source-a"}
+            handler = object.__new__(ScholarHandler)
+            handler._completed_job_dir = lambda _job_id: job_dir
+            handler._read_json_body = lambda **_kwargs: dict(payload)
+            responses: list[dict] = []
+            handler._send_json = lambda body, *_args, **_kwargs: responses.append(body)
+            handler._send_error_json = lambda message, *_args, **_kwargs: self.fail(message)
+
+            with (
+                patch("server.translation_profile_id", return_value="profile-current"),
+                patch("server.translate_text", side_effect=[{"text": "第一版"}, {"text": "第二版"}]) as translate,
+            ):
+                handler._translate("a" * 16)          # miss -> model
+                handler._translate("a" * 16)          # hit  -> cache
+                handler._read_json_body = lambda **_kwargs: {**payload, "refresh": True}
+                handler._translate("a" * 16)          # refresh -> model again
+
+            self.assertEqual(translate.call_count, 2)
+            self.assertEqual([r["result"]["cached"] for r in responses], [False, True, False])
+            self.assertEqual([r["result"]["text"] for r in responses], ["第一版", "第一版", "第二版"])
+            # the refreshed answer replaces the stored one rather than piling up
+            records = [item for item in _translation_records(job_dir) if item.get("profile_id") == "profile-current"]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["text"], "第二版")
+
     def test_content_manifest_writes_are_safe_for_concurrent_reader_requests(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-content-race-") as temp:
             job_dir = Path(temp)
@@ -1130,6 +1161,29 @@ class TranslateStreamTest(unittest.TestCase):
             self.assertEqual(events[0], {"delta": "部分"})
             self.assertIn("翻译失败", events[1]["error"])
             self.assertEqual(_translation_records(job_dir), [])
+
+    def test_translate_stream_retries_midway_quality_failure_with_plain_request(self) -> None:
+        # A stream cannot re-run itself once deltas are out, so a model answer
+        # that fails the placeholder check is recovered by the plain request.
+        def rejected_stream(*_args, **_kwargs):
+            yield "部分"
+            raise TranslationQualityError("模型返回的译文丢失了公式或占位符，请重试。")
+
+        with tempfile.TemporaryDirectory(prefix="my-scholar-translate-stream-") as temp:
+            job_dir = Path(temp)
+            payload = {"text": "Source text.", "block_id": "", "target_language": "中文", "source_hash": "sel-4", "stream": True}
+            handler = self._stream_handler(job_dir, payload)
+            with (
+                patch("server.translation_profile_id", return_value="profile-current"),
+                patch("server.translate_text_stream", side_effect=rejected_stream),
+                patch("server.translate_text", return_value={"text": "重试译文", "model": "test-model", "profile_id": "profile-current", "formulas": []}) as plain,
+            ):
+                handler._translate("a" * 16)
+            plain.assert_called_once()
+            events = self._events(handler)
+            self.assertEqual(events[0], {"delta": "部分"})
+            self.assertEqual(events[-1]["result"]["text"], "重试译文")
+            self.assertEqual(_translation_records(job_dir)[0]["text"], "重试译文")
 
 
 class ChatStreamTest(unittest.TestCase):

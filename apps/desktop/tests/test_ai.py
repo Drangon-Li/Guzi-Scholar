@@ -159,6 +159,51 @@ class AIAdapterTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "截断"):
                 translate_text("position embedding __MY_SCHOLAR_MATH_0__", formulas=formulas)
 
+    def test_translation_keeps_an_ellipsis_the_source_already_had(self) -> None:
+        # A caption the PDF itself cut short ends in "..."; so does its
+        # translation, and that is not evidence of truncation.
+        source = "PET hydrolases are a class of enzymes capable of catalyzing the degradation of PET ..."
+        with patch("ai._complete", return_value="PET 水解酶是一类能够催化 PET 降解的酶 ..."):
+            result = translate_text(source)
+        self.assertTrue(result["text"].endswith("..."))
+
+    def test_translation_still_rejects_an_ellipsis_the_source_lacks(self) -> None:
+        with patch("ai._complete", return_value="这段译文在这里就断了…"):
+            with self.assertRaisesRegex(ai_module.TranslationQualityError, "截断"):
+                translate_text("A complete sentence that ends properly.")
+
+    def test_translation_keeps_paragraph_when_only_emphasis_markers_are_lost(self) -> None:
+        # Emphasis is decoration recovered from the PDF font. Losing it must not
+        # cost the reader the paragraph, the way losing a formula does.
+        source = "__MY_SCHOLAR_BOLD_START_0__Thermal__MY_SCHOLAR_BOLD_END_0__ stability __MY_SCHOLAR_MATH_0__"
+        formulas = [{"token": "__MY_SCHOLAR_MATH_0__", "tex": "T"}]
+        with patch("ai._complete", return_value="热稳定性 __MY_SCHOLAR_MATH_0__") as complete:
+            result = translate_text(source, formulas=formulas)
+        self.assertEqual(result["text"], "热稳定性 __MY_SCHOLAR_MATH_0__")
+        self.assertEqual(complete.call_count, 1)
+
+    def test_translation_retries_before_reporting_a_lost_formula(self) -> None:
+        formulas = [{"token": "__MY_SCHOLAR_MATH_0__", "tex": "V"}]
+        with patch("ai._complete", side_effect=["位置嵌入", "位置嵌入 __MY_SCHOLAR_MATH_0__"]) as complete:
+            result = translate_text("position embedding __MY_SCHOLAR_MATH_0__", formulas=formulas)
+        self.assertEqual(result["text"], "位置嵌入 __MY_SCHOLAR_MATH_0__")
+        self.assertEqual(complete.call_count, 2)
+
+    def test_translation_gives_up_after_the_attempt_budget(self) -> None:
+        formulas = [{"token": "__MY_SCHOLAR_MATH_0__", "tex": "V"}]
+        with patch("ai._complete", return_value="位置嵌入") as complete:
+            with self.assertRaisesRegex(ai_module.TranslationQualityError, "丢失了公式"):
+                translate_text("position embedding __MY_SCHOLAR_MATH_0__", formulas=formulas)
+        self.assertEqual(complete.call_count, ai_module.TRANSLATION_ATTEMPTS)
+
+    def test_translation_strips_emphasis_markers_the_model_left_unpaired(self) -> None:
+        source = "__MY_SCHOLAR_BOLD_START_0__A__MY_SCHOLAR_BOLD_END_0__ and __MY_SCHOLAR_BOLD_START_1__B__MY_SCHOLAR_BOLD_END_1__"
+        with patch("ai._complete", return_value="__MY_SCHOLAR_BOLD_START_0__甲__MY_SCHOLAR_BOLD_END_0__ 与 __MY_SCHOLAR_BOLD_START_1__乙"):
+            result = translate_text(source)
+        # The paired run survives; the dangling start would otherwise reach the
+        # reader as literal placeholder text.
+        self.assertEqual(result["text"], "__MY_SCHOLAR_BOLD_START_0__甲__MY_SCHOLAR_BOLD_END_0__ 与 乙")
+
     def test_chat_attaches_image_to_the_latest_user_message(self) -> None:
         image = {
             "data_url": "data:image/png;base64,iVBORw0KGgo=",

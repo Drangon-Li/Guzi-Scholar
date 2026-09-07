@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import document_ir  # noqa: E402
-from document_ir import mineru_to_ir, odl_to_ir, render_pages  # noqa: E402
+from document_ir import _flatten_text, mineru_to_ir, odl_to_ir, render_pages  # noqa: E402
 
 
 PAGE_WIDTH = 612.0
@@ -934,6 +934,163 @@ class DocumentIRTest(unittest.TestCase):
             4,
         )
 
+    def test_latex_bold_font_names_are_recognised(self) -> None:
+        from document_ir import BOLD_FONT_NAME_RE
+
+        for name in ("CMBX10", "CMBX12", "CMB10", "Arial-BoldMT", "MicrosoftYaHei-Bold", "Helvetica-Black"):
+            self.assertTrue(BOLD_FONT_NAME_RE.search(name), name)
+        # The other Computer Modern cuts are regular weight and must not match:
+        # roman, math italic, symbols, text italic, extensions, sans, typewriter.
+        for name in ("CMR10", "CMR12", "CMMI10", "CMSY10", "CMTI10", "CMEX10", "CMSS8", "CMTT10", "ArialMT"):
+            self.assertIsNone(BOLD_FONT_NAME_RE.search(name), name)
+
+    def test_mineru_repeated_edge_banner_is_suppressed_as_furniture(self) -> None:
+        # A preprint watermark that the extractor labels inconsistently: header
+        # on one page, body text on the next. Repetition at the same edge is
+        # what identifies it.
+        banner = "bioRxiv preprint doi: https://doi.org/10.1101/2024.08.01.606258; this version posted August 31, 2026."
+        pages = []
+        for index in range(5):
+            kind = "page_header" if index == 0 else "text"
+            pages.append([
+                {"type": kind, "bbox": [80, 5, 900, 28], "content": {"paragraph_content": banner}},
+                {"type": "text", "bbox": [90, 100, 900, 800], "content": {"paragraph_content": "Body paragraph " * 30}},
+            ])
+
+        ir = mineru_to_ir(pages, backend="fixture")
+
+        kept = [e for p in ir["pages"] for e in p["elements"] if str(e.get("text") or "").startswith("bioRxiv")]
+        self.assertEqual(kept, [])
+        self.assertEqual(len([s for s in ir["suppressed"] if str(s.get("text") or "").startswith("bioRxiv")]), 5)
+        # the real body survives untouched
+        bodies = [e for p in ir["pages"] for e in p["elements"] if str(e.get("text") or "").startswith("Body paragraph")]
+        self.assertEqual(len(bodies), 5)
+
+    def test_mineru_banner_merged_into_a_paragraph_is_cut_out(self) -> None:
+        # MinerU joins the next page's banner onto the paragraph running off the
+        # bottom of this one. The block is mostly real text, so it cannot be
+        # dropped whole -- the banner has to come out of it.
+        banner = "bioRxiv preprint doi: https://doi.org/10.1101/2024.08.01.606258; this version posted August 31, 2026."
+        body = "This improvement translated into superior practical performance: larger "
+        pages = []
+        for _ in range(4):
+            pages.append([
+                {"type": "page_header", "bbox": [80, 5, 900, 28], "content": {"paragraph_content": banner}},
+                {"type": "text", "bbox": [90, 700, 900, 900], "content": {"paragraph_content": body + banner}},
+            ])
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        texts = [str(e.get("text") or "") for p in ir["pages"] for e in p["elements"]]
+        rendered = [
+            _flatten_text((e.get("render") or {}).get("content"))
+            for p in ir["pages"] for e in p["elements"]
+        ]
+
+        self.assertFalse([t for t in texts if "bioRxiv" in t], texts[:2])
+        self.assertFalse([t for t in rendered if "bioRxiv" in t], rendered[:2])
+        self.assertTrue(any(t.startswith("This improvement translated") for t in texts))
+
+    def test_mineru_edge_text_on_few_pages_stays_body(self) -> None:
+        # Below the repeat floor an edge-anchored line is ordinary content.
+        pages = [
+            [{"type": "text", "bbox": [80, 5, 900, 28], "content": {"paragraph_content": "A one-off note at the top."}}],
+            [{"type": "text", "bbox": [80, 100, 900, 400], "content": {"paragraph_content": "Body " * 40}}],
+        ]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+
+        kept = [e for p in ir["pages"] for e in p["elements"] if "one-off" in str(e.get("text") or "")]
+        self.assertEqual(len(kept), 1)
+
+    def test_mineru_line_number_gutter_is_stripped_from_body(self) -> None:
+        # LaTeX lineno puts a tall narrow column of numbers beside the text;
+        # blocks that start inside it pick the number up as leading text.
+        pages = [[
+            {"type": "page_aside_text", "bbox": [89, 54, 110, 916], "content": {"paragraph_content": ""}},
+            {"type": "title", "bbox": [92, 30, 368, 47], "content": {"title_content": "74 1 The Pinal network", "level": 2}},
+            {"type": "text", "bbox": [92, 68, 900, 512], "content": {"paragraph_content": "75 The architecture of Pinal is motivated by the idea."}},
+            {"type": "text", "bbox": [115, 519, 900, 845], "content": {"paragraph_content": "The first stage is handled by T2struct."}},
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        texts = [str(e.get("text") or "") for e in ir["pages"][0]["elements"]]
+
+        self.assertIn("1 The Pinal network", texts)
+        self.assertIn("The architecture of Pinal is motivated by the idea.", texts)
+        # a block clear of the gutter keeps its text verbatim
+        self.assertIn("The first stage is handled by T2struct.", texts)
+        # The HTML is assembled from the render payload, not from element text,
+        # so the number has to be gone from both.
+        rendered = [
+            _flatten_text((item.get("render") or {}).get("content"))
+            for item in ir["pages"][0]["elements"]
+        ]
+        self.assertIn("1 The Pinal network", rendered)
+        self.assertIn("The architecture of Pinal is motivated by the idea.", rendered)
+        self.assertFalse([value for value in rendered if value.startswith(("74 ", "75 "))])
+
+    def test_mineru_without_a_gutter_keeps_leading_numbers(self) -> None:
+        pages = [[
+            {"type": "text", "bbox": [90, 68, 900, 200], "content": {"paragraph_content": "20 candidates were selected for synthesis."}},
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+
+        self.assertEqual(ir["pages"][0]["elements"][0]["text"], "20 candidates were selected for synthesis.")
+
+    def test_mineru_plate_merges_when_the_caption_lives_on_another_page(self) -> None:
+        # "Fig. 5: (previous page) …" leaves no figure number on any panel, so
+        # nothing seeds the numbered grouping and the page used to reach the
+        # reader as a scatter of panel crops.
+        pages = [[
+            {"type": "chart", "bbox": [20, 20, 300, 260], "content": {"chart_caption": "a"}},
+            {"type": "chart", "bbox": [310, 20, 600, 260], "content": {"chart_caption": "b c"}},
+            {"type": "chart", "bbox": [20, 270, 300, 520], "content": {"chart_caption": ""}},
+            {"type": "chart", "bbox": [310, 270, 600, 520], "content": {"chart_caption": "d"}},
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        elements = ir["pages"][0]["elements"]
+
+        self.assertEqual(len(elements), 1)
+        self.assertEqual(elements[0]["source"], "mineru-composite")
+        self.assertEqual(elements[0]["bbox"], [20.0, 20.0, 600.0, 520.0])
+        self.assertEqual(len(elements[0]["visual_fragments"]), 4)
+        # No panel letter is promoted into a caption for the merged plate.
+        self.assertEqual(elements[0]["text"], "")
+        self.assertEqual(
+            len([item for item in ir["suppressed"] if item["reason"] == "composite-figure-fragment"]),
+            4,
+        )
+
+    def test_mineru_two_uncaptioned_images_stay_separate(self) -> None:
+        # Below the fragment floor this is an ordinary pair of figures.
+        pages = [[
+            {"type": "chart", "bbox": [20, 20, 300, 500], "content": {"chart_caption": ""}},
+            {"type": "chart", "bbox": [310, 20, 600, 500], "content": {"chart_caption": ""}},
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        elements = ir["pages"][0]["elements"]
+
+        self.assertEqual(len(elements), 2)
+        self.assertTrue(all(item["source"] == "mineru" for item in elements))
+
+    def test_mineru_small_uncaptioned_thumbnails_stay_separate(self) -> None:
+        # Three small crops in a corner are not a full-page plate.
+        pages = [[
+            {"type": "chart", "bbox": [10, 10, 60, 60], "content": {"chart_caption": ""}},
+            {"type": "chart", "bbox": [70, 10, 120, 60], "content": {"chart_caption": ""}},
+            {"type": "chart", "bbox": [130, 10, 180, 60], "content": {"chart_caption": ""}},
+            {"type": "paragraph", "bbox": [10, 400, 900, 950], "content": {"paragraph_content": "Body text " * 60}},
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        images = [item for item in ir["pages"][0]["elements"] if item["type"] == "image"]
+
+        self.assertEqual(len(images), 3)
+        self.assertTrue(all(item["source"] == "mineru" for item in images))
+
     def test_mineru_different_figure_numbers_are_not_coalesced(self) -> None:
         pages = [[
             {
@@ -1440,6 +1597,25 @@ class DocumentIRTest(unittest.TestCase):
         self.assertIn("recovered-body", contribution["flags"])
         self.assertFalse(any(text.startswith("Permission to make") for text in texts))
         self.assertNotIn("WPES ’26, Venue 2026.", texts)
+
+    def test_mineru_wrapped_title_keeps_both_lines_before_the_authors(self) -> None:
+        # A title that wraps arrives as two title elements. Counting only the
+        # first put the author block between the title's two lines.
+        pages = [[
+            {"type": "title", "bbox": [163, 112, 860, 137], "content": {"title_content": "Programmable design of functional proteins from", "level": 1}},
+            {"type": "title", "bbox": [391, 158, 633, 181], "content": {"title_content": "natural language", "level": 1}},
+            {"type": "paragraph", "bbox": [159, 202, 865, 324], "content": {"paragraph_content": "Fengyuan Dai, Shiyang You, Yudian Zhu"}},
+            {"type": "paragraph", "bbox": [142, 331, 884, 443], "content": {"paragraph_content": "School of Engineering, Westlake University, Hangzhou, China."}},
+            {"type": "title", "bbox": [477, 643, 551, 657], "content": {"title_content": "Abstract", "level": 2}},
+            {"type": "paragraph", "bbox": [120, 670, 880, 900], "content": {"paragraph_content": "Programming biological function is a foundational goal of molecular engineering. " * 3}},
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        order = [item["text"] for item in ir["pages"][0]["elements"]]
+
+        self.assertEqual(order[0], "Programmable design of functional proteins from")
+        self.assertEqual(order[1], "natural language")
+        self.assertTrue(order[2].startswith("Fengyuan Dai"))
 
 
 if __name__ == "__main__":

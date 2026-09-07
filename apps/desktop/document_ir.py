@@ -16,7 +16,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 from pymupdf_runtime import load_fitz
 
 
@@ -25,6 +25,9 @@ CAPTION_RE = re.compile(r"^\s*(?P<kind>fig(?:ure)?|table)\s*\.?\s*(?P<number>\d+
 TERMINAL_RE = re.compile(r'''[.!?。！？;；:]\s*[\]\)\}"'’”]*$''')
 LOWERCASE_START_RE = re.compile(r"^[\s\[\(\"'‘“]*(?:[a-z]|and\b|or\b|but\b|which\b|that\b|where\b|while\b)")
 FURNITURE_TYPES = {"page_header", "page_footnote", "page_number", "header", "footer", "number", "abandon"}
+# Computer Modern spells its bold cuts CMB10 / CMBX10 rather than "bold", and
+# sets no bold flag, so a LaTeX heading otherwise reads as regular weight.
+BOLD_FONT_NAME_RE = re.compile(r"(?:bold|semi[- ]?bold|demi|black|heavy|\bcmbx?\d)", re.IGNORECASE)
 TRANSLATABLE_TYPES = {"title", "paragraph", "list", "image", "table"}
 SECTION_TITLE_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)*|[A-Z])\s+\S+")
 CONFERENCE_FOOTER_RE = re.compile(
@@ -406,6 +409,81 @@ def _visual_gap(left: Sequence[float], right: Sequence[float]) -> Tuple[float, f
     return horizontal, vertical
 
 
+def _compose_mineru_figure(
+    candidates: List[Dict[str, Any]], union: Sequence[float], *, text: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build one composite image element covering every fragment's crop."""
+    captioned = sorted(candidates, key=lambda item: (len(str(item.get("text") or "")), -int(item.get("source_index") or 0)), reverse=True)[0]
+    source_id = f"{captioned.get('source_id') or captioned.get('source_index')}-composite"
+    render = copy.deepcopy(captioned.get("render") or {})
+    render["bbox"] = union
+    content = render.get("content") if isinstance(render.get("content"), dict) else {}
+    render["content"] = content
+    merged = _canonical_element(
+        page=int(captioned.get("page") or 1),
+        source_id=source_id,
+        source_index=min(int(item.get("source_index") or 0) for item in candidates),
+        kind="image",
+        box=union,
+        text=str(captioned.get("text") or "").strip() if text is None else text,
+        source="mineru-composite",
+        render=render,
+        confidence=min(float(item.get("confidence") or 0.0) for item in candidates),
+        flags=set().union(*(item.get("flags") or [] for item in candidates)) | {"composite-visual", "source-crop"},
+    )
+    merged["fragments"] = [fragment for item in candidates for fragment in item.get("fragments", [])]
+    merged["visual_fragments"] = [
+        {"id": item.get("id"), "bbox": item.get("bbox"), "text": item.get("text", "")}
+        for item in candidates
+    ]
+    return merged
+
+
+# A plate broken into panel crops covers much of the page. Two figures that
+# merely sit on the same page do not, so the area floor is what keeps this from
+# gluing unrelated figures together.
+UNNUMBERED_PLATE_MIN_FRAGMENTS = 3
+UNNUMBERED_PLATE_MIN_AREA_RATIO = 0.25
+
+
+def _unnumbered_figure_clusters(
+    elements: List[Dict[str, Any]], consumed: set[str], page_width: float, page_height: float,
+) -> List[List[Dict[str, Any]]]:
+    """Group leftover panel crops that together tile one large page region."""
+    remaining = [
+        element for element in elements
+        if element.get("type") == "image" and element.get("source") == "mineru"
+        and str(element.get("id") or "") not in consumed
+        and _bbox(element.get("bbox"))
+        and not _figure_number(str(element.get("text") or ""))
+    ]
+    if len(remaining) < UNNUMBERED_PLATE_MIN_FRAGMENTS:
+        return []
+    max_gap = max(page_width, page_height) * 0.16
+    page_area = float(page_width) * float(page_height)
+    clusters: List[List[Dict[str, Any]]] = []
+    unassigned = list(remaining)
+    while unassigned:
+        cluster = [unassigned.pop(0)]
+        changed = True
+        while changed:
+            changed = False
+            for candidate in list(unassigned):
+                if any(max(_visual_gap(candidate.get("bbox") or [], other.get("bbox") or [])) <= max_gap for other in cluster):
+                    cluster.append(candidate)
+                    unassigned.remove(candidate)
+                    changed = True
+        if len(cluster) < UNNUMBERED_PLATE_MIN_FRAGMENTS:
+            continue
+        union = _union(item.get("bbox") for item in cluster)
+        if not union or not page_area:
+            continue
+        if (_width(union) * _height(union)) / page_area < UNNUMBERED_PLATE_MIN_AREA_RATIO:
+            continue
+        clusters.append(cluster)
+    return clusters
+
+
 def _merge_mineru_figure_fragments(
     elements: List[Dict[str, Any]], page_width: float, page_height: float,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -476,36 +554,29 @@ def _merge_mineru_figure_fragments(
         if len(connected) < 2 or len(connected) != len(candidates):
             continue
 
-        captioned = sorted(candidates, key=lambda item: (len(str(item.get("text") or "")), -int(item.get("source_index") or 0)), reverse=True)[0]
-        source_id = f"{captioned.get('source_id') or captioned.get('source_index')}-composite"
-        render = copy.deepcopy(captioned.get("render") or {})
-        render["bbox"] = union
-        content = render.get("content") if isinstance(render.get("content"), dict) else {}
-        render["content"] = content
-        merged = _canonical_element(
-            page=int(captioned.get("page") or 1),
-            source_id=source_id,
-            source_index=min(int(item.get("source_index") or 0) for item in candidates),
-            kind="image",
-            box=union,
-            text=str(captioned.get("text") or "").strip(),
-            source="mineru-composite",
-            render=render,
-            confidence=min(float(item.get("confidence") or 0.0) for item in candidates),
-            flags=set().union(*(item.get("flags") or [] for item in candidates)) | {"composite-visual", "source-crop"},
-        )
-        merged["fragments"] = [fragment for item in candidates for fragment in item.get("fragments", [])]
-        merged["visual_fragments"] = [
-            {"id": item.get("id"), "bbox": item.get("bbox"), "text": item.get("text", "")}
-            for item in candidates
-        ]
-        elements.append(merged)
+        elements.append(_compose_mineru_figure(candidates, union))
         consumed.update(str(item.get("id") or "") for item in candidates)
         for item in candidates:
             suppressed.append({
                 "id": item.get("id"), "page": item.get("page"), "type": item.get("type"),
                 "bbox": item.get("bbox"), "text": item.get("text", ""),
                 "reason": "composite-figure-fragment", "figure": number,
+            })
+
+    # A plate whose caption sits on another page ("Fig. 5: (previous page) …")
+    # leaves no figure number on any fragment, so the grouping above never gets
+    # a seed and the page reaches the reader as a scatter of panel crops.
+    for cluster in _unnumbered_figure_clusters(elements, consumed, page_width, page_height):
+        union = _union(item.get("bbox") for item in cluster)
+        if not union:
+            continue
+        elements.append(_compose_mineru_figure(cluster, union, text=""))
+        consumed.update(str(item.get("id") or "") for item in cluster)
+        for item in cluster:
+            suppressed.append({
+                "id": item.get("id"), "page": item.get("page"), "type": item.get("type"),
+                "bbox": item.get("bbox"), "text": item.get("text", ""),
+                "reason": "composite-figure-fragment", "figure": "",
             })
 
     if not consumed:
@@ -636,7 +707,19 @@ def _order_first_page(elements: List[Dict[str, Any]], page_width: float) -> List
     body = [item for item in elements if item not in metadata]
     ordered = _order_page(body, page_width)
     metadata.sort(key=lambda item: (_center_y(item["bbox"]), item["bbox"][0], item["source_index"]))
-    insert_at = 1 if ordered and _is_barrier(ordered[0], page_width) else 0
+    # A title that wraps arrives as several elements, and only counting the
+    # first one dropped the author block between the title's two lines.
+    # Everything sitting wholly above the metadata belongs ahead of it.
+    if metadata:
+        metadata_top = min(float(item["bbox"][1]) for item in metadata)
+        insert_at = 0
+        for index, item in enumerate(ordered):
+            box = item.get("bbox")
+            if not box or float(box[3]) > metadata_top + 2.0:
+                break
+            insert_at = index + 1
+    else:
+        insert_at = 1 if ordered and _is_barrier(ordered[0], page_width) else 0
     ordered[insert_at:insert_at] = metadata
     if abstract_body is not None and abstract in ordered and abstract_body in ordered:
         ordered.remove(abstract_body)
@@ -988,9 +1071,7 @@ def _extract_pdf_text_pages(
                                 size = float(span.get("size") or 0.0)
                             except (TypeError, ValueError):
                                 flags, size = 0, 0.0
-                            bold = bool(flags & 16) or bool(
-                                re.search(r"(?:bold|semi[- ]?bold|demi|black|heavy)", font, flags=re.IGNORECASE)
-                            )
+                            bold = bool(flags & 16) or bool(BOLD_FONT_NAME_RE.search(font))
                             evidence_span = {
                                 "text": text,
                                 "bbox": box,
@@ -2448,6 +2529,114 @@ def _quality(pages: List[Dict[str, Any]], suppressed: List[Dict[str, Any]], back
     }
 
 
+# A running header or preprint watermark repeats on page after page at the
+# same edge. MinerU labels most of them page_header but misses some, and the
+# missed ones land in the reading text, so repetition is the backstop.
+MINERU_EDGE_REPEAT_MIN_PAGES = 3
+
+
+LINE_NUMBER_GUTTER_RE = re.compile(r"^\s*\d{1,4}\s+(?=\S)")
+
+
+def _text_slots(value: Any) -> Iterator[Tuple[Any, Any]]:
+    """Yield every mutable text leaf in a render payload, in document order."""
+    if isinstance(value, dict):
+        for key in (
+            "title_content", "paragraph_content", "list_content", "list_items",
+            "item_content", "content", "text",
+        ):
+            if key in value:
+                inner = value[key]
+                if isinstance(inner, str):
+                    yield value, key
+                else:
+                    yield from _text_slots(inner)
+                return
+    elif isinstance(value, list):
+        for item in value:
+            yield from _text_slots(item)
+
+
+def _remove_banner_from_render(render: Dict[str, Any], banner: str) -> None:
+    """Cut a running-header string out of a render payload's text leaves."""
+    for container, key in _text_slots(render.get("content")):
+        value = str(container[key])
+        if banner in value:
+            container[key] = re.sub(r"\s{2,}", " ", value.replace(banner, " ")).strip()
+
+
+def _strip_gutter_number_from_render(render: Dict[str, Any]) -> None:
+    """Drop a leading line number from a render payload's first text.
+
+    The IR's own ``text`` is rebuilt separately; the HTML is assembled from
+    this payload, so both have to lose the number.
+    """
+    for container, key in _text_slots(render.get("content")):
+        if str(container[key]).strip():
+            container[key] = LINE_NUMBER_GUTTER_RE.sub("", str(container[key]), count=1)
+            return
+
+
+def _line_number_gutter(items: List[Dict[str, Any]], page_width: float, page_height: float) -> Optional[float]:
+    """Return the right edge of a LaTeX ``lineno`` gutter, when the page has one.
+
+    The gutter is a tall, very narrow strip; MinerU reports it as
+    ``page_aside_text``. Body blocks that start left of its right edge pick up
+    the line number as leading text.
+    """
+    for item in items:
+        if not isinstance(item, dict) or str(item.get("type") or "").strip() != "page_aside_text":
+            continue
+        box = _bbox(item.get("bbox"))
+        if not box:
+            continue
+        if _width(box) <= page_width * 0.05 and _height(box) >= page_height * 0.5:
+            return float(box[2])
+    return None
+
+
+def _mineru_edge_repeats(pages: List[List[Dict[str, Any]]]) -> Tuple[Counter, Dict[str, str]]:
+    """Count how many pages carry each edge-anchored text, and keep one sample.
+
+    The sample is what lets a banner be cut out of a body block: MinerU
+    sometimes merges the running header into the paragraph above it, and such a
+    block is mostly real text, so it cannot be dropped whole.
+    """
+    keys: Counter = Counter()
+    samples: Dict[str, str] = {}
+    seen: set[Tuple[int, str]] = set()
+    for page_index, items in enumerate(pages, 1):
+        boxes = [_bbox(item.get("bbox")) for item in items if isinstance(item, dict) and _bbox(item.get("bbox"))]
+        if not boxes:
+            continue
+        height = max(box[3] for box in boxes)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            box = _bbox(item.get("bbox"))
+            text = _flatten_text(item.get("content"))
+            if not box or not text or not height:
+                continue
+            if _is_edge_banner(box, height):
+                key = _edge_key(text)
+                if key and (page_index, key) not in seen:
+                    keys[key] += 1
+                    samples.setdefault(key, text)
+                    seen.add((page_index, key))
+    return keys, samples
+
+
+def _is_edge_banner(box: Sequence[float], page_height: float) -> bool:
+    """A short strip pinned to the top or bottom margin.
+
+    The height bound matters as much as the position: a body block running to
+    the foot of the page also touches the bottom margin.
+    """
+    if not page_height or _height(box) > page_height * 0.08:
+        return False
+    return box[1] <= page_height * 0.075 or box[3] >= page_height * 0.94
+
+
 def mineru_to_ir(
     pages: List[List[Dict[str, Any]]],
     *,
@@ -2464,21 +2653,58 @@ def mineru_to_ir(
     )
     ir_pages: List[Dict[str, Any]] = []
     suppressed: List[Dict[str, Any]] = []
+    edge_repeats, edge_samples = _mineru_edge_repeats(pages)
+    repeated_banners = [
+        banner for key, banner in edge_samples.items()
+        if edge_repeats.get(key, 0) >= MINERU_EDGE_REPEAT_MIN_PAGES and len(banner) >= 40
+    ]
     for page_index, items in enumerate(pages, 1):
         elements: List[Dict[str, Any]] = []
         max_x = max((_bbox(item.get("bbox"))[2] for item in items if isinstance(item, dict) and _bbox(item.get("bbox"))), default=1000.0)
         max_y = max((_bbox(item.get("bbox"))[3] for item in items if isinstance(item, dict) and _bbox(item.get("bbox"))), default=1000.0)
+        gutter_right = _line_number_gutter(items, max_x, max_y)
         for source_index, raw in enumerate(items):
             if not isinstance(raw, dict):
                 continue
             raw_kind = str(raw.get("type") or "").strip()
             box = _bbox(raw.get("bbox"))
             text = _flatten_text(raw.get("content"))
+            if (
+                gutter_right is not None
+                and box
+                and raw_kind in {"title", "text", "paragraph", "list"}
+                and box[0] <= gutter_right
+            ):
+                text = LINE_NUMBER_GUTTER_RE.sub("", text, count=1)
+                strip_gutter = True
+            else:
+                strip_gutter = False
+            # MinerU merges the next page's banner into the paragraph that runs
+            # off the bottom of this one. The block is mostly real text, so the
+            # banner has to come out of it rather than the block being dropped.
+            embedded_banners = [
+                banner for banner in repeated_banners
+                if banner in text and not text.startswith(banner)
+            ]
+            for banner in embedded_banners:
+                text = re.sub(r"\s{2,}", " ", text.replace(banner, " ")).strip()
             recovered_body = raw_kind == "page_footnote" and _recoverable_mineru_footnote(text, box, max_y)
             kind = "image" if raw_kind == "chart" else ("paragraph" if recovered_body else raw_kind)
             role = "furniture" if raw_kind in FURNITURE_TYPES and not recovered_body else "body"
+            if (
+                role == "body"
+                and raw_kind != "chart"
+                and box
+                and _is_edge_banner(box, max_y)
+                and edge_repeats.get(_edge_key(text), 0) >= MINERU_EDGE_REPEAT_MIN_PAGES
+            ):
+                role = "furniture"
             source_id = str(source_index)
             render = copy.deepcopy(raw)
+            if strip_gutter:
+                _strip_gutter_number_from_render(render)
+            for banner in embedded_banners:
+                _remove_banner_from_render(render, banner)
             element_flags = {"recovered-body"} if recovered_body else set()
             if raw_kind == "chart":
                 content = render.get("content") if isinstance(render.get("content"), dict) else {}

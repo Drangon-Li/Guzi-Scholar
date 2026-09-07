@@ -4480,6 +4480,9 @@
   const INLINE_MARKER_SHAPES = new Set(['circle', 'square']);
   const INLINE_MARKER_TONES = new Set(['gray', 'blue', 'orange', 'green', 'red', 'purple', 'pink']);
   const PDF_TEXT_TONES = new Set(['blue', 'orange', 'green', 'red', 'purple', 'pink']);
+  // Emphasis runs a paragraph may carry into a translation request. Each one
+  // becomes a start/end placeholder pair the model must return untouched.
+  const MAX_TRANSLATION_EMPHASIS = 10;
 
   function inlineLegendMarkerSpec(node) {
     if (!node?.classList?.contains('inline-legend-marker')) return null;
@@ -4591,6 +4594,24 @@
     return node;
   }
 
+  function attachQuickPreviewZoom(previewImage, sourceImage) {
+    // The preview lives in the host document while the figure it mirrors sits
+    // in the reader frame. Describing the original keeps the lightbox — and
+    // its caption, download and copy actions — identical to a click in the text.
+    const details = readerImageDetails(sourceImage, frameDocument());
+    if (!details) return;
+    previewImage.classList.add('quick-preview-zoomable');
+    previewImage.tabIndex = 0;
+    previewImage.setAttribute('role', 'button');
+    previewImage.setAttribute('aria-label', details.caption ? `放大查看图片：${details.caption.slice(0, 120)}` : '放大查看图片');
+    previewImage.addEventListener('click', () => { openImageLightbox(details, previewImage); });
+    previewImage.addEventListener('keydown', (event) => {
+      if (!['Enter', ' '].includes(event.key)) return;
+      event.preventDefault();
+      openImageLightbox(details, previewImage);
+    });
+  }
+
   function openMediaQuickPreview(target, link) {
     if (!target) return false;
     const isTable = target.classList.contains('pdf-table') || target.id?.startsWith('table-');
@@ -4612,12 +4633,24 @@
       } else {
         const sourceImage = target.querySelector('img');
         const url = safePreviewAssetURL(sourceImage?.currentSrc || sourceImage?.src);
-        if (url) { const image = document.createElement('img'); image.src = url; image.alt = '表格原图'; card.append(image); }
+        if (url) {
+          const image = document.createElement('img');
+          image.src = url;
+          image.alt = '表格原图';
+          attachQuickPreviewZoom(image, sourceImage);
+          card.append(image);
+        }
       }
     } else {
       const sourceImage = target.querySelector('img');
       const url = safePreviewAssetURL(sourceImage?.currentSrc || sourceImage?.src);
-      if (url) { const image = document.createElement('img'); image.src = url; image.alt = sourceImage.alt || '论文图片'; card.append(image); }
+      if (url) {
+        const image = document.createElement('img');
+        image.src = url;
+        image.alt = sourceImage.alt || '论文图片';
+        attachQuickPreviewZoom(image, sourceImage);
+        card.append(image);
+      }
     }
     const sourceCaption = target.querySelector('figcaption');
     if (sourceCaption) {
@@ -6806,8 +6839,15 @@
         math.replaceWith(` ${token} `);
       }
     });
-    [...clone.querySelectorAll('.pdf-text-tone')].reverse().forEach((span) => {
-      const spec = pdfTextToneSpec(span);
+    // Every emphasis run costs the model two placeholders it has to reproduce
+    // verbatim. A heavily emphasised paragraph carried so many that dropping
+    // one became likely, and the whole translation was discarded for it. Past
+    // the budget the styling is dropped so the text itself still translates.
+    const toneSpans = [...clone.querySelectorAll('.pdf-text-tone')];
+    const strongNodes = [...clone.querySelectorAll('strong')];
+    const keepEmphasis = (toneSpans.length + strongNodes.length) <= MAX_TRANSLATION_EMPHASIS;
+    toneSpans.reverse().forEach((span) => {
+      const spec = keepEmphasis ? pdfTextToneSpec(span) : null;
       if (!spec) { span.replaceWith(...span.childNodes); return; }
       const index = emphasis.length;
       const start = `__MY_SCHOLAR_BOLD_START_${index}__`;
@@ -6815,7 +6855,8 @@
       emphasis.push({ index, style: 'color', tone: spec.tone });
       span.replaceWith(`${start}${span.textContent || ''}${end}`);
     });
-    [...clone.querySelectorAll('strong')].reverse().forEach((strong) => {
+    strongNodes.reverse().forEach((strong) => {
+      if (!keepEmphasis) { strong.replaceWith(...strong.childNodes); return; }
       const index = emphasis.length;
       const start = `__MY_SCHOLAR_BOLD_START_${index}__`;
       const end = `__MY_SCHOLAR_BOLD_END_${index}__`;
@@ -7057,7 +7098,7 @@
     return result;
   }
 
-  async function requestTranslation(text, blockId = null, suppliedFormulas = [], { jobId = state.activeJob?.job_id, onDelta = null, markers = [], emphasis = [], signal = null } = {}) {
+  async function requestTranslation(text, blockId = null, suppliedFormulas = [], { jobId = state.activeJob?.job_id, onDelta = null, markers = [], emphasis = [], signal = null, refresh = false } = {}) {
     const originalText = String(text || '').trim();
     const sourceHash = hashText(originalText);
     const profileId = translationProfileId();
@@ -7065,7 +7106,9 @@
     const tokenPayload = protectSpecialTokens(mathPayload.text);
     const protectedPayload = { text: tokenPayload.text, formulas: mathPayload.formulas, tokens: tokenPayload.tokens };
     const targetLanguage = '中文';
-    const cached = cachedTranslation(blockId, sourceHash, targetLanguage, jobId);
+    // A re-translation asks for a new answer, so the stored one is skipped
+    // on both sides -- the server holds the same record.
+    const cached = refresh ? null : cachedTranslation(blockId, sourceHash, targetLanguage, jobId);
     if (cached?.text) {
       const stored = cached.formulas?.length ? cached.formulas : protectedPayload.formulas;
       const formulas = stored.map((formula) => (formula.markup ? formula : { ...formula, markup: protectedPayload.formulas.find((item) => item.token === formula.token)?.markup }));
@@ -7086,6 +7129,7 @@
       block_id: blockId,
       source_hash: sourceHash,
       formulas: protectedPayload.formulas.map(({ token, tex }) => ({ token, tex })),
+      ...(refresh ? { refresh: true } : {}),
     };
     let result;
     if (typeof onDelta === 'function') {
@@ -7153,7 +7197,7 @@
     return node;
   }
 
-  async function translateBlock(blockId, trigger = null, { silent = false, jobId = state.activeJob?.job_id, doc = frameDocument(), signal = null } = {}) {
+  async function translateBlock(blockId, trigger = null, { silent = false, jobId = state.activeJob?.job_id, doc = frameDocument(), signal = null, refresh = false } = {}) {
     if (!jobId || !blockId || !doc) return false;
     const block = translationTarget(blockId, doc);
     const source = paragraphSource(block);
@@ -7169,7 +7213,7 @@
       });
     };
     try {
-      const translated = await requestTranslation(text, blockId, source.formulas, { jobId, markers: source.markers, emphasis: source.emphasis, signal });
+      const translated = await requestTranslation(text, blockId, source.formulas, { jobId, markers: source.markers, emphasis: source.emphasis, signal, refresh });
       // A user can switch tabs while the gateway request is in flight. Never
       // insert an old document's response into the newly active iframe.
       if (state.activeJob?.job_id !== jobId || frameDocument() !== doc || (profileId && translationProfileId() !== profileId)) {
@@ -7217,7 +7261,13 @@
       trigger.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
-        translateBlock(trigger.dataset.translateBlockId, trigger);
+        // Pressing 译 on a paragraph that already shows a translation is a
+        // request for a different one; returning the stored answer would leave
+        // the reader with no way to redo a translation they judge wrong.
+        const blockId = trigger.dataset.translateBlockId;
+        const existing = doc.querySelector(`.my-scholar-translation[data-for="${cssEscape(blockId || '')}"]`);
+        const refresh = Boolean(existing) && !existing.classList.contains('is-pending');
+        translateBlock(blockId, trigger, { refresh });
       });
       block.appendChild(trigger);
     });
@@ -7285,7 +7335,7 @@
 
   const FULL_TRANSLATION_CONCURRENCY = 3;
 
-  async function runFullTranslation() {
+  async function runFullTranslation({ refresh = false } = {}) {
     const jobId = state.activeJob?.job_id;
     if (!jobId) return;
     const existingRun = state.translationRuns.get(jobId);
@@ -7299,13 +7349,16 @@
     const doc = frameDocument();
     if (!doc) return;
     const blocks = [...(doc?.querySelectorAll('h1.paper-title[data-block-id], p[data-block-id], ul[data-block-id], ol[data-block-id], figcaption[data-translate-block-id]') || [])].filter(translatableParagraph);
-    const pendingBlocks = blocks.filter((block) => !hasUsableTranslation(block));
+    const pendingBlocks = refresh ? blocks : blocks.filter((block) => !hasUsableTranslation(block));
     const run = { jobId, doc, running: true, stop: false, abortController: new AbortController() };
     state.translationRuns.set(jobId, run);
     state.translationRun = run;
+    // A full-document run belongs to the document, not to the view. Requiring
+    // the reader to stay on screen made every switch to the library or the
+    // settings abandon the run silently, mid-queue, with the button back to
+    // idle and nothing said. Leaving the document still stops it.
     const isCurrentRun = () => state.activeJob?.job_id === jobId
       && frameDocument() === doc
-      && $('#reader-view')?.classList.contains('active-view')
       && state.translationRuns.get(jobId) === run;
     $('#full-translate-button').disabled = true;
     $('#stop-translation-button').disabled = false;
@@ -7323,7 +7376,7 @@
           try {
             const preview = paragraphText(block).slice(0, 72);
             updateTranslationProgress(done, blocks.length, true, preview ? `正在翻译：${preview}` : '');
-            translated = await translateBlock(block.dataset.blockId || block.dataset.translateBlockId, block.querySelector('.paragraph-translate-trigger'), { silent: true, jobId, doc, signal: run.abortController.signal });
+            translated = await translateBlock(block.dataset.blockId || block.dataset.translateBlockId, block.querySelector('.paragraph-translate-trigger'), { silent: true, jobId, doc, signal: run.abortController.signal, refresh });
           } catch (error) {
             translated = false;
           }
@@ -7342,7 +7395,7 @@
         showToast(`全文翻译完成，但有 ${failed} 段失败；失败段落可稍后单独重试。`, true);
         $('#translation-progress').hidden = true;
       } else {
-        showToast(blocks.length ? (pendingBlocks.length ? '全文翻译完成，译文已插入原文下方。' : '全文译文已存在，已直接复用本机缓存。') : '没有找到可翻译的正文段落。');
+        showToast(blocks.length ? (pendingBlocks.length ? '全文翻译完成，译文已插入原文下方。' : '全文译文已存在，已直接复用本机缓存。按住 Option 点击可重新翻译全文。') : '没有找到可翻译的正文段落。');
         // A completed run should leave the reading surface unobstructed.
         $('#translation-progress').hidden = true;
       }
@@ -11324,7 +11377,11 @@
     }
   });
 
-  $('#full-translate-button').addEventListener('click', runFullTranslation);
+  $('#full-translate-button').addEventListener('click', (event) => {
+    // Alt/Option re-translates everything, including paragraphs that already
+    // have a stored translation.
+    runFullTranslation({ refresh: event.altKey });
+  });
   $('#stop-translation-button').addEventListener('click', stopFullTranslation);
   $('#open-source-button')?.addEventListener('click', () => {
     const job = state.activeJob;

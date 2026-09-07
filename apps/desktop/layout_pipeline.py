@@ -41,8 +41,10 @@ ALLOWED_INLINE_TAGS = (
     "i", "/i", "u", "/u",
 )
 REF_RE = re.compile(r"(?<![A-Za-z0-9])\[(\d+(?:\s*[-–]\s*\d+)?(?:\s*,\s*\d+)*)\]")
+# A panel letter is part of the reference ("Fig. 2c, upper"), and \b after the
+# digits refused to match one, so every lettered cross reference stayed plain.
 CROSS_REF_RE = re.compile(
-    r"\b(Fig(?:ure)?\.?|Table|Tab\.?|Eq(?:uation)?\.?)\s*(\d+)\b",
+    r"\b(Fig(?:ure)?\.?|Table|Tab\.?|Eq(?:uation)?\.?)\s*(\d+)([a-z]?)(?![A-Za-z0-9])",
     flags=re.IGNORECASE,
 )
 TAG_RE = re.compile(r"\\tag\s*\{([^{}]+)\}")
@@ -721,10 +723,30 @@ def _normalize_tex(value: str) -> str:
         (r"\\tt(?![A-Za-z])", r"\\mathtt"),
         (r"\\sf(?![A-Za-z])", r"\\mathsf"),
         (r"\\Bbb(?![A-Za-z])", r"\\mathbb"),
+        # Text-mode commands the extractor emits inside math; texmath rejects
+        # them and drops the whole formula to a raw-text fallback.
+        (r"\\textmu(?![A-Za-z])", r"\\mu"),
+        (r"\\text(?:md|rm|up|normal)(?=\s*\{)", r"\\mathrm"),
     )
     for pattern, replacement in replacements:
         tex = re.sub(pattern, replacement, tex)
     return tex
+
+
+MULTILINE_ENV_RE = re.compile(r"\\(?:begin|end)\{(?:array|aligned|align\*?|cases|gathered)\}(?:\s*\{[^{}]*\})?")
+
+
+def _flatten_inline_tex(tex: str) -> str:
+    """Drop multiline environments from a formula rendered inside a text line.
+
+    MinerU wraps some inline fragments in ``\\begin{array}``, which renders as
+    an ``<mtable>``: a block-level grid sitting in the middle of a sentence.
+    """
+    if not MULTILINE_ENV_RE.search(tex):
+        return tex
+    flattened = MULTILINE_ENV_RE.sub(" ", tex)
+    flattened = flattened.replace("\\\\", " ").replace("&", " ")
+    return re.sub(r"\s+", " ", flattened).strip()
 
 
 INLINE_MARKUP_RE = re.compile(
@@ -969,9 +991,15 @@ class MathRenderer:
         # Pandoc's texmath knows ``\phantom`` but not the h/v variants.
         return re.sub(r"\\[hv]phantom(?![A-Za-z])", r"\\phantom", tex)
 
+    @staticmethod
+    def _render_tex(tex: str, display: bool) -> str:
+        """The exact TeX that gets rendered, and keys both cache and mode()."""
+        normalized = _normalize_tex(tex)
+        return normalized if display else _flatten_inline_tex(normalized)
+
     def render(self, tex: str, display: bool) -> str:
         source_tex = _clean_tex(tex)
-        tex = _normalize_tex(source_tex)
+        tex = self._render_tex(source_tex, display)
         if not tex:
             return ""
         key = (tex, display)
@@ -1022,7 +1050,7 @@ class MathRenderer:
 
     def mode(self, tex: str, display: bool) -> str:
         """Return the renderer mode after ``render`` has been called."""
-        return self.modes.get((_normalize_tex(tex), display), "unknown")
+        return self.modes.get((self._render_tex(tex, display), display), "unknown")
 
 
 def _load_display_formulas(formula_dir: Optional[Path]) -> Dict[int, List[str]]:
@@ -2194,6 +2222,7 @@ def _linkify_text(value: str, refs: Set[int], anchors: Set[str], unresolved: Lis
         def replace_cross(match: re.Match[str]) -> str:
             label = match.group(1)
             number = int(match.group(2))
+            panel = match.group(3) or ""
             prefix = label.lower().replace(".", "")
             if prefix.startswith("fig"):
                 anchor = f"fig-{number}"
@@ -2204,7 +2233,7 @@ def _linkify_text(value: str, refs: Set[int], anchors: Set[str], unresolved: Lis
             if anchor not in anchors:
                 unresolved.append(anchor)
                 return match.group(0)
-            return f'<a class="cross-reference" href="#{anchor}">{html.escape(label)} {number}</a>'
+            return f'<a class="cross-reference" href="#{anchor}">{html.escape(label)} {number}{panel}</a>'
 
         parts[index] = CROSS_REF_RE.sub(replace_cross, text)
     return "".join(parts)
@@ -2419,6 +2448,17 @@ def _paragraph_html(
     )
 
 
+SECTION_NUMBER_RE = re.compile(r"^\s*(\d+(?:\.\d+)*)\s+\S")
+
+
+def _numbered_heading_depth(text: str) -> Optional[int]:
+    """Read the outline depth off a numbered heading: 7 → 1, 7.3 → 2, 7.3.1 → 3."""
+    match = SECTION_NUMBER_RE.match(text)
+    if not match:
+        return None
+    return match.group(1).count(".") + 1
+
+
 def _title_html(item: Dict[str, Any], state: BuildState) -> Tuple[str, str]:
     content = item.get("content", {})
     level = 2
@@ -2428,6 +2468,13 @@ def _title_html(item: Dict[str, Any], state: BuildState) -> Tuple[str, str]:
         except (TypeError, ValueError):
             level = 2
     text = _text_from_content(content).strip()
+    # MinerU reports one flat level for every section, so 7.3.1 arrived as the
+    # sibling of 7. The numbering is the only depth signal available, and it
+    # nests relative to whatever level the extractor gave: a top-level number
+    # stays put, and each dot pushes one level deeper.
+    depth = _numbered_heading_depth(text)
+    if depth is not None:
+        level = min(6, level + depth - 1)
     lower = text.lower()
     if re.search(r"\b(appendix|supplementary|supplemental material)\b", lower) or re.match(r"\s*appendix\s+[a-z0-9]", lower):
         kind = "appendix"
