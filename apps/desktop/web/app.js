@@ -7344,9 +7344,12 @@
     const run = { jobId, doc, running: true, stop: false, abortController: new AbortController() };
     state.translationRuns.set(jobId, run);
     state.translationRun = run;
+    // A full-document run belongs to the document, not to the view. Requiring
+    // the reader to stay on screen made every switch to the library or the
+    // settings abandon the run silently, mid-queue, with the button back to
+    // idle and nothing said. Leaving the document still stops it.
     const isCurrentRun = () => state.activeJob?.job_id === jobId
       && frameDocument() === doc
-      && $('#reader-view')?.classList.contains('active-view')
       && state.translationRuns.get(jobId) === run;
     $('#full-translate-button').disabled = true;
     $('#stop-translation-button').disabled = false;
