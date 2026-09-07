@@ -934,6 +934,59 @@ class DocumentIRTest(unittest.TestCase):
             4,
         )
 
+    def test_mineru_plate_merges_when_the_caption_lives_on_another_page(self) -> None:
+        # "Fig. 5: (previous page) …" leaves no figure number on any panel, so
+        # nothing seeds the numbered grouping and the page used to reach the
+        # reader as a scatter of panel crops.
+        pages = [[
+            {"type": "chart", "bbox": [20, 20, 300, 260], "content": {"chart_caption": "a"}},
+            {"type": "chart", "bbox": [310, 20, 600, 260], "content": {"chart_caption": "b c"}},
+            {"type": "chart", "bbox": [20, 270, 300, 520], "content": {"chart_caption": ""}},
+            {"type": "chart", "bbox": [310, 270, 600, 520], "content": {"chart_caption": "d"}},
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        elements = ir["pages"][0]["elements"]
+
+        self.assertEqual(len(elements), 1)
+        self.assertEqual(elements[0]["source"], "mineru-composite")
+        self.assertEqual(elements[0]["bbox"], [20.0, 20.0, 600.0, 520.0])
+        self.assertEqual(len(elements[0]["visual_fragments"]), 4)
+        # No panel letter is promoted into a caption for the merged plate.
+        self.assertEqual(elements[0]["text"], "")
+        self.assertEqual(
+            len([item for item in ir["suppressed"] if item["reason"] == "composite-figure-fragment"]),
+            4,
+        )
+
+    def test_mineru_two_uncaptioned_images_stay_separate(self) -> None:
+        # Below the fragment floor this is an ordinary pair of figures.
+        pages = [[
+            {"type": "chart", "bbox": [20, 20, 300, 500], "content": {"chart_caption": ""}},
+            {"type": "chart", "bbox": [310, 20, 600, 500], "content": {"chart_caption": ""}},
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        elements = ir["pages"][0]["elements"]
+
+        self.assertEqual(len(elements), 2)
+        self.assertTrue(all(item["source"] == "mineru" for item in elements))
+
+    def test_mineru_small_uncaptioned_thumbnails_stay_separate(self) -> None:
+        # Three small crops in a corner are not a full-page plate.
+        pages = [[
+            {"type": "chart", "bbox": [10, 10, 60, 60], "content": {"chart_caption": ""}},
+            {"type": "chart", "bbox": [70, 10, 120, 60], "content": {"chart_caption": ""}},
+            {"type": "chart", "bbox": [130, 10, 180, 60], "content": {"chart_caption": ""}},
+            {"type": "paragraph", "bbox": [10, 400, 900, 950], "content": {"paragraph_content": "Body text " * 60}},
+        ]]
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        images = [item for item in ir["pages"][0]["elements"] if item["type"] == "image"]
+
+        self.assertEqual(len(images), 3)
+        self.assertTrue(all(item["source"] == "mineru" for item in images))
+
     def test_mineru_different_figure_numbers_are_not_coalesced(self) -> None:
         pages = [[
             {

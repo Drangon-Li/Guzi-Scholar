@@ -50,7 +50,7 @@ except ImportError:  # pragma: no cover - present only on Windows
     msvcrt = None
 
 import runtime
-from ai import auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, is_metadata_block, list_models as ai_list_models, reference_quick_read, review_tables, services as ai_services, status as ai_status, test_connections as ai_test_connections, translate_text, translate_text_stream, translation_profile_id
+from ai import TranslationQualityError, auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, is_metadata_block, list_models as ai_list_models, reference_quick_read, review_tables, services as ai_services, status as ai_status, test_connections as ai_test_connections, translate_text, translate_text_stream, translation_profile_id
 from bibliography import is_fragmented_metadata_text, retrieve_bibliographic_metadata, retrieve_reference_evidence
 from config import AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE
 from content_store import MAX_NOTE_ASSET_BYTES, _active_conversion_root, _atomic_temp_path, _ensure_content_layout, _normalize_media_layout_items, _note_image_type, _read_media_layout, _store_note_asset, _sync_content_file, _translation_key, _translation_records, _translation_records_need_persist, _write_media_layout, _write_translation_records
@@ -3392,13 +3392,20 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     "formulas": formulas,
                 }
             except Exception as exc:
-                if parts:
+                # A stream that already emitted deltas cannot retry in place.
+                # When the model answered but the answer failed the quality
+                # check, the plain request retries it and the client replaces
+                # the streamed preview with the final result. A transport
+                # failure mid-stream is not retried.
+                recoverable = isinstance(exc, TranslationQualityError) or not parts
+                if not recoverable:
                     self._send_sse_event({"error": f"翻译失败：{exc}"})
                     return
-                # A gateway that rejects `stream: true` fails before the first
-                # delta; retry once with the plain request so translation still
-                # works there.
-                result = translate_text(text, target_language=target_language, context=context, formulas=formulas)
+                try:
+                    result = translate_text(text, target_language=target_language, context=context, formulas=formulas)
+                except Exception:
+                    self._send_sse_event({"error": f"翻译失败：{exc}"})
+                    return
             record = {
                 **result,
                 "cache_key": cache_key,

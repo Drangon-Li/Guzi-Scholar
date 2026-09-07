@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 from pipeline import PipelineError  # noqa: E402
 from library_store import LibraryStore  # noqa: E402
 import server as server_module  # noqa: E402
+from ai import TranslationQualityError  # noqa: E402
 from server import AI_STATUS_HISTORY_LIMIT, DataRootLock, MAX_CHAT_IMAGE_BYTES, MAX_NOTE_ASSET_BYTES, JobStore, ScholarHandler, _ai_status_history, _chat_image_context, _copy_ai_profile, _deduplicate_figure_ids, _migrate_job_artifacts, _note_image_type, _public_job, _public_settings, _record_ai_status, _runtime_lock_roots, _store_note_asset, _sync_ai_annotations, _translation_key, _translation_records, _write_content_manifest, _write_settings, _write_translation_records  # noqa: E402
 
 
@@ -1130,6 +1131,29 @@ class TranslateStreamTest(unittest.TestCase):
             self.assertEqual(events[0], {"delta": "部分"})
             self.assertIn("翻译失败", events[1]["error"])
             self.assertEqual(_translation_records(job_dir), [])
+
+    def test_translate_stream_retries_midway_quality_failure_with_plain_request(self) -> None:
+        # A stream cannot re-run itself once deltas are out, so a model answer
+        # that fails the placeholder check is recovered by the plain request.
+        def rejected_stream(*_args, **_kwargs):
+            yield "部分"
+            raise TranslationQualityError("模型返回的译文丢失了公式或占位符，请重试。")
+
+        with tempfile.TemporaryDirectory(prefix="my-scholar-translate-stream-") as temp:
+            job_dir = Path(temp)
+            payload = {"text": "Source text.", "block_id": "", "target_language": "中文", "source_hash": "sel-4", "stream": True}
+            handler = self._stream_handler(job_dir, payload)
+            with (
+                patch("server.translation_profile_id", return_value="profile-current"),
+                patch("server.translate_text_stream", side_effect=rejected_stream),
+                patch("server.translate_text", return_value={"text": "重试译文", "model": "test-model", "profile_id": "profile-current", "formulas": []}) as plain,
+            ):
+                handler._translate("a" * 16)
+            plain.assert_called_once()
+            events = self._events(handler)
+            self.assertEqual(events[0], {"delta": "部分"})
+            self.assertEqual(events[-1]["result"]["text"], "重试译文")
+            self.assertEqual(_translation_records(job_dir)[0]["text"], "重试译文")
 
 
 class ChatStreamTest(unittest.TestCase):

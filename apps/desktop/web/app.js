@@ -4480,6 +4480,9 @@
   const INLINE_MARKER_SHAPES = new Set(['circle', 'square']);
   const INLINE_MARKER_TONES = new Set(['gray', 'blue', 'orange', 'green', 'red', 'purple', 'pink']);
   const PDF_TEXT_TONES = new Set(['blue', 'orange', 'green', 'red', 'purple', 'pink']);
+  // Emphasis runs a paragraph may carry into a translation request. Each one
+  // becomes a start/end placeholder pair the model must return untouched.
+  const MAX_TRANSLATION_EMPHASIS = 10;
 
   function inlineLegendMarkerSpec(node) {
     if (!node?.classList?.contains('inline-legend-marker')) return null;
@@ -6806,8 +6809,15 @@
         math.replaceWith(` ${token} `);
       }
     });
-    [...clone.querySelectorAll('.pdf-text-tone')].reverse().forEach((span) => {
-      const spec = pdfTextToneSpec(span);
+    // Every emphasis run costs the model two placeholders it has to reproduce
+    // verbatim. A heavily emphasised paragraph carried so many that dropping
+    // one became likely, and the whole translation was discarded for it. Past
+    // the budget the styling is dropped so the text itself still translates.
+    const toneSpans = [...clone.querySelectorAll('.pdf-text-tone')];
+    const strongNodes = [...clone.querySelectorAll('strong')];
+    const keepEmphasis = (toneSpans.length + strongNodes.length) <= MAX_TRANSLATION_EMPHASIS;
+    toneSpans.reverse().forEach((span) => {
+      const spec = keepEmphasis ? pdfTextToneSpec(span) : null;
       if (!spec) { span.replaceWith(...span.childNodes); return; }
       const index = emphasis.length;
       const start = `__MY_SCHOLAR_BOLD_START_${index}__`;
@@ -6815,7 +6825,8 @@
       emphasis.push({ index, style: 'color', tone: spec.tone });
       span.replaceWith(`${start}${span.textContent || ''}${end}`);
     });
-    [...clone.querySelectorAll('strong')].reverse().forEach((strong) => {
+    strongNodes.reverse().forEach((strong) => {
+      if (!keepEmphasis) { strong.replaceWith(...strong.childNodes); return; }
       const index = emphasis.length;
       const start = `__MY_SCHOLAR_BOLD_START_${index}__`;
       const end = `__MY_SCHOLAR_BOLD_END_${index}__`;

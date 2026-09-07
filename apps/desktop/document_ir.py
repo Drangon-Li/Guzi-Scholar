@@ -406,6 +406,81 @@ def _visual_gap(left: Sequence[float], right: Sequence[float]) -> Tuple[float, f
     return horizontal, vertical
 
 
+def _compose_mineru_figure(
+    candidates: List[Dict[str, Any]], union: Sequence[float], *, text: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build one composite image element covering every fragment's crop."""
+    captioned = sorted(candidates, key=lambda item: (len(str(item.get("text") or "")), -int(item.get("source_index") or 0)), reverse=True)[0]
+    source_id = f"{captioned.get('source_id') or captioned.get('source_index')}-composite"
+    render = copy.deepcopy(captioned.get("render") or {})
+    render["bbox"] = union
+    content = render.get("content") if isinstance(render.get("content"), dict) else {}
+    render["content"] = content
+    merged = _canonical_element(
+        page=int(captioned.get("page") or 1),
+        source_id=source_id,
+        source_index=min(int(item.get("source_index") or 0) for item in candidates),
+        kind="image",
+        box=union,
+        text=str(captioned.get("text") or "").strip() if text is None else text,
+        source="mineru-composite",
+        render=render,
+        confidence=min(float(item.get("confidence") or 0.0) for item in candidates),
+        flags=set().union(*(item.get("flags") or [] for item in candidates)) | {"composite-visual", "source-crop"},
+    )
+    merged["fragments"] = [fragment for item in candidates for fragment in item.get("fragments", [])]
+    merged["visual_fragments"] = [
+        {"id": item.get("id"), "bbox": item.get("bbox"), "text": item.get("text", "")}
+        for item in candidates
+    ]
+    return merged
+
+
+# A plate broken into panel crops covers much of the page. Two figures that
+# merely sit on the same page do not, so the area floor is what keeps this from
+# gluing unrelated figures together.
+UNNUMBERED_PLATE_MIN_FRAGMENTS = 3
+UNNUMBERED_PLATE_MIN_AREA_RATIO = 0.25
+
+
+def _unnumbered_figure_clusters(
+    elements: List[Dict[str, Any]], consumed: set[str], page_width: float, page_height: float,
+) -> List[List[Dict[str, Any]]]:
+    """Group leftover panel crops that together tile one large page region."""
+    remaining = [
+        element for element in elements
+        if element.get("type") == "image" and element.get("source") == "mineru"
+        and str(element.get("id") or "") not in consumed
+        and _bbox(element.get("bbox"))
+        and not _figure_number(str(element.get("text") or ""))
+    ]
+    if len(remaining) < UNNUMBERED_PLATE_MIN_FRAGMENTS:
+        return []
+    max_gap = max(page_width, page_height) * 0.16
+    page_area = float(page_width) * float(page_height)
+    clusters: List[List[Dict[str, Any]]] = []
+    unassigned = list(remaining)
+    while unassigned:
+        cluster = [unassigned.pop(0)]
+        changed = True
+        while changed:
+            changed = False
+            for candidate in list(unassigned):
+                if any(max(_visual_gap(candidate.get("bbox") or [], other.get("bbox") or [])) <= max_gap for other in cluster):
+                    cluster.append(candidate)
+                    unassigned.remove(candidate)
+                    changed = True
+        if len(cluster) < UNNUMBERED_PLATE_MIN_FRAGMENTS:
+            continue
+        union = _union(item.get("bbox") for item in cluster)
+        if not union or not page_area:
+            continue
+        if (_width(union) * _height(union)) / page_area < UNNUMBERED_PLATE_MIN_AREA_RATIO:
+            continue
+        clusters.append(cluster)
+    return clusters
+
+
 def _merge_mineru_figure_fragments(
     elements: List[Dict[str, Any]], page_width: float, page_height: float,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
@@ -476,36 +551,29 @@ def _merge_mineru_figure_fragments(
         if len(connected) < 2 or len(connected) != len(candidates):
             continue
 
-        captioned = sorted(candidates, key=lambda item: (len(str(item.get("text") or "")), -int(item.get("source_index") or 0)), reverse=True)[0]
-        source_id = f"{captioned.get('source_id') or captioned.get('source_index')}-composite"
-        render = copy.deepcopy(captioned.get("render") or {})
-        render["bbox"] = union
-        content = render.get("content") if isinstance(render.get("content"), dict) else {}
-        render["content"] = content
-        merged = _canonical_element(
-            page=int(captioned.get("page") or 1),
-            source_id=source_id,
-            source_index=min(int(item.get("source_index") or 0) for item in candidates),
-            kind="image",
-            box=union,
-            text=str(captioned.get("text") or "").strip(),
-            source="mineru-composite",
-            render=render,
-            confidence=min(float(item.get("confidence") or 0.0) for item in candidates),
-            flags=set().union(*(item.get("flags") or [] for item in candidates)) | {"composite-visual", "source-crop"},
-        )
-        merged["fragments"] = [fragment for item in candidates for fragment in item.get("fragments", [])]
-        merged["visual_fragments"] = [
-            {"id": item.get("id"), "bbox": item.get("bbox"), "text": item.get("text", "")}
-            for item in candidates
-        ]
-        elements.append(merged)
+        elements.append(_compose_mineru_figure(candidates, union))
         consumed.update(str(item.get("id") or "") for item in candidates)
         for item in candidates:
             suppressed.append({
                 "id": item.get("id"), "page": item.get("page"), "type": item.get("type"),
                 "bbox": item.get("bbox"), "text": item.get("text", ""),
                 "reason": "composite-figure-fragment", "figure": number,
+            })
+
+    # A plate whose caption sits on another page ("Fig. 5: (previous page) …")
+    # leaves no figure number on any fragment, so the grouping above never gets
+    # a seed and the page reaches the reader as a scatter of panel crops.
+    for cluster in _unnumbered_figure_clusters(elements, consumed, page_width, page_height):
+        union = _union(item.get("bbox") for item in cluster)
+        if not union:
+            continue
+        elements.append(_compose_mineru_figure(cluster, union, text=""))
+        consumed.update(str(item.get("id") or "") for item in cluster)
+        for item in cluster:
+            suppressed.append({
+                "id": item.get("id"), "page": item.get("page"), "type": item.get("type"),
+                "bbox": item.get("bbox"), "text": item.get("text", ""),
+                "reason": "composite-figure-fragment", "figure": "",
             })
 
     if not consumed:

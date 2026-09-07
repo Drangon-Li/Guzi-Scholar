@@ -31,6 +31,10 @@ CHAT_MAX_TOKENS = 4096
 # Keep one explicit ceiling for translation requests. The relay applies the
 # same ceiling, while normal chat remains on its smaller conversational budget.
 TRANSLATION_MAX_TOKENS = 8192
+# Total attempts for one non-streaming translation. Models drop a protected
+# placeholder often enough on placeholder-dense paragraphs that a single try
+# left visible gaps in the reading page.
+TRANSLATION_ATTEMPTS = 3
 # A connection probe only needs "OK" back, but a reasoning model that ignores
 # every disable-thinking switch still has to finish thinking before it emits
 # anything, so leave enough headroom for that instead of the bare reply.
@@ -412,6 +416,40 @@ def _translation_messages(text: str, target_language: str, protected_terms: List
     return [{"role": "user", "content": text}]
 
 
+class TranslationQualityError(RuntimeError):
+    """The model answered, but the answer is not usable as a translation.
+
+    Distinct from a transport failure: the request itself succeeded, so the
+    same request is worth sending again.
+    """
+
+
+_HARD_PLACEHOLDER_RE = re.compile(r'__MY_SCHOLAR_(?:MATH|SPECIAL_TOKEN|MARKER)_\d+__')
+_EMPHASIS_PLACEHOLDER_RE = re.compile(r'__MY_SCHOLAR_BOLD_(START|END)_(\d+)__')
+
+
+def _is_hard_placeholder(term: str) -> bool:
+    """A placeholder whose loss changes what the translation says."""
+    return bool(_HARD_PLACEHOLDER_RE.fullmatch(str(term or '')))
+
+
+def _drop_unpaired_emphasis(text: str) -> str:
+    """Remove emphasis markers the model failed to keep in matching pairs.
+
+    A START without its END (or the reverse) would otherwise reach the reader
+    as literal ``__MY_SCHOLAR_BOLD_START_3__`` text.
+    """
+    value = str(text or '')
+    starts: Dict[str, int] = {}
+    ends: Dict[str, int] = {}
+    for boundary, index in _EMPHASIS_PLACEHOLDER_RE.findall(value):
+        (starts if boundary == 'START' else ends)[index] = (starts if boundary == 'START' else ends).get(index, 0) + 1
+    paired = {index for index in starts if index in ends}
+    if len(paired) == len(starts) == len(ends):
+        return value
+    return _EMPHASIS_PLACEHOLDER_RE.sub(lambda m: m.group(0) if m.group(2) in paired else '', value)
+
+
 def _suspicious_translation(text: str) -> bool:
     """Reject common chat-style preambles instead of persisting them as translations."""
     value = str(text or "").strip()
@@ -428,7 +466,11 @@ def _translation_quality_error(source: str, translated: str, protected_terms: Li
     value = str(translated or '').strip()
     if _suspicious_translation(value):
         return '通用翻译模型返回了分析式内容，请重试或切换为专用翻译接口。'
-    missing = [term for term in protected_terms if term and term not in value]
+    # Only formula-bearing placeholders carry meaning that the translation
+    # cannot survive without. Emphasis markers are visual decoration recovered
+    # from the PDF font, and the reader already renders an unpaired marker as
+    # plain text, so losing one must not discard an otherwise correct paragraph.
+    missing = [term for term in protected_terms if term and _is_hard_placeholder(term) and term not in value]
     if missing:
         return '模型返回的译文丢失了公式或占位符，请重试。'
     # Providers occasionally return a visibly truncated final fragment even
@@ -445,7 +487,7 @@ def _validated_translation_stream(deltas: Iterator[str], source: str, protected_
         yield delta
     error = _translation_quality_error(source, emitted, protected_terms)
     if error:
-        raise RuntimeError(error)
+        raise TranslationQualityError(error)
 
 
 def test_connection(service: str = "chat") -> Dict[str, Any]:
@@ -542,22 +584,27 @@ def translate_text(text: str, *, target_language: str = "中文", context: str =
     protected_terms = _protected_translation_terms(text, formulas)
     profile = _config("translation")
     mode = _translation_mode(profile)
-    translated = _complete(
-        _translation_messages(text, target_language, protected_terms, mode),
-        service="translation",
-        temperature=0 if mode == "chat" else None,
-        max_tokens=TRANSLATION_MAX_TOKENS if mode == "chat" else None,
-        extra_body=None if mode == "chat" else {"translation_options": _translation_options(target_language, protected_terms)},
-    )
-    quality_error = _translation_quality_error(text, translated, protected_terms)
-    if quality_error:
-        raise RuntimeError(quality_error)
-    return {
-        "text": translated,
-        "model": profile["model"],
-        "profile_id": profile["profile_id"],
-        "formulas": formulas or [],
-    }
+    # A long paragraph carries dozens of placeholders, and a single one dropped
+    # by the model used to discard the whole translation. Retry before giving
+    # the reader an error in place of the paragraph.
+    quality_error = ''
+    for _attempt in range(TRANSLATION_ATTEMPTS):
+        translated = _complete(
+            _translation_messages(text, target_language, protected_terms, mode),
+            service="translation",
+            temperature=0 if mode == "chat" else None,
+            max_tokens=TRANSLATION_MAX_TOKENS if mode == "chat" else None,
+            extra_body=None if mode == "chat" else {"translation_options": _translation_options(target_language, protected_terms)},
+        )
+        quality_error = _translation_quality_error(text, translated, protected_terms)
+        if not quality_error:
+            return {
+                "text": _drop_unpaired_emphasis(translated),
+                "model": profile["model"],
+                "profile_id": profile["profile_id"],
+                "formulas": formulas or [],
+            }
+    raise TranslationQualityError(quality_error)
 
 
 def translate_text_stream(text: str, *, target_language: str = "中文", context: str = "", formulas: Optional[List[dict]] = None) -> Iterator[str]:
