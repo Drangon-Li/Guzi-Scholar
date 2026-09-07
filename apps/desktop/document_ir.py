@@ -16,7 +16,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 from pymupdf_runtime import load_fitz
 
 
@@ -2537,6 +2537,37 @@ MINERU_EDGE_REPEAT_MIN_PAGES = 3
 LINE_NUMBER_GUTTER_RE = re.compile(r"^\s*\d{1,4}\s+(?=\S)")
 
 
+def _text_slots(value: Any) -> Iterator[Tuple[Any, Any]]:
+    """Yield every mutable text leaf in a render payload, in document order."""
+    if isinstance(value, dict):
+        for key in (
+            "title_content", "paragraph_content", "list_content", "list_items",
+            "item_content", "content", "text",
+        ):
+            if key in value:
+                inner = value[key]
+                if isinstance(inner, str):
+                    yield value, key
+                else:
+                    yield from _text_slots(inner)
+                return
+    elif isinstance(value, list):
+        for item in value:
+            yield from _text_slots(item)
+
+
+def _strip_gutter_number_from_render(render: Dict[str, Any]) -> None:
+    """Drop a leading line number from a render payload's first text.
+
+    The IR's own ``text`` is rebuilt separately; the HTML is assembled from
+    this payload, so both have to lose the number.
+    """
+    for container, key in _text_slots(render.get("content")):
+        if str(container[key]).strip():
+            container[key] = LINE_NUMBER_GUTTER_RE.sub("", str(container[key]), count=1)
+            return
+
+
 def _line_number_gutter(items: List[Dict[str, Any]], page_width: float, page_height: float) -> Optional[float]:
     """Return the right edge of a LaTeX ``lineno`` gutter, when the page has one.
 
@@ -2625,6 +2656,9 @@ def mineru_to_ir(
                 and box[0] <= gutter_right
             ):
                 text = LINE_NUMBER_GUTTER_RE.sub("", text, count=1)
+                strip_gutter = True
+            else:
+                strip_gutter = False
             recovered_body = raw_kind == "page_footnote" and _recoverable_mineru_footnote(text, box, max_y)
             kind = "image" if raw_kind == "chart" else ("paragraph" if recovered_body else raw_kind)
             role = "furniture" if raw_kind in FURNITURE_TYPES and not recovered_body else "body"
@@ -2638,6 +2672,8 @@ def mineru_to_ir(
                 role = "furniture"
             source_id = str(source_index)
             render = copy.deepcopy(raw)
+            if strip_gutter:
+                _strip_gutter_number_from_render(render)
             element_flags = {"recovered-body"} if recovered_body else set()
             if raw_kind == "chart":
                 content = render.get("content") if isinstance(render.get("content"), dict) else {}

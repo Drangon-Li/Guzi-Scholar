@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import document_ir  # noqa: E402
-from document_ir import mineru_to_ir, odl_to_ir, render_pages  # noqa: E402
+from document_ir import _flatten_text, mineru_to_ir, odl_to_ir, render_pages  # noqa: E402
 
 
 PAGE_WIDTH = 612.0
@@ -985,6 +985,15 @@ class DocumentIRTest(unittest.TestCase):
         self.assertIn("The architecture of Pinal is motivated by the idea.", texts)
         # a block clear of the gutter keeps its text verbatim
         self.assertIn("The first stage is handled by T2struct.", texts)
+        # The HTML is assembled from the render payload, not from element text,
+        # so the number has to be gone from both.
+        rendered = [
+            _flatten_text((item.get("render") or {}).get("content"))
+            for item in ir["pages"][0]["elements"]
+        ]
+        self.assertIn("1 The Pinal network", rendered)
+        self.assertIn("The architecture of Pinal is motivated by the idea.", rendered)
+        self.assertFalse([value for value in rendered if value.startswith(("74 ", "75 "))])
 
     def test_mineru_without_a_gutter_keeps_leading_numbers(self) -> None:
         pages = [[
