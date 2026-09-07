@@ -424,6 +424,7 @@ class TranslationQualityError(RuntimeError):
     """
 
 
+_ELLIPSIS_END_RE = re.compile(r'(?:\.\.\.|…)\s*$')
 _HARD_PLACEHOLDER_RE = re.compile(r'__MY_SCHOLAR_(?:MATH|SPECIAL_TOKEN|MARKER)_\d+__')
 _EMPHASIS_PLACEHOLDER_RE = re.compile(r'__MY_SCHOLAR_BOLD_(START|END)_(\d+)__')
 
@@ -474,8 +475,12 @@ def _translation_quality_error(source: str, translated: str, protected_terms: Li
     if missing:
         return '模型返回的译文丢失了公式或占位符，请重试。'
     # Providers occasionally return a visibly truncated final fragment even
-    # when the HTTP response is otherwise successful.
-    if re.search(r'(?:\.\.\.|…|\b(?:truncated|cut off)\b|截断|未完)$', value, re.IGNORECASE):
+    # when the HTTP response is otherwise successful. An ellipsis is only
+    # evidence of that when the source did not end in one itself -- a caption
+    # cut short in the PDF ("...(PET) ...") translates to the same shape.
+    if re.search(r'(?:\b(?:truncated|cut off)\b|截断|未完)$', value, re.IGNORECASE):
+        return '模型返回的译文疑似被截断，请重试。'
+    if _ELLIPSIS_END_RE.search(value) and not _ELLIPSIS_END_RE.search(str(source or '').strip()):
         return '模型返回的译文疑似被截断，请重试。'
     return ''
 

@@ -159,6 +159,19 @@ class AIAdapterTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "截断"):
                 translate_text("position embedding __MY_SCHOLAR_MATH_0__", formulas=formulas)
 
+    def test_translation_keeps_an_ellipsis_the_source_already_had(self) -> None:
+        # A caption the PDF itself cut short ends in "..."; so does its
+        # translation, and that is not evidence of truncation.
+        source = "PET hydrolases are a class of enzymes capable of catalyzing the degradation of PET ..."
+        with patch("ai._complete", return_value="PET 水解酶是一类能够催化 PET 降解的酶 ..."):
+            result = translate_text(source)
+        self.assertTrue(result["text"].endswith("..."))
+
+    def test_translation_still_rejects_an_ellipsis_the_source_lacks(self) -> None:
+        with patch("ai._complete", return_value="这段译文在这里就断了…"):
+            with self.assertRaisesRegex(ai_module.TranslationQualityError, "截断"):
+                translate_text("A complete sentence that ends properly.")
+
     def test_translation_keeps_paragraph_when_only_emphasis_markers_are_lost(self) -> None:
         # Emphasis is decoration recovered from the PDF font. Losing it must not
         # cost the reader the paragraph, the way losing a formula does.

@@ -4594,6 +4594,24 @@
     return node;
   }
 
+  function attachQuickPreviewZoom(previewImage, sourceImage) {
+    // The preview lives in the host document while the figure it mirrors sits
+    // in the reader frame. Describing the original keeps the lightbox — and
+    // its caption, download and copy actions — identical to a click in the text.
+    const details = readerImageDetails(sourceImage, frameDocument());
+    if (!details) return;
+    previewImage.classList.add('quick-preview-zoomable');
+    previewImage.tabIndex = 0;
+    previewImage.setAttribute('role', 'button');
+    previewImage.setAttribute('aria-label', details.caption ? `放大查看图片：${details.caption.slice(0, 120)}` : '放大查看图片');
+    previewImage.addEventListener('click', () => { openImageLightbox(details, previewImage); });
+    previewImage.addEventListener('keydown', (event) => {
+      if (!['Enter', ' '].includes(event.key)) return;
+      event.preventDefault();
+      openImageLightbox(details, previewImage);
+    });
+  }
+
   function openMediaQuickPreview(target, link) {
     if (!target) return false;
     const isTable = target.classList.contains('pdf-table') || target.id?.startsWith('table-');
@@ -4615,12 +4633,24 @@
       } else {
         const sourceImage = target.querySelector('img');
         const url = safePreviewAssetURL(sourceImage?.currentSrc || sourceImage?.src);
-        if (url) { const image = document.createElement('img'); image.src = url; image.alt = '表格原图'; card.append(image); }
+        if (url) {
+          const image = document.createElement('img');
+          image.src = url;
+          image.alt = '表格原图';
+          attachQuickPreviewZoom(image, sourceImage);
+          card.append(image);
+        }
       }
     } else {
       const sourceImage = target.querySelector('img');
       const url = safePreviewAssetURL(sourceImage?.currentSrc || sourceImage?.src);
-      if (url) { const image = document.createElement('img'); image.src = url; image.alt = sourceImage.alt || '论文图片'; card.append(image); }
+      if (url) {
+        const image = document.createElement('img');
+        image.src = url;
+        image.alt = sourceImage.alt || '论文图片';
+        attachQuickPreviewZoom(image, sourceImage);
+        card.append(image);
+      }
     }
     const sourceCaption = target.querySelector('figcaption');
     if (sourceCaption) {
