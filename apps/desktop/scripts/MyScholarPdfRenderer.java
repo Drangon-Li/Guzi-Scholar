@@ -7,14 +7,17 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import javax.imageio.ImageIO;
+import org.apache.pdfbox.cos.COSName;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.PDPage;
+import org.apache.pdfbox.pdmodel.PDResources;
 import org.apache.pdfbox.pdmodel.common.PDRectangle;
 import org.apache.pdfbox.pdmodel.font.PDFont;
 import org.apache.pdfbox.pdmodel.font.PDFontDescriptor;
@@ -60,7 +63,12 @@ public final class MyScholarPdfRenderer {
     private static final int MAX_EVIDENCE_PAGES = 512;
     private static final int MAX_EVIDENCE_SPANS = 200_000;
     private static final int MAX_EVIDENCE_TEXT_CHARS = 4_000_000;
+    // Floor for the stem-width test, and the margin a face must clear over the
+    // document's own regular weight. A fixed cut cannot work on its own:
+    // Ghostscript re-embeds Computer Modern with every StemV inflated, so a
+    // body face lands at 106 and the whole page reads as bold.
     private static final float BOLD_STEM_WIDTH = 100.0f;
+    private static final float BOLD_STEM_MARGIN = 1.35f;
 
     private static final class EvidenceChar {
         private final String text;
@@ -185,6 +193,7 @@ public final class MyScholarPdfRenderer {
         private final List<EvidencePage> pages = new ArrayList<>();
         private EvidencePage currentPage;
         private int currentColor;
+        private float boldStemThreshold = BOLD_STEM_WIDTH;
 
         private EvidenceStripper() throws IOException {
             setSortByPosition(true);
@@ -238,7 +247,7 @@ public final class MyScholarPdfRenderer {
             }
         }
 
-        private static boolean isBold(PDFont font, String fontName) {
+        private boolean isBold(PDFont font, String fontName) {
             String normalized = fontName.toLowerCase(Locale.ROOT);
             if (normalized.contains("bold") || normalized.contains("black")
                 || normalized.contains("heavy") || normalized.contains("demi")) {
@@ -257,13 +266,52 @@ public final class MyScholarPdfRenderer {
                 }
                 // LaTeX and URW bold faces (CMBX10, NimbusRomNo9L-Medi) leave FontWeight at
                 // 0, never set ForceBold and never spell "bold" in the name, so the stem
-                // width is the only weight they advertise. Their regular counterparts sit
-                // near 70-90; the bold cuts start around 110.
-                return descriptor.getStemV() >= BOLD_STEM_WIDTH;
+                // width is the only weight they advertise. It is only meaningful next to
+                // the regular weight of the same document -- absolute values shift with
+                // whatever produced the file.
+                return descriptor.getStemV() >= boldStemThreshold;
             } catch (RuntimeException ignored) {
                 return false;
             }
         }
+    }
+
+    /** Stem width a face must reach to count as bold in this document. */
+    private static float boldStemThreshold(PDDocument document) {
+        List<Float> stems = new ArrayList<>();
+        for (PDPage page : document.getPages()) {
+            PDResources resources = page.getResources();
+            if (resources == null) {
+                continue;
+            }
+            for (COSName name : resources.getFontNames()) {
+                try {
+                    PDFont font = resources.getFont(name);
+                    if (font == null) {
+                        continue;
+                    }
+                    PDFontDescriptor descriptor = font.getFontDescriptor();
+                    if (descriptor == null) {
+                        continue;
+                    }
+                    float stem = descriptor.getStemV();
+                    // A missing StemV reads as 0 and would drag the baseline down.
+                    if (stem > 0.0f) {
+                        stems.add(stem);
+                    }
+                } catch (IOException | RuntimeException ignored) {
+                    // A font we cannot load tells us nothing about the weight spread.
+                }
+            }
+        }
+        if (stems.size() < 4) {
+            return BOLD_STEM_WIDTH;
+        }
+        Collections.sort(stems);
+        // The lower quartile stands in for the regular weight: a document has
+        // more regular text than bold, so the bottom of the spread is the body.
+        float regular = stems.get(Math.max(0, (stems.size() - 1) / 4));
+        return Math.max(BOLD_STEM_WIDTH, regular * BOLD_STEM_MARGIN);
     }
 
     private static void writeEvidence(Path input, Path output) throws Exception {
@@ -284,6 +332,7 @@ public final class MyScholarPdfRenderer {
                     throw new IllegalArgumentException("PDF evidence page limit exceeded");
                 }
                 stripper = new EvidenceStripper();
+                stripper.boldStemThreshold = boldStemThreshold(document);
                 stripper.writeText(document, Writer.nullWriter());
             }
             int spanCount = 0;

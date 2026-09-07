@@ -25,6 +25,9 @@ CAPTION_RE = re.compile(r"^\s*(?P<kind>fig(?:ure)?|table)\s*\.?\s*(?P<number>\d+
 TERMINAL_RE = re.compile(r'''[.!?。！？;；:]\s*[\]\)\}"'’”]*$''')
 LOWERCASE_START_RE = re.compile(r"^[\s\[\(\"'‘“]*(?:[a-z]|and\b|or\b|but\b|which\b|that\b|where\b|while\b)")
 FURNITURE_TYPES = {"page_header", "page_footnote", "page_number", "header", "footer", "number", "abandon"}
+# Computer Modern spells its bold cuts CMB10 / CMBX10 rather than "bold", and
+# sets no bold flag, so a LaTeX heading otherwise reads as regular weight.
+BOLD_FONT_NAME_RE = re.compile(r"(?:bold|semi[- ]?bold|demi|black|heavy|\bcmbx?\d)", re.IGNORECASE)
 TRANSLATABLE_TYPES = {"title", "paragraph", "list", "image", "table"}
 SECTION_TITLE_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)*|[A-Z])\s+\S+")
 CONFERENCE_FOOTER_RE = re.compile(
@@ -1068,9 +1071,7 @@ def _extract_pdf_text_pages(
                                 size = float(span.get("size") or 0.0)
                             except (TypeError, ValueError):
                                 flags, size = 0, 0.0
-                            bold = bool(flags & 16) or bool(
-                                re.search(r"(?:bold|semi[- ]?bold|demi|black|heavy)", font, flags=re.IGNORECASE)
-                            )
+                            bold = bool(flags & 16) or bool(BOLD_FONT_NAME_RE.search(font))
                             evidence_span = {
                                 "text": text,
                                 "bbox": box,

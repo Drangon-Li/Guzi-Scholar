@@ -934,6 +934,16 @@ class DocumentIRTest(unittest.TestCase):
             4,
         )
 
+    def test_latex_bold_font_names_are_recognised(self) -> None:
+        from document_ir import BOLD_FONT_NAME_RE
+
+        for name in ("CMBX10", "CMBX12", "CMB10", "Arial-BoldMT", "MicrosoftYaHei-Bold", "Helvetica-Black"):
+            self.assertTrue(BOLD_FONT_NAME_RE.search(name), name)
+        # The other Computer Modern cuts are regular weight and must not match:
+        # roman, math italic, symbols, text italic, extensions, sans, typewriter.
+        for name in ("CMR10", "CMR12", "CMMI10", "CMSY10", "CMTI10", "CMEX10", "CMSS8", "CMTT10", "ArialMT"):
+            self.assertIsNone(BOLD_FONT_NAME_RE.search(name), name)
+
     def test_mineru_repeated_edge_banner_is_suppressed_as_furniture(self) -> None:
         # A preprint watermark that the extractor labels inconsistently: header
         # on one page, body text on the next. Repetition at the same edge is
