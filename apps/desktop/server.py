@@ -3128,8 +3128,14 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 ]
                 profile_id = translation_profile_id()
                 cache_key = _translation_key(text, block_id, target_language, source_hash, profile_id)
+                # An explicit re-translation has to reach the model: the reader
+                # asks for one when the stored translation is the thing that
+                # looks wrong, so answering it from the same record is useless.
+                refresh = bool(payload.get("refresh"))
                 with TRANSLATION_LOCK:
-                    cached = next((item for item in _translation_records(job_dir) if item.get("cache_key") == cache_key), None)
+                    cached = None if refresh else next(
+                        (item for item in _translation_records(job_dir) if item.get("cache_key") == cache_key), None
+                    )
             if payload.get("stream"):
                 self._translate_stream_response(
                     job_dir,

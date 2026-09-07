@@ -7098,7 +7098,7 @@
     return result;
   }
 
-  async function requestTranslation(text, blockId = null, suppliedFormulas = [], { jobId = state.activeJob?.job_id, onDelta = null, markers = [], emphasis = [], signal = null } = {}) {
+  async function requestTranslation(text, blockId = null, suppliedFormulas = [], { jobId = state.activeJob?.job_id, onDelta = null, markers = [], emphasis = [], signal = null, refresh = false } = {}) {
     const originalText = String(text || '').trim();
     const sourceHash = hashText(originalText);
     const profileId = translationProfileId();
@@ -7106,7 +7106,9 @@
     const tokenPayload = protectSpecialTokens(mathPayload.text);
     const protectedPayload = { text: tokenPayload.text, formulas: mathPayload.formulas, tokens: tokenPayload.tokens };
     const targetLanguage = '中文';
-    const cached = cachedTranslation(blockId, sourceHash, targetLanguage, jobId);
+    // A re-translation asks for a new answer, so the stored one is skipped
+    // on both sides -- the server holds the same record.
+    const cached = refresh ? null : cachedTranslation(blockId, sourceHash, targetLanguage, jobId);
     if (cached?.text) {
       const stored = cached.formulas?.length ? cached.formulas : protectedPayload.formulas;
       const formulas = stored.map((formula) => (formula.markup ? formula : { ...formula, markup: protectedPayload.formulas.find((item) => item.token === formula.token)?.markup }));
@@ -7127,6 +7129,7 @@
       block_id: blockId,
       source_hash: sourceHash,
       formulas: protectedPayload.formulas.map(({ token, tex }) => ({ token, tex })),
+      ...(refresh ? { refresh: true } : {}),
     };
     let result;
     if (typeof onDelta === 'function') {
@@ -7194,7 +7197,7 @@
     return node;
   }
 
-  async function translateBlock(blockId, trigger = null, { silent = false, jobId = state.activeJob?.job_id, doc = frameDocument(), signal = null } = {}) {
+  async function translateBlock(blockId, trigger = null, { silent = false, jobId = state.activeJob?.job_id, doc = frameDocument(), signal = null, refresh = false } = {}) {
     if (!jobId || !blockId || !doc) return false;
     const block = translationTarget(blockId, doc);
     const source = paragraphSource(block);
@@ -7210,7 +7213,7 @@
       });
     };
     try {
-      const translated = await requestTranslation(text, blockId, source.formulas, { jobId, markers: source.markers, emphasis: source.emphasis, signal });
+      const translated = await requestTranslation(text, blockId, source.formulas, { jobId, markers: source.markers, emphasis: source.emphasis, signal, refresh });
       // A user can switch tabs while the gateway request is in flight. Never
       // insert an old document's response into the newly active iframe.
       if (state.activeJob?.job_id !== jobId || frameDocument() !== doc || (profileId && translationProfileId() !== profileId)) {
@@ -7258,7 +7261,13 @@
       trigger.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
-        translateBlock(trigger.dataset.translateBlockId, trigger);
+        // Pressing 译 on a paragraph that already shows a translation is a
+        // request for a different one; returning the stored answer would leave
+        // the reader with no way to redo a translation they judge wrong.
+        const blockId = trigger.dataset.translateBlockId;
+        const existing = doc.querySelector(`.my-scholar-translation[data-for="${cssEscape(blockId || '')}"]`);
+        const refresh = Boolean(existing) && !existing.classList.contains('is-pending');
+        translateBlock(blockId, trigger, { refresh });
       });
       block.appendChild(trigger);
     });
@@ -7326,7 +7335,7 @@
 
   const FULL_TRANSLATION_CONCURRENCY = 3;
 
-  async function runFullTranslation() {
+  async function runFullTranslation({ refresh = false } = {}) {
     const jobId = state.activeJob?.job_id;
     if (!jobId) return;
     const existingRun = state.translationRuns.get(jobId);
@@ -7340,7 +7349,7 @@
     const doc = frameDocument();
     if (!doc) return;
     const blocks = [...(doc?.querySelectorAll('h1.paper-title[data-block-id], p[data-block-id], ul[data-block-id], ol[data-block-id], figcaption[data-translate-block-id]') || [])].filter(translatableParagraph);
-    const pendingBlocks = blocks.filter((block) => !hasUsableTranslation(block));
+    const pendingBlocks = refresh ? blocks : blocks.filter((block) => !hasUsableTranslation(block));
     const run = { jobId, doc, running: true, stop: false, abortController: new AbortController() };
     state.translationRuns.set(jobId, run);
     state.translationRun = run;
@@ -7367,7 +7376,7 @@
           try {
             const preview = paragraphText(block).slice(0, 72);
             updateTranslationProgress(done, blocks.length, true, preview ? `正在翻译：${preview}` : '');
-            translated = await translateBlock(block.dataset.blockId || block.dataset.translateBlockId, block.querySelector('.paragraph-translate-trigger'), { silent: true, jobId, doc, signal: run.abortController.signal });
+            translated = await translateBlock(block.dataset.blockId || block.dataset.translateBlockId, block.querySelector('.paragraph-translate-trigger'), { silent: true, jobId, doc, signal: run.abortController.signal, refresh });
           } catch (error) {
             translated = false;
           }
@@ -7386,7 +7395,7 @@
         showToast(`全文翻译完成，但有 ${failed} 段失败；失败段落可稍后单独重试。`, true);
         $('#translation-progress').hidden = true;
       } else {
-        showToast(blocks.length ? (pendingBlocks.length ? '全文翻译完成，译文已插入原文下方。' : '全文译文已存在，已直接复用本机缓存。') : '没有找到可翻译的正文段落。');
+        showToast(blocks.length ? (pendingBlocks.length ? '全文翻译完成，译文已插入原文下方。' : '全文译文已存在，已直接复用本机缓存。按住 Option 点击可重新翻译全文。') : '没有找到可翻译的正文段落。');
         // A completed run should leave the reading surface unobstructed.
         $('#translation-progress').hidden = true;
       }
@@ -11368,7 +11377,11 @@
     }
   });
 
-  $('#full-translate-button').addEventListener('click', runFullTranslation);
+  $('#full-translate-button').addEventListener('click', (event) => {
+    // Alt/Option re-translates everything, including paragraphs that already
+    // have a stored translation.
+    runFullTranslation({ refresh: event.altKey });
+  });
   $('#stop-translation-button').addEventListener('click', stopFullTranslation);
   $('#open-source-button')?.addEventListener('click', () => {
     const job = state.activeJob;

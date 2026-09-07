@@ -911,6 +911,36 @@ class TranslationCacheTest(unittest.TestCase):
             self.assertEqual([response["result"]["cached"] for response in responses], [False, True])
             self.assertEqual({item["cache_key"] for item in records if item.get("profile_id") != "profile-current"}, {"other", "legacy"})
 
+    def test_translate_refresh_bypasses_the_stored_record(self) -> None:
+        # Without this the reader has no way to redo a translation it judges
+        # wrong: every path answers from the same cache entry.
+        with tempfile.TemporaryDirectory(prefix="my-scholar-translate-refresh-") as temp:
+            job_dir = Path(temp)
+            payload = {"text": "Source text.", "block_id": "block-1", "target_language": "中文", "source_hash": "source-a"}
+            handler = object.__new__(ScholarHandler)
+            handler._completed_job_dir = lambda _job_id: job_dir
+            handler._read_json_body = lambda **_kwargs: dict(payload)
+            responses: list[dict] = []
+            handler._send_json = lambda body, *_args, **_kwargs: responses.append(body)
+            handler._send_error_json = lambda message, *_args, **_kwargs: self.fail(message)
+
+            with (
+                patch("server.translation_profile_id", return_value="profile-current"),
+                patch("server.translate_text", side_effect=[{"text": "第一版"}, {"text": "第二版"}]) as translate,
+            ):
+                handler._translate("a" * 16)          # miss -> model
+                handler._translate("a" * 16)          # hit  -> cache
+                handler._read_json_body = lambda **_kwargs: {**payload, "refresh": True}
+                handler._translate("a" * 16)          # refresh -> model again
+
+            self.assertEqual(translate.call_count, 2)
+            self.assertEqual([r["result"]["cached"] for r in responses], [False, True, False])
+            self.assertEqual([r["result"]["text"] for r in responses], ["第一版", "第一版", "第二版"])
+            # the refreshed answer replaces the stored one rather than piling up
+            records = [item for item in _translation_records(job_dir) if item.get("profile_id") == "profile-current"]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["text"], "第二版")
+
     def test_content_manifest_writes_are_safe_for_concurrent_reader_requests(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-content-race-") as temp:
             job_dir = Path(temp)
