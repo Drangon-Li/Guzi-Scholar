@@ -2557,6 +2557,14 @@ def _text_slots(value: Any) -> Iterator[Tuple[Any, Any]]:
             yield from _text_slots(item)
 
 
+def _remove_banner_from_render(render: Dict[str, Any], banner: str) -> None:
+    """Cut a running-header string out of a render payload's text leaves."""
+    for container, key in _text_slots(render.get("content")):
+        value = str(container[key])
+        if banner in value:
+            container[key] = re.sub(r"\s{2,}", " ", value.replace(banner, " ")).strip()
+
+
 def _strip_gutter_number_from_render(render: Dict[str, Any]) -> None:
     """Drop a leading line number from a render payload's first text.
 
@@ -2587,9 +2595,15 @@ def _line_number_gutter(items: List[Dict[str, Any]], page_width: float, page_hei
     return None
 
 
-def _mineru_edge_repeats(pages: List[List[Dict[str, Any]]]) -> Counter:
-    """Count how many pages carry each edge-anchored text, normalised."""
+def _mineru_edge_repeats(pages: List[List[Dict[str, Any]]]) -> Tuple[Counter, Dict[str, str]]:
+    """Count how many pages carry each edge-anchored text, and keep one sample.
+
+    The sample is what lets a banner be cut out of a body block: MinerU
+    sometimes merges the running header into the paragraph above it, and such a
+    block is mostly real text, so it cannot be dropped whole.
+    """
     keys: Counter = Counter()
+    samples: Dict[str, str] = {}
     seen: set[Tuple[int, str]] = set()
     for page_index, items in enumerate(pages, 1):
         boxes = [_bbox(item.get("bbox")) for item in items if isinstance(item, dict) and _bbox(item.get("bbox"))]
@@ -2607,8 +2621,9 @@ def _mineru_edge_repeats(pages: List[List[Dict[str, Any]]]) -> Counter:
                 key = _edge_key(text)
                 if key and (page_index, key) not in seen:
                     keys[key] += 1
+                    samples.setdefault(key, text)
                     seen.add((page_index, key))
-    return keys
+    return keys, samples
 
 
 def _is_edge_banner(box: Sequence[float], page_height: float) -> bool:
@@ -2638,7 +2653,11 @@ def mineru_to_ir(
     )
     ir_pages: List[Dict[str, Any]] = []
     suppressed: List[Dict[str, Any]] = []
-    edge_repeats = _mineru_edge_repeats(pages)
+    edge_repeats, edge_samples = _mineru_edge_repeats(pages)
+    repeated_banners = [
+        banner for key, banner in edge_samples.items()
+        if edge_repeats.get(key, 0) >= MINERU_EDGE_REPEAT_MIN_PAGES and len(banner) >= 40
+    ]
     for page_index, items in enumerate(pages, 1):
         elements: List[Dict[str, Any]] = []
         max_x = max((_bbox(item.get("bbox"))[2] for item in items if isinstance(item, dict) and _bbox(item.get("bbox"))), default=1000.0)
@@ -2660,6 +2679,15 @@ def mineru_to_ir(
                 strip_gutter = True
             else:
                 strip_gutter = False
+            # MinerU merges the next page's banner into the paragraph that runs
+            # off the bottom of this one. The block is mostly real text, so the
+            # banner has to come out of it rather than the block being dropped.
+            embedded_banners = [
+                banner for banner in repeated_banners
+                if banner in text and not text.startswith(banner)
+            ]
+            for banner in embedded_banners:
+                text = re.sub(r"\s{2,}", " ", text.replace(banner, " ")).strip()
             recovered_body = raw_kind == "page_footnote" and _recoverable_mineru_footnote(text, box, max_y)
             kind = "image" if raw_kind == "chart" else ("paragraph" if recovered_body else raw_kind)
             role = "furniture" if raw_kind in FURNITURE_TYPES and not recovered_body else "body"
@@ -2675,6 +2703,8 @@ def mineru_to_ir(
             render = copy.deepcopy(raw)
             if strip_gutter:
                 _strip_gutter_number_from_render(render)
+            for banner in embedded_banners:
+                _remove_banner_from_render(render, banner)
             element_flags = {"recovered-body"} if recovered_body else set()
             if raw_kind == "chart":
                 content = render.get("content") if isinstance(render.get("content"), dict) else {}

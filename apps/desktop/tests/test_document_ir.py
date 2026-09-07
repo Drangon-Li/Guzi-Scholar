@@ -966,6 +966,30 @@ class DocumentIRTest(unittest.TestCase):
         bodies = [e for p in ir["pages"] for e in p["elements"] if str(e.get("text") or "").startswith("Body paragraph")]
         self.assertEqual(len(bodies), 5)
 
+    def test_mineru_banner_merged_into_a_paragraph_is_cut_out(self) -> None:
+        # MinerU joins the next page's banner onto the paragraph running off the
+        # bottom of this one. The block is mostly real text, so it cannot be
+        # dropped whole -- the banner has to come out of it.
+        banner = "bioRxiv preprint doi: https://doi.org/10.1101/2024.08.01.606258; this version posted August 31, 2026."
+        body = "This improvement translated into superior practical performance: larger "
+        pages = []
+        for _ in range(4):
+            pages.append([
+                {"type": "page_header", "bbox": [80, 5, 900, 28], "content": {"paragraph_content": banner}},
+                {"type": "text", "bbox": [90, 700, 900, 900], "content": {"paragraph_content": body + banner}},
+            ])
+
+        ir = mineru_to_ir(pages, backend="fixture")
+        texts = [str(e.get("text") or "") for p in ir["pages"] for e in p["elements"]]
+        rendered = [
+            _flatten_text((e.get("render") or {}).get("content"))
+            for p in ir["pages"] for e in p["elements"]
+        ]
+
+        self.assertFalse([t for t in texts if "bioRxiv" in t], texts[:2])
+        self.assertFalse([t for t in rendered if "bioRxiv" in t], rendered[:2])
+        self.assertTrue(any(t.startswith("This improvement translated") for t in texts))
+
     def test_mineru_edge_text_on_few_pages_stays_body(self) -> None:
         # Below the repeat floor an edge-anchored line is ordinary content.
         pages = [

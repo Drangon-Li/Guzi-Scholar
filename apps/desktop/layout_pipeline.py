@@ -41,8 +41,10 @@ ALLOWED_INLINE_TAGS = (
     "i", "/i", "u", "/u",
 )
 REF_RE = re.compile(r"(?<![A-Za-z0-9])\[(\d+(?:\s*[-–]\s*\d+)?(?:\s*,\s*\d+)*)\]")
+# A panel letter is part of the reference ("Fig. 2c, upper"), and \b after the
+# digits refused to match one, so every lettered cross reference stayed plain.
 CROSS_REF_RE = re.compile(
-    r"\b(Fig(?:ure)?\.?|Table|Tab\.?|Eq(?:uation)?\.?)\s*(\d+)\b",
+    r"\b(Fig(?:ure)?\.?|Table|Tab\.?|Eq(?:uation)?\.?)\s*(\d+)([a-z]?)(?![A-Za-z0-9])",
     flags=re.IGNORECASE,
 )
 TAG_RE = re.compile(r"\\tag\s*\{([^{}]+)\}")
@@ -2220,6 +2222,7 @@ def _linkify_text(value: str, refs: Set[int], anchors: Set[str], unresolved: Lis
         def replace_cross(match: re.Match[str]) -> str:
             label = match.group(1)
             number = int(match.group(2))
+            panel = match.group(3) or ""
             prefix = label.lower().replace(".", "")
             if prefix.startswith("fig"):
                 anchor = f"fig-{number}"
@@ -2230,7 +2233,7 @@ def _linkify_text(value: str, refs: Set[int], anchors: Set[str], unresolved: Lis
             if anchor not in anchors:
                 unresolved.append(anchor)
                 return match.group(0)
-            return f'<a class="cross-reference" href="#{anchor}">{html.escape(label)} {number}</a>'
+            return f'<a class="cross-reference" href="#{anchor}">{html.escape(label)} {number}{panel}</a>'
 
         parts[index] = CROSS_REF_RE.sub(replace_cross, text)
     return "".join(parts)

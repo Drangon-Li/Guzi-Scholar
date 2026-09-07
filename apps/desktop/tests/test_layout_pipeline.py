@@ -640,6 +640,25 @@ class LayoutPipelineTest(unittest.TestCase):
         self.assertIn("Appendix A", appendix_html)
         self.assertIn("References", reference_html)
 
+    def test_cross_reference_keeps_its_panel_letter(self) -> None:
+        # "Fig. 2c" is one reference; the trailing \b used to reject the letter
+        # and leave the whole thing unlinked.
+        unresolved: list = []
+        value = _linkify_text("See Fig. 2c, upper and Fig. 3 for detail.", set(), {"fig-2", "fig-3"}, unresolved)
+        self.assertIn('href="#fig-2"', value)
+        self.assertIn(">Fig. 2c</a>", value)
+        self.assertIn('href="#fig-3"', value)
+        self.assertEqual(unresolved, [])
+
+    def test_cross_reference_does_not_swallow_a_following_word(self) -> None:
+        unresolved: list = []
+        value = _linkify_text("Fig. 2 shows the result.", set(), {"fig-2"}, unresolved)
+        self.assertIn(">Fig. 2</a>", value)
+        self.assertIn("shows the result.", value)
+        # A number glued to a longer word is not a panel letter.
+        value = _linkify_text("Fig. 2nd draft", set(), {"fig-2"}, unresolved)
+        self.assertNotIn("<a", value)
+
     def test_numbered_subsection_deepens_the_flat_extractor_level(self) -> None:
         # MinerU labels every section level 2, so 7.3.1 used to render as the
         # sibling of 7 and the outline was flat.
