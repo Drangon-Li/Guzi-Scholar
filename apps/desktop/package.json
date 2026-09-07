@@ -1,6 +1,6 @@
 {
   "name": "my-scholar",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "private": true,
   "license": "Apache-2.0",
   "description": "Clean-room local academic PDF reader",
