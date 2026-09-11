@@ -64,8 +64,10 @@
               <div id="import-queue-list" class="import-queue-list"></div>
             </section>
             <div id="upload-error" class="inline-error" role="alert" hidden></div>
-            <div id="library-columns" class="library-columns" role="row" aria-label="文献列设置"></div>
-            <div id="recent-list" class="library-list"><div class="empty-state">还没有转换任务。拖入一份 PDF 开始。</div></div>
+            <div class="library-table-scroll">
+              <div id="library-columns" class="library-columns" role="row" aria-label="文献列设置"></div>
+              <div id="recent-list" class="library-list"><div class="empty-state">还没有转换任务。拖入一份 PDF 开始。</div></div>
+            </div>
           </div>
           <section id="library-graph-surface" class="library-graph-surface" aria-label="文献关系图谱" hidden>
             <div class="graph-toolbar" aria-label="图谱显示设置">
@@ -105,7 +107,7 @@
     <section id="views-view" class="view" hidden>
       <div class="views-layout">
         <aside class="views-sidebar"><button id="views-back-button" class="views-back-button" type="button">‹ 返回文献库</button><div class="views-sidebar-heading"><div><div class="eyebrow">SAVED VIEWS</div><h2>视图管理</h2></div><button id="create-view-button" class="tiny-icon-button" type="button" title="新建视图">＋</button></div><div id="saved-views-list" class="saved-views-list"></div><div class="views-sidebar-divider"></div><div class="property-heading"><strong>属性</strong><button id="create-property-button" class="tiny-button" type="button">新增属性</button></div><div id="properties-list" class="properties-list"></div></aside>
-        <main class="view-editor"><div class="library-main-heading"><div><div class="eyebrow">FILTERED READING SET</div><h1 id="view-editor-title">全部文献</h1><p class="library-subtitle">视图用于呈现文献分类，不会改变文献库导航。</p></div></div><section class="view-results-card"><div class="view-results-heading"><strong id="view-results-label">当前视图文献</strong><span id="view-results-count"></span></div><div id="view-results" class="library-list"><div class="empty-state">选择一个视图开始。</div></div></section><form id="view-form" class="view-form"><label>视图名称<input id="view-name" type="text" maxlength="80" placeholder="例如：待读 · 视觉语言"></label><div class="filter-builder"><div class="filter-builder-heading"><strong>筛选条件</strong><button id="add-filter-button" class="tiny-button" type="button">添加条件</button></div><div id="view-filters" class="view-filters"><div class="empty-state">没有筛选条件，视图将显示全部文献。</div></div></div><div class="view-form-actions"><button id="save-view-button" class="primary-button compact-button" type="submit">保存视图</button><button id="delete-view-button" class="secondary-button" type="button">删除视图</button><span id="view-status" class="panel-status" hidden></span></div></form></main>
+        <main class="view-editor"><div class="library-main-heading"><div><div class="eyebrow">FILTERED READING SET</div><h1 id="view-editor-title">全部文献</h1><p class="library-subtitle">视图用于呈现文献分类，不会改变文献库导航。</p></div></div><section class="view-results-card"><div class="view-results-heading"><strong id="view-results-label">当前视图文献</strong><span id="view-results-count"></span></div><div class="library-table-scroll"><div id="view-results" class="library-list"><div class="empty-state">选择一个视图开始。</div></div></div></section><form id="view-form" class="view-form"><label>视图名称<input id="view-name" type="text" maxlength="80" placeholder="例如：待读 · 视觉语言"></label><div class="filter-builder"><div class="filter-builder-heading"><strong>筛选条件</strong><button id="add-filter-button" class="tiny-button" type="button">添加条件</button></div><div id="view-filters" class="view-filters"><div class="empty-state">没有筛选条件，视图将显示全部文献。</div></div></div><div class="view-form-actions"><button id="save-view-button" class="primary-button compact-button" type="submit">保存视图</button><button id="delete-view-button" class="secondary-button" type="button">删除视图</button><span id="view-status" class="panel-status" hidden></span></div></form></main>
       </div>
     </section>
 
