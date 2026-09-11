@@ -18,6 +18,7 @@
   --on-accent: #fff;
   --green: #299a73;
   --yellow: #f1a340;
+  --blue: #2f7fc1;
   --highlight-orange: #f59e0b;
   --user-highlight: #f59e0b;
   --highlight-goal: #2f9d72;
@@ -556,6 +557,7 @@ body.resizing-reader-assistant * { cursor: col-resize !important; }
 .row-status::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--text-tertiary); vertical-align: 1px; }
 .row-status[data-status="阅读中"]::before { background: var(--yellow); }
 .row-status[data-status="已完成"]::before { background: var(--green); }
+.row-status[data-status="计划中"]::before { background: var(--blue); }
 .row-venue,.row-plain { overflow: hidden; color: var(--text-secondary); font-size: 12.5px; text-overflow: ellipsis; white-space: nowrap; }
 /* Three columns need room. Below that the details panel is not dropped,
    it becomes the bottom sheet phones use — otherwise a 1040px window

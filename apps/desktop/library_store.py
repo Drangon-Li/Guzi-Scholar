@@ -20,9 +20,9 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from bibliography import BIBLIOGRAPHIC_FIELDS, INTEGER_FIELDS, LIST_FIELDS, empty_bibliographic_metadata
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SYSTEM_FOLDER_IDS = {"system-all", "system-unfiled", "system-trash"}
-READING_STATUSES = ("未开始", "阅读中", "已完成")
+READING_STATUSES = ("未开始", "计划中", "阅读中", "已完成")
 PROPERTY_TYPES = {"select", "multi-select", "rating", "text"}
 DEFAULT_GROUP_BY = "reading_status"
 RETIRED_DISPLAY_COLUMN_IDS = {"status"}
@@ -79,6 +79,7 @@ def _default_state() -> Dict[str, Any]:
         "views": [
             {"id": "view-all", "name": "全部文献", "filters": [], "sort_by": "updated_at", "sort_direction": "desc", "system": True, "created_at": now},
             {"id": "view-unread", "name": "未开始", "filters": [{"field": "reading_status", "operator": "equals", "value": "未开始"}], "sort_by": "updated_at", "sort_direction": "desc", "system": True, "created_at": now},
+            {"id": "view-planned", "name": "计划中", "filters": [{"field": "reading_status", "operator": "equals", "value": "计划中"}], "sort_by": "updated_at", "sort_direction": "desc", "system": True, "created_at": now},
             {"id": "view-reading", "name": "阅读中", "filters": [{"field": "reading_status", "operator": "equals", "value": "阅读中"}], "sort_by": "updated_at", "sort_direction": "desc", "system": True, "created_at": now},
             {"id": "view-done", "name": "已完成", "filters": [{"field": "reading_status", "operator": "equals", "value": "已完成"}], "sort_by": "updated_at", "sort_direction": "desc", "system": True, "created_at": now},
             {"id": "view-important", "name": "高重要度", "filters": [{"field": "importance", "operator": "gte", "value": 4}], "sort_by": "importance", "sort_direction": "desc", "system": True, "created_at": now},
@@ -253,6 +254,21 @@ class LibraryStore:
         for required in _default_state()["properties"]:
             if required["id"] not in property_ids:
                 state["properties"].append(required)
+        # The status vocabulary belongs to the code, not to the persisted
+        # record: a library saved before a status existed must still offer it.
+        for prop in state["properties"]:
+            if isinstance(prop, dict) and prop.get("id") == "reading_status":
+                prop["options"] = list(READING_STATUSES)
+        default_views = _default_state()["views"]
+        view_ids = [str(item.get("id")) for item in state["views"] if isinstance(item, dict)]
+        for index, required in enumerate(default_views):
+            if required["id"] in view_ids:
+                continue
+            # Slot a newly introduced system view next to its neighbours so the
+            # sidebar keeps the reading order instead of appending it at the end.
+            anchor = next((view_ids.index(previous["id"]) for previous in reversed(default_views[:index]) if previous["id"] in view_ids), -1)
+            state["views"].insert(anchor + 1, copy.deepcopy(required))
+            view_ids.insert(anchor + 1, required["id"])
         definitions = _display_column_definitions(state)
         default_columns = _default_display()["columns"]
         columns = state.setdefault("display", {}).setdefault("columns", [])
@@ -845,7 +861,7 @@ class LibraryStore:
         if prop.get("id") == "reading_status":
             value = str(value or "未开始")
             if value not in READING_STATUSES:
-                raise LibraryValidationError("阅读状态必须是未开始、阅读中或已完成。")
+                raise LibraryValidationError(f"阅读状态必须是{'、'.join(READING_STATUSES[:-1])}或{READING_STATUSES[-1]}。")
         if prop_type == "select":
             value = str(value or "")
             options = _as_list(prop.get("options"))

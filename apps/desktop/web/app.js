@@ -993,6 +993,13 @@
   const systemLibraryColumnIds = new Set(['name', 'title', 'research_topic', 'importance', 'reading_status', 'venue']);
   function libraryState() { return state.library || { folders: [], properties: [], items: {}, views: [], folder_counts: {} }; }
   function libraryProperties() { return (libraryState().properties || []).filter((item) => item && !item.hidden).sort((a, b) => (a.order || 0) - (b.order || 0)); }
+  // The status vocabulary is served by the library store; the literal list only
+  // covers a render before the first snapshot arrives.
+  function readingStatusOptions() {
+    const options = (libraryState().properties || []).find((property) => property?.id === 'reading_status')?.options;
+    return Array.isArray(options) && options.length ? options.map(String) : ['未开始', '计划中', '阅读中', '已完成'];
+  }
+  const PRE_READING_STATUSES = new Set(['未开始', '计划中']);
   function allLibraryProperties() { return (libraryState().properties || []).filter((item) => item).sort((a, b) => (a.order || 0) - (b.order || 0)); }
   function libraryDisplayColumns() {
     const library = libraryState();
@@ -2068,7 +2075,7 @@
       <div class="details-actions">${actions}</div>
       <dl class="details-fields">
         ${field('重要程度', `<span class="details-stars" role="radiogroup" aria-label="重要程度">${Array.from({ length: 5 }, (_, index) => { const score = index + 1; return `<button type="button" class="${score <= rating ? 'is-filled' : ''}" data-details-importance="${score}" role="radio" aria-checked="${score === rating ? 'true' : 'false'}" aria-label="设为 ${score} 星">★</button>`; }).join('')}</span>`)}
-        ${field('阅读状态', `<span class="details-status" role="radiogroup" aria-label="阅读状态">${['未开始', '阅读中', '已完成'].map((option) => `<button type="button" class="${option === currentStatus ? 'active' : ''}" data-details-status="${escapeHTML(option)}" role="radio" aria-checked="${option === currentStatus ? 'true' : 'false'}">${option}</button>`).join('')}</span>`)}
+        ${field('阅读状态', `<span class="details-status" role="radiogroup" aria-label="阅读状态">${readingStatusOptions().map((option) => `<button type="button" class="${option === currentStatus ? 'active' : ''}" data-details-status="${escapeHTML(option)}" role="radio" aria-checked="${option === currentStatus ? 'true' : 'false'}">${option}</button>`).join('')}</span>`)}
         ${field('研究主题', `<span class="details-edit-value">${topics.length ? topics.map((topic) => `<span class="tag-chip">${escapeHTML(topic)}</span>`).join('') : '<span class="property-placeholder">未设置</span>'}${editButton('research_topic')}</span>`)}
         ${field('接收/来源', `<span class="details-edit-value"><span>${escapeHTML(itemVenue(entry) || '未设置')}</span>${editButton('venue')}</span>`)}
         ${customProperties.map((property) => { const raw = values[property.id]; const has = Array.isArray(raw) ? raw.length : raw != null && raw !== ''; return field(property.label || property.id, `<span class="details-edit-value"><span>${has ? escapeHTML(formatPropertyValue(property, raw)) : '<span class="property-placeholder">未设置</span>'}</span>${editButton(property.id)}</span>`); }).join('')}
@@ -5139,7 +5146,7 @@
 
   async function markReadingStarted(jobId) {
     const entry = libraryEntry(jobId);
-    if (!entry || entry.item?.deleted_at || itemValues(entry).reading_status !== '未开始') return;
+    if (!entry || entry.item?.deleted_at || !PRE_READING_STATUSES.has(String(itemValues(entry).reading_status || '未开始'))) return;
     try {
       const payload = await api(`/api/library/items/${jobId}`, jsonOptions({ values: { reading_status: '阅读中' } }, 'PATCH'));
       if (payload.library) { state.library = payload.library; renderLibrary(); renderViews(); }

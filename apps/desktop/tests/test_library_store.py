@@ -10,7 +10,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from library_store import DEFAULT_GROUP_BY, LibraryStore, LibraryValidationError, SCHEMA_VERSION  # noqa: E402
+from library_store import DEFAULT_GROUP_BY, READING_STATUSES, LibraryStore, LibraryValidationError, SCHEMA_VERSION  # noqa: E402
 
 
 class LibraryStoreTest(unittest.TestCase):
@@ -268,6 +268,30 @@ class LibraryStoreTest(unittest.TestCase):
         with self.assertRaisesRegex(LibraryValidationError, "未知列"):
             self.store.update_display({"columns": [{"id": "column-does-not-exist", "visible": True}]})
         self.assertEqual(self.store.display(), updated)
+
+    def test_legacy_library_gains_planned_status_option_and_system_view(self) -> None:
+        self.store.save()
+        legacy = json.loads(self.store.path.read_text(encoding="utf-8"))
+        legacy["version"] = 4
+        for prop in legacy["properties"]:
+            if prop["id"] == "reading_status":
+                prop["options"] = ["未开始", "阅读中", "已完成"]
+        legacy["views"] = [view for view in legacy["views"] if view["id"] != "view-planned"]
+        self.store.path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+
+        reloaded = LibraryStore(Path(self.temp.name))
+
+        status = next(prop for prop in reloaded.state["properties"] if prop["id"] == "reading_status")
+        self.assertEqual(status["options"], list(READING_STATUSES))
+        view_ids = [view["id"] for view in reloaded.state["views"]]
+        self.assertEqual(view_ids.index("view-planned"), view_ids.index("view-unread") + 1)
+        self.assertTrue(next(view for view in reloaded.state["views"] if view["id"] == "view-planned")["system"])
+        persisted = json.loads(reloaded.path.read_text(encoding="utf-8"))
+        self.assertEqual(persisted["version"], SCHEMA_VERSION)
+        self.assertIn("view-planned", [view["id"] for view in persisted["views"]])
+        reloaded.sync_jobs(self.jobs)
+        item = reloaded.update_item("a" * 16, {"values": {"reading_status": "计划中"}})
+        self.assertEqual(item["values"]["reading_status"], "计划中")
 
 
 if __name__ == "__main__":
