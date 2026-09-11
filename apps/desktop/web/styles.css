@@ -1192,7 +1192,7 @@ body.image-lightbox-open { overflow: hidden; }
 .library-column-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .column-resizer { position: absolute; z-index: 2; top: -7px; right: -7px; bottom: -7px; width: 14px; padding: 0; border: 0; border-right: 2px solid transparent; background: transparent; cursor: col-resize; }
 .column-resizer:hover,.column-resizer:focus-visible,.column-resizer.is-active { border-right-color: var(--accent); outline: 0; }
-.library-actions-header { min-width: 136px; }
+.library-actions-header { min-width: 40px; }
 body.resizing-library-column, body.resizing-library-column * { cursor: col-resize !important; }
 .library-drag-ghost { position: fixed; z-index: 200; max-width: 280px; padding: 8px 11px; border: 1px solid var(--accent); border-radius: 8px; background: var(--paper); box-shadow: 0 12px 28px rgba(42,31,20,.22); color: var(--ink); font-size: 12px; pointer-events: none; transform: translateZ(0); }
 .library-row.is-dragging { opacity: .48; outline: 2px dashed var(--accent); outline-offset: -3px; }
