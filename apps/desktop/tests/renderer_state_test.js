@@ -41,6 +41,17 @@ async function main() {
   const withReadingLocations = new RendererStateStore(directory);
   assert.strictEqual(withReadingLocations.get('my-scholar-reading-locations-v1'), readingLocations, 'reading locations must survive store recreation');
   assert.strictEqual((await withReadingLocations.loadAll())['my-scholar-reading-locations-v1'], readingLocations);
+  // Every key the renderer persists has to be on the allowlist: a key that is
+  // not rejects its write, and the failed write then blocks a safe quit.
+  const rendererKeys = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8')
+    .concat(fs.readFileSync(path.join(__dirname, '..', 'web', 'onboarding.js'), 'utf8'))
+    .matchAll(/StorageKey = '(my-scholar-[^']+)'/gu);
+  for (const [, key] of rendererKeys) {
+    await afterRestart.set(key, `probe:${key}`);
+    assert.strictEqual(new RendererStateStore(directory).get(key), `probe:${key}`, `${key} must be an accepted renderer state key`);
+    await afterRestart.remove(key);
+  }
+
   const legacyChatKey = 'my-scholar-chat:0123456789abcdef';
   const chatV2Key = 'my-scholar-chat-v2:0123456789abcdef';
   const legacyChat = JSON.stringify([{ role: 'user', content: 'legacy question' }]);
