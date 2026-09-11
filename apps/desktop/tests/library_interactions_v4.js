@@ -666,9 +666,14 @@ async function waitForLibrary(page) {
     await cellEditor.waitFor({ state: 'visible' });
     await page.keyboard.press('Escape');
     if (!(await cellEditor.isHidden())) throw new Error('Esc 没有关闭快速编辑。');
+    // A value cell covers most of a row, so double-clicking one still opens
+    // the paper; the quick editor gives way rather than swallowing it.
     await valueCell(firstId, 'venue').dblclick();
-    if (await page.locator('#reader-view.active-view').count()) throw new Error('双击值单元格错误地打开了阅读器。');
-    await page.keyboard.press('Escape');
+    await page.locator('#reader-view.active-view').waitFor();
+    if (!(await cellEditor.isHidden())) throw new Error('打开阅读器后快速编辑没有关闭。');
+    await page.locator('.nav-button[data-view="library-view"]').click();
+    await page.locator('#library-view.active-view').waitFor();
+    await waitForLibrary(page);
 
     console.log(JSON.stringify({
       singleClickSelect: true,
