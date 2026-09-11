@@ -1054,14 +1054,26 @@
     const value = Number(column?.width);
     return Number.isFinite(value) ? Math.max(libraryColumnMinWidth(column), Math.min(520, Math.round(value))) : null;
   }
+  // One table of minimum widths and growth factors feeds both the grid
+  // template and the row's minimum width, so a row is always at least as
+  // wide as its tracks: a fixed-width column set that outgrows the default
+  // minimum used to spill past the row box and lose its background.
+  const libraryColumnTracks = { name: [150, '1.65fr'], title: [140, '1.35fr'], research_topic: [92, '1.05fr'], importance: [86, '.8fr'], reading_status: [84, '.82fr'], venue: [96, '1.08fr'] };
+  const LIBRARY_ACTIONS_TRACK = 40;
+  const LIBRARY_COLUMN_GAP = 8;
+  const LIBRARY_ROW_INSET = 24;
+  function libraryColumnTrack(column) {
+    const fixed = libraryColumnWidth(column);
+    if (fixed) return { min: fixed, track: `${fixed}px` };
+    const [min, grow] = libraryColumnTracks[column?.id] || [88, '1fr'];
+    return { min, track: `minmax(${min}px,${grow})` };
+  }
   function libraryGridTemplate(columns) {
-    const widths = columns.map((column) => {
-      const fixed = libraryColumnWidth(column);
-      if (fixed) return `${fixed}px`;
-      return column.id === 'name' ? 'minmax(150px,1.65fr)' : column.id === 'title' ? 'minmax(140px,1.35fr)' : column.id === 'research_topic' ? 'minmax(92px,1.05fr)' : column.id === 'importance' ? 'minmax(86px,.8fr)' : column.id === 'reading_status' ? 'minmax(84px,.82fr)' : column.id === 'venue' ? 'minmax(96px,1.08fr)' : 'minmax(88px,1fr)';
-    });
-    widths.push('minmax(40px,auto)');
-    return widths.join(' ');
+    return [...columns.map((column) => libraryColumnTrack(column).track), `minmax(${LIBRARY_ACTIONS_TRACK}px,auto)`].join(' ');
+  }
+  function libraryTableMinWidth(columns) {
+    const tracks = columns.reduce((sum, column) => sum + libraryColumnTrack(column).min, LIBRARY_ACTIONS_TRACK);
+    return `${tracks + columns.length * LIBRARY_COLUMN_GAP + LIBRARY_ROW_INSET}px`;
   }
   function libraryItemEntries() {
     // The library snapshot intentionally carries a compact job record for
@@ -1687,7 +1699,13 @@
   }
   function applyLibraryGridTemplate() {
     const template = libraryGridTemplate(visibleLibraryColumns());
-    ['#library-columns', '#recent-list', '#view-results'].forEach((selector) => $(selector)?.style.setProperty('--library-grid-template', template));
+    const minWidth = libraryTableMinWidth(visibleLibraryColumns());
+    ['#library-columns', '#recent-list', '#view-results'].forEach((selector) => {
+      const node = $(selector);
+      if (!node) return;
+      node.style.setProperty('--library-grid-template', template);
+      node.style.setProperty('--library-table-min-width', minWidth);
+    });
     $$('.library-row').forEach((row) => row.style.setProperty('--library-grid-template', template));
     syncColumnResizerARIA();
   }
@@ -1830,11 +1848,13 @@
     const header = $('#library-columns');
     if (header) {
       header.style.setProperty('--library-grid-template', template);
+      header.style.setProperty('--library-table-min-width', libraryTableMinWidth(columns));
       header.innerHTML = `${columns.map((column) => `<span class="library-column-header" data-column-id="${escapeHTML(column.id)}" role="columnheader"><span class="library-column-label">${escapeHTML(libraryColumnLabel(column))}</span><button class="column-resizer" data-column-resizer="${escapeHTML(column.id)}" type="button" role="separator" aria-orientation="vertical" aria-valuemin="${libraryColumnMinWidth(column)}" aria-valuemax="520" aria-valuenow="${libraryColumnWidth(column) || libraryColumnMinWidth(column)}" aria-label="调整${escapeHTML(libraryColumnLabel(column))}列宽"></button></span>`).join('')}<span class="library-actions-header" aria-hidden="true"></span>`;
       syncColumnResizerARIA();
     }
     if (!entries.length) { clearLibrarySelection(); $('#recent-list').innerHTML = `<div class="empty-state">${state.activeFolderId === 'system-trash' ? '回收站为空。' : '没有匹配的文献。拖入一份 PDF 开始。'}</div>`; return; }
     $('#recent-list').style.setProperty('--library-grid-template', template);
+    $('#recent-list').style.setProperty('--library-table-min-width', libraryTableMinWidth(columns));
     $('#recent-list').innerHTML = renderLibraryContent(entries);
     syncLibrarySelection();
     renderLibraryDetails();
@@ -3075,6 +3095,7 @@
     const count = $('#view-results-count'); if (count) count.textContent = `${entries.length} 篇`;
     const label = $('#view-results-label'); if (label) label.textContent = view?.name || '当前视图文献';
     target.style.setProperty('--library-grid-template', template);
+    target.style.setProperty('--library-table-min-width', libraryTableMinWidth(columns));
     target.innerHTML = entries.length ? renderLibraryContent(entries) : '<div class="empty-state">这个视图暂时没有匹配的文献。</div>';
     applyLibraryGridTemplate();
   }
