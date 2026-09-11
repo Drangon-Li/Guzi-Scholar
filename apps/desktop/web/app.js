@@ -370,6 +370,23 @@
     node.hidden = !message;
   }
 
+  // The outgoing view stays painted for one short exit animation, laid over
+  // the incoming one; the new view is active synchronously, so callers and
+  // tests that look for `.active-view` right away still find it.
+  function retireView(view) {
+    if (reducedMotionQuery.matches) {
+      view.hidden = true;
+      return;
+    }
+    view.classList.add('is-leaving');
+    const finish = () => {
+      if (!view.classList.contains('is-leaving')) return;
+      view.classList.remove('is-leaving');
+      if (!view.classList.contains('active-view')) view.hidden = true;
+    };
+    view.addEventListener('animationend', finish, { once: true });
+    window.setTimeout(finish, 240);
+  }
   function switchView(viewId, { enteringDocumentId = null } = {}) {
     if (viewId !== 'library-view' && state.groupingMenuOpen) setGroupingMenuOpen(false);
     if (viewId !== 'reader-view') closeChatSessionMenu();
@@ -391,7 +408,18 @@
     if (viewId !== 'reader-view' && state.activeJob) {
       flushPendingArticleNotes(state.activeJob.job_id);
     }
-    $$('.view').forEach((view) => { view.hidden = view.id !== viewId; view.classList.toggle('active-view', view.id === viewId); });
+    $$('.view').forEach((view) => {
+      const active = view.id === viewId;
+      if (active) {
+        view.classList.remove('is-leaving');
+        view.hidden = false;
+      } else if (view.classList.contains('active-view')) {
+        retireView(view);
+      } else if (!view.classList.contains('is-leaving')) {
+        view.hidden = true;
+      }
+      view.classList.toggle('active-view', active);
+    });
     if (viewId !== 'reader-view') state.primaryView = viewId;
     // The document tab is the active surface while reading. Keep the library
     // or saved-view context in state for returning there, but do not paint a
@@ -1749,6 +1777,7 @@
     select.value = state.libraryStatusFilter;
     select.classList.toggle('is-filtering', Boolean(state.libraryStatusFilter));
   }
+  let renderedLibraryMode = null;
   function renderLibrary(jobs = state.jobs) {
     const library = libraryState();
     const graphMode = state.libraryMode === 'graph';
@@ -1758,6 +1787,12 @@
     $('#library-graph-actions').hidden = !graphMode;
     $('#library-list-surface').hidden = graphMode;
     $('#library-graph-surface').hidden = !graphMode;
+    if (renderedLibraryMode !== null && renderedLibraryMode !== state.libraryMode && !reducedMotionQuery.matches) {
+      const surface = $(graphMode ? '#library-graph-surface' : '#library-list-surface');
+      surface.classList.add('library-surface-entering');
+      surface.addEventListener('animationend', () => surface.classList.remove('library-surface-entering'), { once: true });
+    }
+    renderedLibraryMode = state.libraryMode;
     $('#library-count').textContent = String(Object.keys(library.items || {}).filter((id) => !library.items[id]?.deleted_at).length || jobs.length);
     renderFolderTree(); updateFolderCounts(); renderSidebarViews();
     $$('[data-library-folder]').forEach((button) => button.classList.toggle('active', !graphMode && button.dataset.libraryFolder === state.activeFolderId));

@@ -84,7 +84,7 @@ button:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 45%, 
 .nav-count { display: inline-flex; min-width: 17px; height: 17px; align-items: center; justify-content: center; margin-left: 4px; padding: 0 5px; border-radius: 5px; background: var(--soft); color: var(--text-secondary); font-size: 11px; }
 .header-spacer { min-width: 0; flex: 1 1 auto; }
 .app-header.has-document-tabs .header-spacer { flex: 0 0 0; width: 0; }
-.app-shell { max-width: 1760px; min-height: calc(100vh - 106px); margin: 0 auto; padding: 24px 22px 65px; }
+.app-shell { position: relative; max-width: 1760px; min-height: calc(100vh - 106px); margin: 0 auto; padding: 24px 22px 65px; }
 .view { display: none; }
 .view.active-view { display: block; }
 #reader-view.active-view { animation: none; }
@@ -541,7 +541,13 @@ body.resizing-reader-assistant * { cursor: col-resize !important; }
 /* Library v2: a quiet Zotero-like table with folders and saved views. */
 .nav-settings { margin-left: auto; }
 .library-layout,.views-layout { display: grid; min-height: calc(100vh - 155px); grid-template-columns: 250px minmax(0,1fr); gap: 22px; }
-.library-layout { grid-template-columns: 250px minmax(0,1fr) 296px; gap: 0 20px; }
+.library-layout { grid-template-columns: 250px minmax(0,1fr) 296px; gap: 0; }
+/* The dividers sit on the main column, which spans the whole row, so they
+   read the same in list and graph mode instead of stopping wherever the
+   sticky sidebar or details panel happens to end. */
+.library-layout > .library-main { padding-inline: 20px; border-left: 1px solid var(--line); border-right: 1px solid var(--line); }
+.library-layout > .library-sidebar { border-right: 0; }
+.library-layout > .library-details { border-left: 0; }
 .library-details { position: sticky; top: 60px; align-self: start; display: flex; flex-direction: column; max-height: calc(100vh - 60px); overflow-y: auto; padding: 22px 18px 26px 20px; border-left: 1px solid var(--line); font-size: 12.5px; -webkit-user-select: text; user-select: text; }
 .library-details * { -webkit-user-select: text; user-select: text; }
 .library-details :is(button,button *,select,select *) { -webkit-user-select: none; user-select: none; }
@@ -582,7 +588,7 @@ body.resizing-reader-assistant * { cursor: col-resize !important; }
 /* Three columns need room. Below that the details panel is not dropped,
    it becomes the bottom sheet phones use — otherwise a 1040px window
    (the desktop minimum) would have no way to reach a paper's fields. */
-@media (max-width: 1119px) { .library-layout { grid-template-columns: 250px minmax(0,1fr); } }
+@media (max-width: 1119px) { .library-layout { grid-template-columns: 250px minmax(0,1fr); } .library-layout > .library-main { border-right: 0; } }
 @media (min-width: 861px) and (max-width: 1119px) { .library-layout { grid-template-columns: 210px minmax(0,1fr); } }
 .library-sidebar,.views-sidebar { min-width: 0; padding: 20px 14px; border-right: 1px solid var(--line); }
 .library-sidebar { position: sticky; top: 84px; align-self: start; max-height: calc(100vh - 110px); overflow: auto; padding-inline: 6px; }
@@ -673,7 +679,7 @@ body.library-marquee-selecting { -webkit-user-select: none; user-select: none; }
   .library-main-actions { width: 100%; flex-wrap: nowrap; justify-content: flex-start; }
 }
 @media (max-width: 980px) {
-  .library-layout,.views-layout { grid-template-columns: 210px minmax(0,1fr); gap: 16px; }.library-main-actions .search-box { width: min(250px,100%); }.library-columns { display: none; }.library-row { min-width: 640px; }
+  .library-layout,.views-layout { grid-template-columns: 210px minmax(0,1fr); gap: 16px; }.library-layout { gap: 0; }.library-main-actions .search-box { width: min(250px,100%); }.library-columns { display: none; }.library-row { min-width: 640px; }
 }
 @media (max-width: 700px) {
   .library-layout,.views-layout { display: block; }.library-sidebar,.views-sidebar { position: static; max-height: none; border-right: 0; border-bottom: 1px solid var(--line); }.library-sidebar { padding-bottom: 12px; }.library-main,.view-editor { padding-top: 18px; }.library-main-heading { align-items: flex-start; flex-direction: column; }.library-main-actions { width: 100%; justify-content: flex-start; }.library-main-actions .search-box { flex: 1; width: auto; }.folder-actions { opacity: 1; }.views-sidebar { margin-bottom: 4px; }.filter-row { grid-template-columns: 1fr 1fr; }.filter-row input { grid-column: 1 / -1; }.filter-row button { grid-column: 2; justify-self: end; width: 30px; }.view-form-actions { flex-wrap: wrap; }
@@ -1219,6 +1225,13 @@ body.resizing-library-column, body.resizing-library-column * { cursor: col-resiz
 
 /* Motion follows one restrained paper-lift gesture across app surfaces. */
 .view.active-view { animation: scholar-view-enter var(--motion-page) var(--motion-ease-out) backwards; }
+/* The outgoing view keeps painting for one short exit, laid over the
+   incoming one, so a page change dissolves instead of cutting. */
+.view.is-leaving { position: absolute; z-index: 1; top: 24px; right: 22px; left: 22px; display: block; pointer-events: none; animation: scholar-view-exit var(--motion-fast) var(--motion-ease-exit) both; }
+body.reader-mode .view.is-leaving { top: 0; right: 0; left: 0; }
+/* Switching the library between its list and its graph slides the new
+   surface in the way a settings pane does. */
+.library-surface-entering { animation: scholar-panel-enter var(--motion-panel) var(--motion-ease-out) both; }
 /* Switching a settings category slides the active card in like a pane change
    in System Settings. */
 .settings-section.is-active { animation: scholar-panel-enter var(--motion-panel) var(--motion-ease-out) backwards; }
@@ -1250,6 +1263,10 @@ body.resizing-library-column, body.resizing-library-column * { cursor: col-resiz
 @keyframes scholar-view-enter {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
+}
+@keyframes scholar-view-exit {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-6px); }
 }
 @keyframes scholar-panel-enter {
   from { opacity: 0; transform: translateX(6px); }
@@ -1381,6 +1398,7 @@ body.resizing-library-column, body.resizing-library-column * { cursor: col-resiz
 
   /* Library: one column; the sidebar slides over content on demand. */
   .library-layout { position: relative; display: block; min-height: 0; }
+  .library-layout > .library-main { padding-inline: 0; border-left: 0; border-right: 0; }
   .library-sidebar {
     position: fixed; z-index: 60; top: 60px; bottom: 0; left: 0;
     width: min(300px, 82vw); max-height: none; padding: 16px 14px 24px;
