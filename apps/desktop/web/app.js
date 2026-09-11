@@ -389,6 +389,7 @@
   }
   function switchView(viewId, { enteringDocumentId = null } = {}) {
     if (viewId !== 'library-view' && state.groupingMenuOpen) setGroupingMenuOpen(false);
+    if (viewId !== 'library-view' && viewId !== 'views-view') closeLibraryCellEditor();
     if (viewId !== 'reader-view') closeChatSessionMenu();
     if (viewId !== 'reader-view') closeTranslationScopeMenu();
     if (viewId !== 'reader-view') closeReaderSearch({ reset: true });
@@ -1648,32 +1649,184 @@
     syncGraphSelectionDetails();
   }
 
+  // Inline cell editing. The list used to be read-only data with every change
+  // routed through the details panel; a quick change is faster where the value
+  // is read. One popover serves every editable cell, shaped by the property's
+  // own type.
+  const libraryCellEditor = { jobId: '', propertyId: '', anchor: null };
+  const CELL_EDITOR_WIDTH = 248;
+  function libraryCellCurrent(entry, property) {
+    const values = itemValues(entry);
+    if (property.type === 'multi-select') return Array.isArray(values[property.id]) ? [...values[property.id]] : [];
+    if (property.type === 'rating') return Math.max(0, Math.min(Number(property.max) || 5, Number(values[property.id]) || 0));
+    // A venue nobody edited by hand is still shown, derived from the metadata;
+    // the editor opens on what the row displays.
+    if (property.id === 'venue') return String(values.venue || itemVenue(entry) || '');
+    return values[property.id] == null ? '' : String(values[property.id]);
+  }
+  function libraryCellEditorHTML(property, current) {
+    const label = String(property.label || property.id);
+    const heading = `<div class="cell-editor-title">${escapeHTML(label)}</div>`;
+    if (property.type === 'rating') {
+      const max = Math.max(1, Math.min(10, Number(property.max) || 5));
+      return `${heading}<div class="cell-editor-stars" role="radiogroup" aria-label="${escapeHTML(label)}">${Array.from({ length: max }, (_, index) => { const score = index + 1; return `<button type="button" class="${score <= current ? 'is-filled' : ''}" data-cell-star="${score}" role="radio" aria-checked="${score === current ? 'true' : 'false'}" aria-label="${score} 星">★</button>`; }).join('')}</div><div class="cell-editor-hint">再次点击当前星级可清空。</div>`;
+    }
+    if (property.type === 'select') {
+      const options = property.id === 'reading_status' ? readingStatusOptions() : (property.options || []);
+      const clearable = property.id !== 'reading_status';
+      return `${heading}<div class="cell-editor-options" role="listbox" aria-label="${escapeHTML(label)}">${options.map((option) => `<button type="button" class="cell-editor-option" role="option" aria-selected="${option === current ? 'true' : 'false'}" data-cell-option="${escapeHTML(option)}">${escapeHTML(option)}</button>`).join('')}${clearable ? `<button type="button" class="cell-editor-option" role="option" aria-selected="${current ? 'false' : 'true'}" data-cell-option="">清除</button>` : ''}</div>`;
+    }
+    if (property.type === 'multi-select') {
+      const choices = [...new Set([...(property.options || []), ...current])];
+      return `${heading}<div class="cell-editor-tags">${choices.map((choice) => `<button type="button" class="cell-editor-tag" data-cell-tag="${escapeHTML(choice)}" aria-pressed="${current.includes(choice) ? 'true' : 'false'}">${escapeHTML(choice)}</button>`).join('')}</div><input class="cell-editor-input" data-cell-input type="text" placeholder="输入后回车新增" aria-label="新增${escapeHTML(label)}"><div class="cell-editor-actions"><button type="button" class="tiny-button" data-cell-cancel>取消</button><button type="button" class="primary-button compact-button" data-cell-save>完成</button></div>`;
+    }
+    return `${heading}<input class="cell-editor-input" data-cell-input type="text" maxlength="1000" value="${escapeHTML(current)}" aria-label="${escapeHTML(label)}"><div class="cell-editor-actions"><button type="button" class="tiny-button" data-cell-cancel>取消</button><button type="button" class="primary-button compact-button" data-cell-save>保存</button></div>`;
+  }
+  function closeLibraryCellEditor({ restoreFocus = false } = {}) {
+    const popover = $('#cell-editor-popover');
+    if (!popover || popover.hidden) return false;
+    const anchor = libraryCellEditor.anchor;
+    popover.hidden = true;
+    popover.replaceChildren();
+    ['left', 'top', 'width', 'max-height'].forEach((property) => popover.style.removeProperty(property));
+    delete popover.dataset.placement;
+    libraryCellEditor.jobId = '';
+    libraryCellEditor.propertyId = '';
+    libraryCellEditor.anchor = null;
+    if (restoreFocus && anchor?.isConnected) anchor.focus({ preventScroll: true });
+    return true;
+  }
+  function openLibraryCellEditor(cell) {
+    const popover = $('#cell-editor-popover');
+    const jobId = cell?.dataset.cellJob || '';
+    const propertyId = cell?.dataset.cellEdit || '';
+    const entry = libraryEntryById(jobId);
+    const property = propertyById(propertyId);
+    const reopening = Boolean(popover && !popover.hidden && libraryCellEditor.anchor === cell);
+    closeLibraryCellEditor();
+    if (reopening || !popover || !entry || !property) return;
+    libraryCellEditor.jobId = jobId;
+    libraryCellEditor.propertyId = propertyId;
+    libraryCellEditor.anchor = cell;
+    popover.innerHTML = libraryCellEditorHTML(property, libraryCellCurrent(entry, property));
+    popover.hidden = false;
+    positionViewportMenu(popover, cell.getBoundingClientRect(), { width: CELL_EDITOR_WIDTH });
+    window.requestAnimationFrame(() => {
+      (popover.querySelector('[data-cell-input]') || popover.querySelector('[aria-selected="true"],[aria-checked="true"],button'))?.focus({ preventScroll: true });
+    });
+  }
+  function libraryCellEditorValue(popover, property) {
+    if (property.type !== 'multi-select') return String(popover.querySelector('[data-cell-input]')?.value || '');
+    const chosen = [...popover.querySelectorAll('[data-cell-tag][aria-pressed="true"]')].map((node) => node.dataset.cellTag);
+    String(popover.querySelector('[data-cell-input]')?.value || '').split(/[,，、]/).map((item) => item.trim()).filter(Boolean)
+      .forEach((item) => { if (!chosen.includes(item)) chosen.push(item); });
+    return chosen;
+  }
+  async function commitLibraryCellValue(value) {
+    const { jobId, propertyId } = libraryCellEditor;
+    if (!jobId || !propertyId) return;
+    closeLibraryCellEditor();
+    await updateLibraryItem(jobId, { values: { [propertyId]: value } });
+  }
+  // A save re-renders the list, so the popover's anchor is replaced rather
+  // than moved; re-find the same cell instead of leaving the popover adrift.
+  function resyncLibraryCellEditor() {
+    const popover = $('#cell-editor-popover');
+    if (!popover || popover.hidden || libraryCellEditor.anchor?.isConnected) return;
+    const next = document.querySelector(`.library-row[data-job-id="${cssEscape(libraryCellEditor.jobId)}"] [data-cell-edit="${cssEscape(libraryCellEditor.propertyId)}"]`);
+    if (!next) { closeLibraryCellEditor(); return; }
+    libraryCellEditor.anchor = next;
+    positionViewportMenu(popover, next.getBoundingClientRect(), { width: CELL_EDITOR_WIDTH });
+  }
+  function repositionLibraryCellEditor() {
+    const popover = $('#cell-editor-popover');
+    if (!popover || popover.hidden) return;
+    if (!libraryCellEditor.anchor?.isConnected) { closeLibraryCellEditor(); return; }
+    positionViewportMenu(popover, libraryCellEditor.anchor.getBoundingClientRect(), { width: CELL_EDITOR_WIDTH });
+  }
+  $('#cell-editor-popover')?.addEventListener('click', async (event) => {
+    const popover = $('#cell-editor-popover');
+    const property = propertyById(libraryCellEditor.propertyId);
+    if (!property) return;
+    const option = event.target.closest('[data-cell-option]');
+    if (option) { await commitLibraryCellValue(option.dataset.cellOption); return; }
+    const star = event.target.closest('[data-cell-star]');
+    if (star) {
+      const entry = libraryEntryById(libraryCellEditor.jobId);
+      const current = entry ? libraryCellCurrent(entry, property) : 0;
+      const next = Number(star.dataset.cellStar);
+      await commitLibraryCellValue(next === current ? 0 : next);
+      return;
+    }
+    const tag = event.target.closest('[data-cell-tag]');
+    if (tag) { tag.setAttribute('aria-pressed', String(tag.getAttribute('aria-pressed') !== 'true')); return; }
+    if (event.target.closest('[data-cell-cancel]')) { closeLibraryCellEditor({ restoreFocus: true }); return; }
+    if (event.target.closest('[data-cell-save]')) await commitLibraryCellValue(libraryCellEditorValue(popover, property));
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && closeLibraryCellEditor({ restoreFocus: true })) event.preventDefault();
+  });
+  $('#cell-editor-popover')?.addEventListener('keydown', async (event) => {
+    if (event.key !== 'Enter' || !event.target.closest('[data-cell-input]')) return;
+    event.preventDefault();
+    const popover = $('#cell-editor-popover');
+    const property = propertyById(libraryCellEditor.propertyId);
+    if (!property) return;
+    const added = property.type === 'multi-select'
+      ? String(event.target.value || '').split(/[,，、]/).map((item) => item.trim()).filter(Boolean)
+      : [];
+    if (!added.length) { await commitLibraryCellValue(libraryCellEditorValue(popover, property)); return; }
+    // Enter on a non-empty field adds the tag and keeps the editor open, so
+    // several can be typed in a row before committing.
+    const list = popover.querySelector('.cell-editor-tags');
+    added.forEach((item) => {
+      const existing = list?.querySelector(`[data-cell-tag="${cssEscape(item)}"]`);
+      if (existing) { existing.setAttribute('aria-pressed', 'true'); return; }
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'cell-editor-tag';
+      button.dataset.cellTag = item;
+      button.setAttribute('aria-pressed', 'true');
+      button.textContent = item;
+      list?.append(button);
+    });
+    event.target.value = '';
+  });
+  document.addEventListener('pointerdown', (event) => {
+    const popover = $('#cell-editor-popover');
+    if (!popover || popover.hidden || popover.contains(event.target) || event.target.closest?.('[data-cell-edit]')) return;
+    closeLibraryCellEditor();
+  });
+
   function renderLibraryRows(entries) {
     const columns = visibleLibraryColumns();
     const propertyMap = new Map(libraryProperties().map((property) => [property.id, property]));
     return entries.map((entry) => {
       const values = itemValues(entry); const job = entry.job || {}; const counts = job.manifest?.counts || {};
+      // A trashed paper is restored before it is edited, so its cells stay flat.
+      const editableCell = (propertyId, inner, label) => (entry.item?.deleted_at
+        ? inner
+        : `<button class="row-cell-button" type="button" data-cell-edit="${escapeHTML(propertyId)}" data-cell-job="${escapeHTML(entry.jobId)}" aria-haspopup="dialog" aria-label="设置${escapeHTML(label)}">${inner}</button>`);
       const topics = Array.isArray(values.research_topic) ? values.research_topic : [];
       const title = itemTitle(entry);
       const cell = (column) => {
         const id = String(column.id);
         if (id === 'name') return `<div class="library-row-name"><div class="library-row-name-text"><strong title="${escapeHTML(itemAlias(entry) ? `原题：${itemOriginalTitle(entry)}` : title)}">${escapeHTML(title || '未命名文献')}</strong><small>${escapeHTML(job.created_at ? new Date(job.created_at).toLocaleDateString('zh-CN') : '')} · ${counts.pages || '—'} 页</small></div></div>`;
         if (id === 'title') return `<div class="library-row-title" title="${escapeHTML(title)}">${escapeHTML(title)}</div>`;
-        // Rows are read-only data (Zotero-style); editing lives in the
-        // details panel so the table stays scannable.
-        if (id === 'research_topic') return `<div class="library-tags">${topics.length ? topics.map((topic) => `<span class="tag-chip">${escapeHTML(topic)}</span>`).join('') : '<span class="property-placeholder">—</span>'}</div>`;
+        if (id === 'research_topic') return editableCell('research_topic', `<div class="library-tags">${topics.length ? topics.map((topic) => `<span class="tag-chip">${escapeHTML(topic)}</span>`).join('') : '<span class="property-placeholder">—</span>'}</div>`, '研究主题');
         if (id === 'importance') {
           const rating = Math.max(0, Math.min(5, Number(values.importance) || 0));
-          return `<span class="row-stars" aria-label="重要程度 ${rating} 星">${'★'.repeat(rating)}<span class="star-empty">${'★'.repeat(5 - rating)}</span></span>`;
+          return editableCell('importance', `<span class="row-stars" aria-label="重要程度 ${rating} 星">${'★'.repeat(rating)}<span class="star-empty">${'★'.repeat(5 - rating)}</span></span>`, '重要程度');
         }
         if (id === 'reading_status') {
           const currentStatus = String(values.reading_status || '未开始');
-          return `<span class="row-status" data-status="${escapeHTML(currentStatus)}">${escapeHTML(currentStatus)}</span>`;
+          return editableCell('reading_status', `<span class="row-status" data-status="${escapeHTML(currentStatus)}">${escapeHTML(currentStatus)}</span>`, '阅读状态');
         }
-        if (id === 'venue') return `<span class="row-venue" title="${escapeHTML(itemVenue(entry))}">${escapeHTML(itemVenue(entry) || '—')}</span>`;
+        if (id === 'venue') return editableCell('venue', `<span class="row-venue" title="${escapeHTML(itemVenue(entry))}">${escapeHTML(itemVenue(entry) || '—')}</span>`, '接收/来源');
         const property = propertyMap.get(id);
         const hasValue = Array.isArray(values[id]) ? values[id].length : values[id] != null && values[id] !== '';
-        return `<span class="row-plain">${hasValue ? escapeHTML(formatPropertyValue(property || { type: 'text' }, values[id])) : '—'}</span>`;
+        const plain = `<span class="row-plain">${hasValue ? escapeHTML(formatPropertyValue(property || { type: 'text' }, values[id])) : '—'}</span>`;
+        return property ? editableCell(property.id, plain, property.label || property.id) : plain;
       };
       const shortcut = (label) => `<kbd>${escapeHTML(label)}</kbd>`;
       const selectedCount = selectedLibraryJobIds().length;
@@ -1863,6 +2016,7 @@
     $('#recent-list').innerHTML = renderLibraryContent(entries);
     syncLibrarySelection();
     renderLibraryDetails();
+    resyncLibraryCellEditor();
   }
   async function loadLibrary() {
     try {
@@ -2147,7 +2301,9 @@
     const editButton = (propertyId) => `<button class="details-edit-button" data-details-edit="${escapeHTML(propertyId)}" type="button">编辑</button>`;
     const actions = trashed
       ? `<button class="primary-button" data-details-action="restore" type="button">恢复文献</button><button class="secondary-button" data-details-action="metadata" type="button">元数据</button>`
-      : `<button class="primary-button" data-details-action="open" type="button"${job.status === 'completed' ? '' : ' disabled'}>打开阅读</button><button class="secondary-button" data-details-action="metadata" type="button">元数据</button><button class="secondary-button" data-details-action="folders" type="button">文件夹…</button><button class="secondary-button" data-details-action="trash" type="button">回收站</button>`;
+      // Opening and trashing both live on the row itself (double-click, the
+      // ⋯ menu), so the panel keeps only what it alone offers.
+      : `<button class="secondary-button" data-details-action="metadata" type="button">元数据</button><button class="secondary-button" data-details-action="folders" type="button">文件夹…</button>`;
     renderDetailsPanel(panel, `
       <h2 title="${escapeHTML(itemOriginalTitle(entry))}">${escapeHTML(itemTitle(entry))}</h2>
       ${itemAlias(entry) ? `<p class="details-meta secondary details-original-title">原题：${escapeHTML(itemOriginalTitle(entry))}</p>` : ''}
@@ -2157,7 +2313,7 @@
       <dl class="details-fields">
         ${field('显示名称', `<span class="details-edit-value"><span>${itemAlias(entry) ? escapeHTML(itemAlias(entry)) : '<span class="property-placeholder">未设置</span>'}</span>${editButton('alias')}</span>`)}
         ${field('重要程度', `<span class="details-stars" role="radiogroup" aria-label="重要程度">${Array.from({ length: 5 }, (_, index) => { const score = index + 1; return `<button type="button" class="${score <= rating ? 'is-filled' : ''}" data-details-importance="${score}" role="radio" aria-checked="${score === rating ? 'true' : 'false'}" aria-label="设为 ${score} 星">★</button>`; }).join('')}</span>`)}
-        ${field('阅读状态', `<span class="details-status" role="radiogroup" aria-label="阅读状态">${readingStatusOptions().map((option) => `<button type="button" class="${option === currentStatus ? 'active' : ''}" data-details-status="${escapeHTML(option)}" role="radio" aria-checked="${option === currentStatus ? 'true' : 'false'}">${option}</button>`).join('')}</span>`)}
+        ${field('阅读状态', `<select class="details-status-select" data-details-status-select aria-label="阅读状态">${readingStatusOptions().map((option) => `<option${option === currentStatus ? ' selected' : ''}>${escapeHTML(option)}</option>`).join('')}</select>`)}
         ${field('研究主题', `<span class="details-edit-value">${topics.length ? topics.map((topic) => `<span class="tag-chip">${escapeHTML(topic)}</span>`).join('') : '<span class="property-placeholder">未设置</span>'}${editButton('research_topic')}</span>`)}
         ${field('接收/来源', `<span class="details-edit-value"><span>${escapeHTML(itemVenue(entry) || '未设置')}</span>${editButton('venue')}</span>`)}
         ${customProperties.map((property) => { const raw = values[property.id]; const has = Array.isArray(raw) ? raw.length : raw != null && raw !== ''; return field(property.label || property.id, `<span class="details-edit-value"><span>${has ? escapeHTML(formatPropertyValue(property, raw)) : '<span class="property-placeholder">未设置</span>'}</span>${editButton(property.id)}</span>`); }).join('')}
@@ -2168,6 +2324,11 @@
       ${metadata.abstract ? `<h3 class="details-abstract-heading">摘要</h3><p class="details-abstract">${escapeHTML(String(metadata.abstract).slice(0, 900))}${String(metadata.abstract).length > 900 ? '…' : ''}</p>` : ''}
       ${renderGraphPaperConnections(entry.jobId)}`, `library-paper:${entry.jobId}`);
   }
+  $('#library-details')?.addEventListener('change', (event) => {
+    const select = event.target.closest('[data-details-status-select]');
+    const jobId = state.selectedLibraryJobId;
+    if (select && jobId) updateLibraryItem(jobId, { values: { reading_status: select.value } });
+  });
   $('#library-details')?.addEventListener('click', async (event) => {
     if (event.target.closest('[data-details-close]')) {
       setDetailsOpen(false, { restoreFocus: true });
@@ -2188,11 +2349,6 @@
       const current = Number(itemValues(libraryEntryById(jobId) || {})?.importance || 0);
       const next = Number(star.dataset.detailsImportance);
       await setInlineImportance(jobId, next === current ? 0 : next);
-      return;
-    }
-    const status = event.target.closest('[data-details-status]');
-    if (status) {
-      updateLibraryItem(jobId, { values: { reading_status: status.dataset.detailsStatus } });
       return;
     }
     const edit = event.target.closest('[data-details-edit]');
@@ -2245,6 +2401,14 @@
       const action = rowAction.dataset.rowAction;
       closeRowMenu(rowAction.closest('.library-row'));
       await performLibraryRowAction(jobId, action);
+      return;
+    }
+    const cell = event.target.closest('[data-cell-edit]');
+    if (cell) {
+      event.stopPropagation();
+      const cellRow = cell.closest('.library-row');
+      if (cellRow && !state.selectedLibraryJobIds.has(cellRow.dataset.jobId)) selectLibraryRow(cellRow);
+      openLibraryCellEditor(cell);
       return;
     }
     // Row controls own their click lifecycle; clicking a button or link must
@@ -2542,6 +2706,7 @@
   }
   function repositionOpenRowMenus() {
     $$('.library-row.menu-open').forEach((row) => positionRowMenu(row, row.querySelector('.row-more-menu')));
+    repositionLibraryCellEditor();
   }
   window.addEventListener('resize', repositionOpenRowMenus, { passive: true });
   window.addEventListener('scroll', repositionOpenRowMenus, { passive: true });

@@ -578,10 +578,8 @@ body.resizing-reader-assistant * { cursor: col-resize !important; }
 .details-stars { display: inline-flex; gap: 1px; }
 .details-stars button { padding: 0 1px; border: 0; background: transparent; color: var(--text-tertiary); font-size: 16px; line-height: 1.2; }
 .details-stars button.is-filled { color: #b77914; }
-.details-status { display: inline-flex; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; }
-.details-status button { padding: 4px 9px; border: 0; background: transparent; color: var(--text-secondary); font-size: 12px; }
-.details-status button + button { border-left: 1px solid var(--line); }
-.details-status button.active { background: var(--accent-soft); color: var(--accent-dark); font-weight: 600; }
+.details-status-select { width: 100%; min-height: 30px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); color: var(--ink); font-size: 12.5px; }
+.details-status-select:focus-visible { border-color: var(--accent); outline: none; box-shadow: 0 0 0 3px color-mix(in srgb,var(--accent) 16%,transparent); }
 .details-edit-value { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 5px; }
 .details-edit-button { padding: 2px 7px; border: 1px solid var(--line); border-radius: 5px; background: transparent; color: var(--text-tertiary); font-size: 11px; }
 .details-edit-button:hover { border-color: var(--accent); color: var(--accent-dark); }
@@ -589,6 +587,32 @@ body.resizing-reader-assistant * { cursor: col-resize !important; }
 .details-abstract { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.68; }
 .copyable-data { -webkit-user-select: text; user-select: text; cursor: text; }
 .library-details-close { display: none; }
+/* A value cell is a button so a change can start where the value is read.
+   Being a button is also what keeps row selection, double-click-to-open and
+   the marquee drag from firing on the same press. */
+.row-cell-button { display: flex; width: 100%; min-width: 0; align-items: center; margin: -3px -5px; padding: 3px 5px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: inherit; font: inherit; text-align: left; }
+.row-cell-button > * { min-width: 0; }
+.row-cell-button:hover,.row-cell-button:focus-visible { border-color: color-mix(in srgb,var(--accent) 34%,var(--line)); outline: none; background: color-mix(in srgb,var(--accent-soft) 60%,transparent); }
+/* A table cell that shifts under the pointer reads as a glitch. */
+.row-cell-button:not(:disabled):active { transform: none; filter: none; }
+.cell-editor-popover { position: fixed; z-index: 130; display: grid; gap: 8px; width: 248px; max-height: calc(100vh - 16px); overflow-y: auto; padding: 10px; border: 1px solid var(--line); border-radius: 11px; background: var(--material-overlay); backdrop-filter: var(--material-filter); box-shadow: var(--shadow-pop); transform-origin: top left; animation: menu-pop var(--motion-fast) var(--motion-ease-spring); }
+.cell-editor-popover[data-placement="top"] { transform-origin: bottom left; }
+.cell-editor-title { color: var(--text-tertiary); font-size: 11px; font-weight: 700; letter-spacing: .03em; }
+.cell-editor-options { display: grid; gap: 2px; }
+.cell-editor-option { display: flex; width: 100%; align-items: center; gap: 7px; padding: 7px 9px; border: 0; border-radius: 7px; background: transparent; color: var(--text-secondary); font-size: 13px; text-align: left; }
+.cell-editor-option:hover,.cell-editor-option:focus-visible { outline: none; background: var(--accent-soft); color: var(--accent-dark); }
+.cell-editor-option[aria-selected="true"] { color: var(--accent-dark); font-weight: 650; }
+.cell-editor-option[aria-selected="true"]::after { content: "✓"; margin-left: auto; }
+.cell-editor-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.cell-editor-tag { padding: 4px 9px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--text-secondary); font-size: 12px; }
+.cell-editor-tag[aria-pressed="true"] { border-color: color-mix(in srgb,var(--accent) 46%,var(--line)); background: var(--accent-soft); color: var(--accent-dark); }
+.cell-editor-input { width: 100%; min-height: 32px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 7px; outline: none; background: var(--paper); color: var(--ink); font-size: 13px; }
+.cell-editor-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb,var(--accent) 16%,transparent); }
+.cell-editor-stars { display: flex; gap: 2px; }
+.cell-editor-stars button { padding: 2px 3px; border: 0; background: transparent; color: var(--text-tertiary); font-size: 20px; line-height: 1; }
+.cell-editor-stars button.is-filled { color: #b77914; }
+.cell-editor-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.cell-editor-hint { color: var(--text-tertiary); font-size: 10.5px; line-height: 1.45; }
 .row-stars { color: #8f5c0d; font-size: 13px; letter-spacing: 1px; white-space: nowrap; }
 .row-stars .star-empty { color: color-mix(in srgb, var(--text-tertiary) 46%, transparent); }
 .row-status { color: var(--text-secondary); font-size: 12.5px; }
@@ -1322,7 +1346,7 @@ body.reader-mode .view.is-leaving { top: 0; right: 0; left: 0; }
 /* Read-only showcase: every write/AI affordance disappears; browsing,
    reading and cached translations remain. */
 .readonly-mode :is(#import-pdf-button, #create-folder-button, .folder-actions, #manage-views-button, #columns-button, .nav-settings, #full-translate-button, #auto-highlight-button, #share-button, .chat-form, .selection-popover, .details-edit-button, .details-actions button:not([data-details-action="open"]), .highlight-card-actions, .annotation-meta button, .notes-tools, .row-more-button) { display: none !important; }
-.readonly-mode :is(.details-stars button, .details-status button) { pointer-events: none; }
+.readonly-mode :is(.details-stars button, .details-status-select, .row-cell-button) { pointer-events: none; }
 .readonly-mode .chat-empty::after { content: " （网页版为只读演示，AI 问答请使用桌面客户端）"; }
 
 /* Relationship graph: a library mode that keeps the existing folder and
@@ -1465,7 +1489,7 @@ body.reader-mode .view.is-leaving { top: 0; right: 0; left: 0; }
   .search-box input { font-size: 16px; }
 
   /* Touch targets: Apple's 44px minimum for anything tappable. */
-  .system-filter, .folder-button, .grouping-option, .grouping-value, .details-status button, .sidebar-tab { min-height: 40px; }
+  .system-filter, .folder-button, .grouping-option, .grouping-value, .details-status-select, .sidebar-tab { min-height: 40px; }
   .grouping-option { min-height: 44px; }
   .details-stars button { min-width: 34px; min-height: 34px; font-size: 20px; }
   .dialog-close { width: 40px; height: 40px; }

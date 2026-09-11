@@ -129,9 +129,10 @@ async function waitForLibrary(page) {
     if (await venueValueForSelection.evaluate((node) => getComputedStyle(node).userSelect) !== 'text') throw new Error('Nested details value still inherits user-select:none');
     if (await venueButtonForSelection.evaluate((node) => getComputedStyle(node).userSelect) !== 'none') throw new Error('Details controls became selectable while opening the information surface');
     const oldVenueNode = await venueValueForSelection.elementHandle();
-    const sameStatus = page.locator('#library-details [data-details-status][aria-checked="true"]').first();
+    const sameStatus = page.locator('#library-details [data-details-status-select]').first();
     const sameKeyRefresh = page.waitForResponse((response) => response.request().method() === 'PATCH' && response.url().endsWith(`/api/library/items/${firstId}`));
-    await sameStatus.evaluate((button) => button.click());
+    // Re-committing the value already shown still refreshes the same paper.
+    await sameStatus.evaluate((select) => select.dispatchEvent(new Event('change', { bubbles: true })));
     await sameKeyRefresh;
     if (!await oldVenueNode.evaluate((node) => node.isConnected)) throw new Error('Same-paper details refresh destroyed an active selection');
     if ((await page.evaluate(() => document.getSelection()?.toString() || '')) !== selectedVenueText) throw new Error('Same-paper details refresh changed the active selection');
@@ -232,21 +233,20 @@ async function waitForLibrary(page) {
     // and persists the selected value.
     await waitForLibrary(page);
     await rowBody(firstId).click();
-    const statusGroup = page.locator('#library-details [role="radiogroup"][aria-label="阅读状态"]').first();
-    if (!(await statusGroup.count())) throw new Error('阅读状态没有使用可访问的自定义单选组。');
-    await statusGroup.waitFor({ state: 'visible' });
-    const statusOptions = statusGroup.locator('[data-details-status][role="radio"]');
-    if (await statusOptions.count() < 3) throw new Error('阅读状态单选组没有“未开始/阅读中/已完成”三个选项。');
+    const statusSelect = page.locator('#library-details [data-details-status-select]').first();
+    if (!(await statusSelect.count())) throw new Error('阅读状态没有使用可访问的下拉选择。');
+    await statusSelect.waitFor({ state: 'visible' });
+    if (await statusSelect.getAttribute('aria-label') !== '阅读状态') throw new Error('阅读状态下拉缺少可访问名称。');
+    if (await statusSelect.locator('option').count() < 4) throw new Error('阅读状态下拉没有“未开始/计划中/阅读中/已完成”四个选项。');
     const previousStatus = originalItems.get(firstId)?.values?.reading_status || '未开始';
-    const readingOption = statusOptions.filter({ hasText: '阅读中' }).first();
-    await readingOption.click();
+    await statusSelect.selectOption('阅读中');
     await page.waitForFunction(async (id) => {
       const response = await fetch('/api/library');
       const payload = await response.json();
       return payload.library?.items?.[id]?.values?.reading_status === '阅读中';
     }, firstId);
-    const checkedReading = await statusGroup.locator('[data-details-status][aria-checked="true"]').allTextContents();
-    if (!checkedReading.some((text) => text.includes('阅读中'))) throw new Error(`阅读状态选中态不正确（${checkedReading.join('|')}）`);
+    const checkedReading = await statusSelect.inputValue();
+    if (checkedReading !== '阅读中') throw new Error(`阅读状态选中态不正确（${checkedReading}）`);
     await api(`/api/library/items/${firstId}`, json({ values: { reading_status: previousStatus } }, 'PATCH'));
     await page.reload({ waitUntil: 'networkidle' });
     await waitForLibrary(page);
@@ -638,13 +638,46 @@ async function waitForLibrary(page) {
     const batchText = await batchMenu.textContent();
     if (!/批量|已选|添加到文件夹|移入回收站/u.test(batchText || '')) throw new Error(`多选右键菜单没有批量操作（${batchText}）`);
 
+    // A value cell edits in place, and being a button is what keeps row
+    // selection, double-click-to-open and the marquee drag off the same press.
+    await page.keyboard.press('Escape');
+    await waitForLibrary(page);
+    const cellEditor = page.locator('#cell-editor-popover');
+    const valueCell = (id, propertyId) => row(id).locator(`[data-cell-edit="${propertyId}"]`);
+    await valueCell(firstId, 'reading_status').click();
+    await cellEditor.waitFor({ state: 'visible' });
+    const inlineChoices = await cellEditor.locator('[data-cell-option]').allTextContents();
+    if (!inlineChoices.includes('计划中')) throw new Error(`快速编辑没有列出阅读状态选项（${inlineChoices.join('|')}）`);
+    const inlineStatusPatch = page.waitForResponse((response) => response.request().method() === 'PATCH' && response.url().endsWith(`/api/library/items/${firstId}`));
+    await cellEditor.locator('[data-cell-option="计划中"]').click();
+    await inlineStatusPatch;
+    await page.waitForFunction((id) => document.querySelector(`.library-row[data-job-id="${id}"] .row-status`)?.textContent.trim() === '计划中', firstId);
+    if (!(await cellEditor.isHidden())) throw new Error('快速编辑在提交后没有关闭。');
+    await valueCell(firstId, 'research_topic').click();
+    await cellEditor.locator('[data-cell-input]').waitFor();
+    await cellEditor.locator('[data-cell-input]').fill('快速编辑标签');
+    await page.keyboard.press('Enter');
+    await cellEditor.locator('[data-cell-tag="快速编辑标签"][aria-pressed="true"]').waitFor();
+    const inlineTopicPatch = page.waitForResponse((response) => response.request().method() === 'PATCH' && response.url().endsWith(`/api/library/items/${firstId}`));
+    await cellEditor.locator('[data-cell-save]').click();
+    await inlineTopicPatch;
+    await page.waitForFunction((id) => [...document.querySelectorAll(`.library-row[data-job-id="${id}"] .tag-chip`)].some((chip) => chip.textContent.trim() === '快速编辑标签'), firstId);
+    await valueCell(firstId, 'venue').click();
+    await cellEditor.waitFor({ state: 'visible' });
+    await page.keyboard.press('Escape');
+    if (!(await cellEditor.isHidden())) throw new Error('Esc 没有关闭快速编辑。');
+    await valueCell(firstId, 'venue').dblclick();
+    if (await page.locator('#reader-view.active-view').count()) throw new Error('双击值单元格错误地打开了阅读器。');
+    await page.keyboard.press('Escape');
+
     console.log(JSON.stringify({
       singleClickSelect: true,
       doubleClickOpen: true,
       lastRowContextMenu: true,
       outsideClickDismiss: true,
       placeholders: true,
-      readingStatusRadio: true,
+      readingStatusDropdown: true,
+      inlineCellEditing: true,
       readingStatusMenuVisible: true,
       flatAllPapersAndCategoryPage: true,
       columnSettingsPreserveWidth: true,
