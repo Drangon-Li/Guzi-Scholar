@@ -236,6 +236,7 @@ class LibraryStore:
             for item in state["items"].values():
                 if isinstance(item, dict):
                     item["metadata"] = LibraryStore._normalize_metadata(item.get("metadata"))
+                    item["alias"] = str(item.get("alias") or "").strip()[:200]
         deleted_ids = []
         for value in _as_list(raw.get("permanently_deleted")):
             value = str(value or "").strip().lower()
@@ -346,6 +347,7 @@ class LibraryStore:
         now = str(job.get("updated_at") or job.get("created_at") or utc_now())
         return {
             "folder_ids": [],
+            "alias": "",
             "values": {"reading_status": "未开始", "importance": 0, "research_topic": [], "venue": ""},
             "metadata": empty_bibliographic_metadata(),
             "progress": {"percent": 0, "page": 1, "scroll_top": 0, "updated_at": now},
@@ -716,6 +718,13 @@ class LibraryStore:
                     values[str(property_id)] = self._validate_value(prop, value)
             if "progress" in payload:
                 item["progress"] = self._validate_progress(payload["progress"], item.get("progress"))
+            if "alias" in payload:
+                # A display name the reader chooses for the list; the bibliographic
+                # title in the metadata stays what the paper is actually called.
+                alias = str(payload.get("alias") or "").strip()
+                if len(alias) > 200:
+                    raise LibraryValidationError("显示名称不能超过 200 个字符。")
+                item["alias"] = alias
             item["updated_at"] = utc_now()
             self._save_locked()
             return copy.deepcopy(item)

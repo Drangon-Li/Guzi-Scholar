@@ -241,7 +241,7 @@
       const values = item.values && typeof item.values === 'object' ? item.values : {};
       const job = jobs.get(String(jobId)) || item.job || {};
       const sourceFilename = cleanText(job.source_filename);
-      const title = cleanText(metadata.title || sourceFilename.replace(/\.pdf$/i, '') || '未命名文献');
+      const title = cleanText(item.alias || metadata.title || sourceFilename.replace(/\.pdf$/i, '') || '未命名文献');
       const authors = unique(toStrings(metadata.authors));
       const keywords = unique(toStrings(metadata.keywords));
       const researchTopics = unique(toStrings(values.research_topic));

@@ -305,6 +305,19 @@ class LibraryStoreTest(unittest.TestCase):
             self.store.update_property(created["id"], {"label": "重要程度"})
         self.assertEqual(self.store.update_property(created["id"], {"label": "实验阶段"})["label"], "实验阶段")
 
+    def test_alias_is_a_trimmed_optional_display_name(self) -> None:
+        job_id = "a" * 16
+        self.assertEqual(self.store.state["items"][job_id]["alias"], "")
+        item = self.store.update_item(job_id, {"alias": "  蛋白设计综述  "})
+        self.assertEqual(item["alias"], "蛋白设计综述")
+        self.assertEqual(self.store.update_item(job_id, {"alias": ""})["alias"], "")
+        with self.assertRaisesRegex(LibraryValidationError, "显示名称"):
+            self.store.update_item(job_id, {"alias": "x" * 201})
+        legacy = json.loads(self.store.path.read_text(encoding="utf-8"))
+        legacy["items"][job_id].pop("alias", None)
+        self.store.path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+        self.assertEqual(LibraryStore(Path(self.temp.name)).state["items"][job_id]["alias"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

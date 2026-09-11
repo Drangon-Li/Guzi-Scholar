@@ -1084,7 +1084,11 @@
   }
   function itemValues(entry) { return entry.item?.values || {}; }
   function itemMetadata(entry) { return entry.item?.metadata?.fields || {}; }
-  function itemTitle(entry) { return String(itemMetadata(entry).title || entry.job?.source_filename || '未命名文献').replace(/\.pdf$/i, ''); }
+  // The alias is what the reader wants to see; the original title is what the
+  // paper is called, kept for tooltips, search and the metadata itself.
+  function itemOriginalTitle(entry) { return String(itemMetadata(entry).title || entry.job?.source_filename || '未命名文献').replace(/\.pdf$/i, ''); }
+  function itemAlias(entry) { return String(entry.item?.alias || '').trim(); }
+  function itemTitle(entry) { return itemAlias(entry) || itemOriginalTitle(entry); }
   const VENUE_ABBREVIATIONS = [
     [/neural information processing systems/, 'NIPS'],
     [/international conference on machine learning/, 'ICML'],
@@ -1158,7 +1162,7 @@
   function itemSearchText(entry) {
     const values = itemValues(entry);
     const metadata = itemMetadata(entry);
-    return [entry.job?.source_filename, itemTitle(entry), itemVenue(entry), metadata.doi, metadata.arxiv_id, metadata.pmid, ...(values.research_topic || [])].join(' ').toLowerCase();
+    return [entry.job?.source_filename, itemTitle(entry), itemOriginalTitle(entry), itemVenue(entry), metadata.doi, metadata.arxiv_id, metadata.pmid, ...(values.research_topic || [])].join(' ').toLowerCase();
   }
   const systemGroupLabels = { name: '名称', title: '标题', research_topic: '研究主题', importance: '重要程度', reading_status: '阅读状态', venue: '接收/来源' };
   function groupableColumns() {
@@ -1653,7 +1657,7 @@
       const title = itemTitle(entry);
       const cell = (column) => {
         const id = String(column.id);
-        if (id === 'name') return `<div class="library-row-name"><div class="library-row-name-text"><strong title="${escapeHTML(title)}">${escapeHTML(title || '未命名文献')}</strong><small>${escapeHTML(job.created_at ? new Date(job.created_at).toLocaleDateString('zh-CN') : '')} · ${counts.pages || '—'} 页</small></div></div>`;
+        if (id === 'name') return `<div class="library-row-name"><div class="library-row-name-text"><strong title="${escapeHTML(itemAlias(entry) ? `原题：${itemOriginalTitle(entry)}` : title)}">${escapeHTML(title || '未命名文献')}</strong><small>${escapeHTML(job.created_at ? new Date(job.created_at).toLocaleDateString('zh-CN') : '')} · ${counts.pages || '—'} 页</small></div></div>`;
         if (id === 'title') return `<div class="library-row-title" title="${escapeHTML(title)}">${escapeHTML(title)}</div>`;
         // Rows are read-only data (Zotero-style); editing lives in the
         // details panel so the table stays scannable.
@@ -2145,11 +2149,13 @@
       ? `<button class="primary-button" data-details-action="restore" type="button">恢复文献</button><button class="secondary-button" data-details-action="metadata" type="button">元数据</button>`
       : `<button class="primary-button" data-details-action="open" type="button"${job.status === 'completed' ? '' : ' disabled'}>打开阅读</button><button class="secondary-button" data-details-action="metadata" type="button">元数据</button><button class="secondary-button" data-details-action="folders" type="button">文件夹…</button><button class="secondary-button" data-details-action="trash" type="button">回收站</button>`;
     renderDetailsPanel(panel, `
-      <h2 title="${escapeHTML(itemTitle(entry))}">${escapeHTML(itemTitle(entry))}</h2>
+      <h2 title="${escapeHTML(itemOriginalTitle(entry))}">${escapeHTML(itemTitle(entry))}</h2>
+      ${itemAlias(entry) ? `<p class="details-meta secondary details-original-title">原题：${escapeHTML(itemOriginalTitle(entry))}</p>` : ''}
       ${authors.length ? `<p class="details-meta">${escapeHTML(authors.slice(0, 6).join('，'))}${authors.length > 6 ? ' 等' : ''}</p>` : ''}
       <p class="details-meta secondary">${escapeHTML([metadata.year, itemVenue(entry)].filter(Boolean).join(' · ') || '来源未识别')}</p>
       <div class="details-actions">${actions}</div>
       <dl class="details-fields">
+        ${field('显示名称', `<span class="details-edit-value"><span>${itemAlias(entry) ? escapeHTML(itemAlias(entry)) : '<span class="property-placeholder">未设置</span>'}</span>${editButton('alias')}</span>`)}
         ${field('重要程度', `<span class="details-stars" role="radiogroup" aria-label="重要程度">${Array.from({ length: 5 }, (_, index) => { const score = index + 1; return `<button type="button" class="${score <= rating ? 'is-filled' : ''}" data-details-importance="${score}" role="radio" aria-checked="${score === rating ? 'true' : 'false'}" aria-label="设为 ${score} 星">★</button>`; }).join('')}</span>`)}
         ${field('阅读状态', `<span class="details-status" role="radiogroup" aria-label="阅读状态">${readingStatusOptions().map((option) => `<button type="button" class="${option === currentStatus ? 'active' : ''}" data-details-status="${escapeHTML(option)}" role="radio" aria-checked="${option === currentStatus ? 'true' : 'false'}">${option}</button>`).join('')}</span>`)}
         ${field('研究主题', `<span class="details-edit-value">${topics.length ? topics.map((topic) => `<span class="tag-chip">${escapeHTML(topic)}</span>`).join('') : '<span class="property-placeholder">未设置</span>'}${editButton('research_topic')}</span>`)}
@@ -2190,7 +2196,10 @@
       return;
     }
     const edit = event.target.closest('[data-details-edit]');
-    if (edit) editLibraryProperty(jobId, edit.dataset.detailsEdit);
+    if (edit) {
+      if (edit.dataset.detailsEdit === 'alias') editLibraryAlias(jobId);
+      else editLibraryProperty(jobId, edit.dataset.detailsEdit);
+    }
   });
 
   async function handleLibraryListClick(event) {
@@ -2933,6 +2942,14 @@
     catch (error) { showToast(error.message, true); }
   }
   function propertyById(propertyId) { return libraryProperties().find((property) => property.id === propertyId) || (libraryState().properties || []).find((property) => property.id === propertyId); }
+  function editLibraryAlias(jobId) {
+    const entry = libraryItemEntries().find((candidate) => candidate.jobId === jobId);
+    if (!entry) return;
+    const content = `<label>显示名称<input id="editor-value" maxlength="200" value="${escapeHTML(itemAlias(entry))}" placeholder="留空则显示原始标题" autofocus></label><p class="details-meta secondary">原题：${escapeHTML(itemOriginalTitle(entry))}</p>`;
+    openLibraryEditor('设置显示名称', content, async (node) => {
+      await updateLibraryItem(jobId, { alias: node.querySelector('#editor-value').value });
+    });
+  }
   async function editLibraryProperty(jobId, propertyId) {
     const property = propertyById(propertyId); const entry = libraryItemEntries().find((candidate) => candidate.jobId === jobId); if (!property || !entry) return;
     const values = itemValues(entry); let value;
