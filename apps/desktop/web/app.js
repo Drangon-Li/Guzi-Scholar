@@ -2417,7 +2417,13 @@
   }
   async function handleLibraryListDblClick(event) {
     const row = event.target.closest('.library-row');
-    if (!row || event.target.closest('button, select, input, a, [data-row-more-menu]')) return;
+    if (!row) return;
+    // Value cells are buttons, and they cover most of a row. Double-clicking
+    // one still means "open this paper" -- the quick editor the first click
+    // opened gives way rather than swallowing the gesture.
+    const control = event.target.closest('button, select, input, a, [data-row-more-menu]');
+    if (control && !control.closest('[data-cell-edit]')) return;
+    closeLibraryCellEditor();
     event.preventDefault();
     selectLibraryRow(row);
     await performLibraryRowAction(row.dataset.jobId, 'open');
