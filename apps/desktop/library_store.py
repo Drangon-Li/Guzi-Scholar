@@ -606,6 +606,18 @@ class LibraryStore:
                 return prop
         raise LibraryValidationError("属性不存在。")
 
+    def _property_label_taken(self, label: str, *, except_id: str = "") -> bool:
+        # A custom property with a system column's name renders as a second
+        # column with the same header, which reads as a bug rather than a choice.
+        wanted = label.strip().casefold()
+        taken = {str(column.get("label") or "").strip().casefold() for column in _default_display()["columns"]}
+        taken.update(
+            str(prop.get("label") or "").strip().casefold()
+            for prop in self.state["properties"]
+            if isinstance(prop, dict) and str(prop.get("id")) != except_id
+        )
+        return wanted in taken
+
     def create_property(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         label = str(payload.get("label") or "").strip()
         prop_type = str(payload.get("type") or "text")
@@ -615,6 +627,8 @@ class LibraryStore:
             raise LibraryValidationError("不支持的属性类型。")
         options = [str(item).strip() for item in _as_list(payload.get("options")) if str(item).strip()][:100]
         with self.lock:
+            if self._property_label_taken(label):
+                raise LibraryValidationError("已有同名的属性或系统列，请换一个名称。")
             prop = {"id": f"property-{uuid.uuid4().hex[:12]}", "label": label, "type": prop_type, "options": options, "system": False, "hidden": False, "order": len(self.state["properties"]), "created_at": utc_now()}
             if prop_type == "rating":
                 try:
@@ -640,6 +654,8 @@ class LibraryStore:
                 label = str(payload.get("label") or "").strip()
                 if not label or len(label) > 80:
                     raise LibraryValidationError("属性名称不能为空且不能超过 80 个字符。")
+                if self._property_label_taken(label, except_id=property_id):
+                    raise LibraryValidationError("已有同名的属性或系统列，请换一个名称。")
                 prop["label"] = label
             if "hidden" in payload:
                 prop["hidden"] = bool(payload.get("hidden"))

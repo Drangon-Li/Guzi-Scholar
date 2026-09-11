@@ -293,6 +293,18 @@ class LibraryStoreTest(unittest.TestCase):
         item = reloaded.update_item("a" * 16, {"values": {"reading_status": "计划中"}})
         self.assertEqual(item["values"]["reading_status"], "计划中")
 
+    def test_property_labels_cannot_shadow_system_columns_or_each_other(self) -> None:
+        with self.assertRaisesRegex(LibraryValidationError, "同名"):
+            self.store.create_property({"label": "阅读状态", "type": "select"})
+        with self.assertRaisesRegex(LibraryValidationError, "同名"):
+            self.store.create_property({"label": " 名称 ", "type": "text"})
+        created = self.store.create_property({"label": "实验阶段", "type": "text"})
+        with self.assertRaisesRegex(LibraryValidationError, "同名"):
+            self.store.create_property({"label": "实验阶段", "type": "text"})
+        with self.assertRaisesRegex(LibraryValidationError, "同名"):
+            self.store.update_property(created["id"], {"label": "重要程度"})
+        self.assertEqual(self.store.update_property(created["id"], {"label": "实验阶段"})["label"], "实验阶段")
+
 
 if __name__ == "__main__":
     unittest.main()
