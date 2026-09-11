@@ -1129,13 +1129,16 @@ let browserSession;
   };
   if (metrics.typographyAfterReload.controls.fontSize !== '115' || metrics.typographyAfterReload.controls.lineHeight !== '190' || metrics.typographyAfterReload.controls.fontNumber !== '115' || metrics.typographyAfterReload.controls.lineNumber !== '190' || parseFloat(metrics.typographyAfterReload.notes.fontSize) < 13 || parseFloat(metrics.typographyAfterReload.notes.lineHeight) < parseFloat(metrics.typographyAfterReload.notes.fontSize) * 1.5 || normalizeFontFamily(metrics.typographyAfterReload.reader.fontFamily) !== normalizeFontFamily(metrics.typographyAfterReload.notes.fontFamily)) throw new Error(`Typography synchronization did not survive reload (${JSON.stringify(metrics.typographyAfterReload)})`);
   const reloadedAssistant = metrics.typographyAfterReload.assistant;
-  if (parseFloat(reloadedAssistant.chatBubble.fontSize) < 13 || parseFloat(reloadedAssistant.chatBubble.lineHeight) < parseFloat(reloadedAssistant.chatBubble.fontSize) * 1.5 || normalizeFontFamily(reloadedAssistant.chatBubble.fontFamily) !== normalizeFontFamily(metrics.typographyAfterReload.reader.fontFamily)) throw new Error(`Chat content typography did not survive reload (${JSON.stringify(metrics.typographyAfterReload)})`);
-  for (const surface of ['chatEmpty', 'chatInput', 'sidebarTab']) {
+  if (parseFloat(reloadedAssistant.chatBubble.fontSize) < 13 || parseFloat(reloadedAssistant.chatBubble.lineHeight) < parseFloat(reloadedAssistant.chatBubble.fontSize) * 1.5 || normalizeFontFamily(reloadedAssistant.chatBubble.fontFamily) !== normalizeFontFamily(reloadedAssistant.appFont)) throw new Error(`Chat content typography did not survive reload (${JSON.stringify(metrics.typographyAfterReload)})`);
+  // The composer and the bubbles share one face and size, so a message reads
+  // the same before and after it is sent.
+  if (Math.abs(parseFloat(reloadedAssistant.chatInput.fontSize) - parseFloat(reloadedAssistant.chatBubble.fontSize)) > 0.2 || normalizeFontFamily(reloadedAssistant.chatInput.fontFamily) !== normalizeFontFamily(reloadedAssistant.appFont)) throw new Error(`Chat composer typography diverged from the bubbles (${JSON.stringify(metrics.typographyAfterReload)})`);
+  for (const surface of ['chatEmpty', 'sidebarTab']) {
     const style = reloadedAssistant[surface];
     if (Math.abs(parseFloat(style.fontSize) - parseFloat(reloadedAssistant.toolbarSize)) > 0.2 || normalizeFontFamily(style.fontFamily) !== normalizeFontFamily(reloadedAssistant.appFont)) throw new Error(`Assistant UI typography did not survive reload for ${surface} (${JSON.stringify(metrics.typographyAfterReload)})`);
   }
   if (Math.abs(parseFloat(reloadedAssistant.assistantToggle.fontSize) - parseFloat(reloadedAssistant.toolbarSize)) > 0.2 || normalizeFontFamily(reloadedAssistant.assistantToggle.fontFamily) !== normalizeFontFamily(reloadedAssistant.appFont)) throw new Error(`Assistant toggle typography did not survive reload (${JSON.stringify(metrics.typographyAfterReload)})`);
-  for (const surface of ['chatEmpty', 'chatInput', 'sidebarTab']) {
+  for (const surface of ['chatEmpty', 'sidebarTab']) {
     const style = reloadedAssistant[surface];
     if (Math.abs(parseFloat(style.lineHeight) - parseFloat(style.fontSize) * 1.45) > 0.3) throw new Error(`Assistant UI line height did not survive reload for ${surface} (${JSON.stringify(metrics.typographyAfterReload)})`);
   }

@@ -423,11 +423,11 @@ body.resizing-reader-assistant * { cursor: col-resize !important; }
 /* The assistant is a conversation surface, not document content: bubbles and
    the composer share the application face so a message reads the same before
    and after it is sent. Only a quoted passage keeps the reader typography. */
-.reader-sidebar .chat-bubble, .reader-sidebar .chat-form textarea { font-family: var(--app-font); font-size: 13px; line-height: 1.6; }
+.reader-sidebar .chat-bubble, .reader-sidebar .chat-form textarea { font-family: var(--app-font); font-size: calc(13px * var(--reader-font-scale, 1)); line-height: 1.6; }
 .reader-sidebar .chat-quote { font-family: var(--reader-content-font-family); font-size: calc(var(--reader-content-font-size) * .82); line-height: 1.5; }
 .reader-sidebar :is(.annotation-quote,.annotation-note) { font-family: var(--reader-content-font-family); }
 .reader-sidebar .panel-intro strong { font-size: var(--reader-heading-font-size); line-height: 1.4; }
-.reader-sidebar :is(.sidebar-tab,.panel-intro span,.selected-context-label,.panel-status,.chat-empty,.chat-form textarea,.outline-item,.highlight-card-reason,.chat-form .primary-button,.notes-format-button,.chat-history-item,.tiny-button,.quick-preview-actions button) { font-family: var(--app-font); font-size: var(--reader-chrome-font-size); line-height: 1.45; }
+.reader-sidebar :is(.sidebar-tab,.panel-intro span,.selected-context-label,.panel-status,.chat-empty,.outline-item,.highlight-card-reason,.chat-form .primary-button,.notes-format-button,.chat-history-item,.tiny-button,.quick-preview-actions button) { font-family: var(--app-font); font-size: var(--reader-chrome-font-size); line-height: 1.45; }
 .reader-sidebar :is(.chat-bubble small,.outline-item small,.highlight-filter,.highlight-group h3,.highlight-card-state,.highlight-card-actions button,.saved-state,.annotation-meta,.annotation-meta button,.chat-form .primary-button span) { font-family: var(--app-font); font-size: 11px; line-height: 1.35; }
 .reader-sidebar .notes-editor h1,.reader-sidebar .notes-editor h2,.reader-sidebar .notes-editor h3,.reader-sidebar .annotation-note h1,.reader-sidebar .annotation-note h2,.reader-sidebar .annotation-note h3 { font-family: inherit; font-size: 1.12em; line-height: inherit; }
 .quick-preview-heading { flex-direction: row; align-items: flex-start; justify-content: space-between; gap: 10px; }

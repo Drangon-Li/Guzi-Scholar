@@ -960,7 +960,7 @@ let browserSession;
   await page.locator('#line-height-range').evaluate((node) => { node.value = '195'; node.dispatchEvent(new Event('input', { bubbles: true })); });
   await page.waitForTimeout(240);
   const typographyAfterScale = await readTypographySurfaces();
-  for (const surface of ['reader', 'readingHighlight', 'manualHighlight', 'articleNote', 'translation', 'paragraphTranslation', 'chatBubble', 'panelHeading']) {
+  for (const surface of ['reader', 'readingHighlight', 'manualHighlight', 'articleNote', 'translation', 'paragraphTranslation', 'chatBubble', 'chatInput', 'panelHeading']) {
     const before = typographyBeforeScale[surface];
     const after = typographyAfterScale[surface];
     if (after.fontSize < before.fontSize * 1.16 || after.lineHeight < before.lineHeight * 1.10) throw new Error(`Reader typography did not scale ${surface} (${JSON.stringify({ before, after })})`);
@@ -969,13 +969,13 @@ let browserSession;
     const after = typographyAfterScale[surface];
     if (Math.abs(after.fontSize - typographyAfterScale.reader.fontSize) > 0.2 || Math.abs(after.lineHeight - typographyAfterScale.reader.lineHeight) > 0.2) throw new Error(`Reader content typography diverged for ${surface} (${JSON.stringify(typographyAfterScale)})`);
   }
-  if (Math.abs(typographyAfterScale.chatBubble.fontSize - typographyAfterScale.paragraphTranslation.fontSize) > 0.2 || Math.abs(typographyAfterScale.chatBubble.lineHeight - typographyAfterScale.paragraphTranslation.lineHeight) > 0.2) throw new Error(`AI answer typography did not align with the Chinese translation (${JSON.stringify(typographyAfterScale)})`);
+  if (Math.abs(typographyAfterScale.chatBubble.fontSize - typographyAfterScale.chatInput.fontSize) > 0.2 || Math.abs(typographyAfterScale.chatBubble.lineHeight - typographyAfterScale.chatInput.lineHeight) > 0.2) throw new Error(`AI answer typography did not align with the chat composer (${JSON.stringify(typographyAfterScale)})`);
   for (const surface of ['manualHighlight', 'translation']) {
     const after = typographyAfterScale[surface];
     if (after.fontSize >= typographyAfterScale.reader.fontSize * .9 || after.lineHeight >= typographyAfterScale.reader.lineHeight * .9 || after.lineHeight < after.fontSize * 1.4) throw new Error(`Compact annotation typography was not preserved for ${surface} (${JSON.stringify(typographyAfterScale)})`);
   }
   const normalizedReaderFont = typographyAfterScale.reader.fontFamily.replace(/["']/gu, '').replace(/\s+/gu, '').toLowerCase();
-  for (const surface of ['readingHighlight', 'manualHighlight', 'articleNote', 'chatBubble']) {
+  for (const surface of ['readingHighlight', 'manualHighlight', 'articleNote']) {
     const normalizedSurfaceFont = typographyAfterScale[surface].fontFamily.replace(/["']/gu, '').replace(/\s+/gu, '').toLowerCase();
     if (normalizedSurfaceFont !== normalizedReaderFont) throw new Error(`Reader note font diverged for ${surface} (${JSON.stringify(typographyAfterScale)})`);
   }
@@ -985,10 +985,17 @@ let browserSession;
     return { toolbarSize: parseFloat(toolbar.fontSize), appFont: body.fontFamily };
   });
   const normalizedAppFont = assistantTokens.appFont.replace(/["']/gu, '').replace(/\s+/gu, '').toLowerCase();
-  for (const surface of ['chatEmpty', 'chatInput', 'sidebarTab', 'assistantToggle']) {
+  for (const surface of ['chatEmpty', 'sidebarTab', 'assistantToggle']) {
     const after = typographyAfterScale[surface];
     const normalizedSurfaceFont = after.fontFamily.replace(/["']/gu, '').replace(/\s+/gu, '').toLowerCase();
     if (Math.abs(after.fontSize - assistantTokens.toolbarSize) > 0.2 || normalizedSurfaceFont !== normalizedAppFont) throw new Error(`Assistant UI typography diverged from the top toolbar for ${surface} (${JSON.stringify({ assistantTokens, typographyAfterScale })})`);
+  }
+  // Bubbles and the composer use the application face at one shared size
+  // that still follows the reader scale.
+  for (const surface of ['chatBubble', 'chatInput']) {
+    const after = typographyAfterScale[surface];
+    const normalizedSurfaceFont = after.fontFamily.replace(/["']/gu, '').replace(/\s+/gu, '').toLowerCase();
+    if (normalizedSurfaceFont !== normalizedAppFont) throw new Error(`Chat typography left the application face for ${surface} (${JSON.stringify({ assistantTokens, typographyAfterScale })})`);
   }
   await page.locator('#font-size-range').evaluate((node) => { node.value = '100'; node.dispatchEvent(new Event('input', { bubbles: true })); });
   await page.locator('#line-height-range').evaluate((node) => { node.value = '172'; node.dispatchEvent(new Event('input', { bubbles: true })); });
