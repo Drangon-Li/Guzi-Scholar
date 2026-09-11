@@ -66,7 +66,7 @@
     openDocuments: [], translationCache: [], translationCaches: new Map(), translationRun: null, translationRuns: new Map(),
     hiddenTranslationJobs: new Set(),
     mediaLayouts: new Map(),
-    health: null, library: null, activeFolderId: 'system-all', activeViewId: 'view-all', librarySort: 'updated_at-desc', libraryMode: 'list', primaryView: 'library-view',
+    health: null, library: null, activeFolderId: 'system-all', activeViewId: 'view-all', librarySort: 'updated_at-desc', libraryStatusFilter: '', libraryMode: 'list', primaryView: 'library-view',
     selectedLibraryJobId: null, selectedLibraryJobIds: new Set(), activeGroupValue: null, groupingMenuOpen: false,
     graphController: null, graphData: null, graphConfig: { showSimilarity: false, showAttributes: true, attributeIds: null, topK: 2, viewportScale: 0.85 },
     inlineImportanceSaving: new Set(),
@@ -1733,6 +1733,20 @@
     persistColumnResize(column.id, previousWidth, hadPreviousWidth);
   }
   function formatPropertyValue(property, value) { if (property.type === 'multi-select') return Array.isArray(value) ? value.join(', ') || '添加标签' : '添加标签'; if (property.type === 'rating') return `${value || 0}/${property.max || 5}`; return String(value || '设置'); }
+  // The quick filter is a temporary overlay on whatever folder or saved view is
+  // open; it is not persisted and never rewrites the view's own filters.
+  function syncLibraryStatusFilter() {
+    const select = $('#library-status-filter');
+    if (!select) return;
+    const options = readingStatusOptions();
+    const rendered = [...select.options].slice(1).map((option) => option.value);
+    if (rendered.join('\u0000') !== options.join('\u0000')) {
+      select.replaceChildren(new Option('全部状态', ''), ...options.map((status) => new Option(status, status)));
+    }
+    if (!options.includes(state.libraryStatusFilter)) state.libraryStatusFilter = '';
+    select.value = state.libraryStatusFilter;
+    select.classList.toggle('is-filtering', Boolean(state.libraryStatusFilter));
+  }
   function renderLibrary(jobs = state.jobs) {
     const library = libraryState();
     const graphMode = state.libraryMode === 'graph';
@@ -1768,9 +1782,11 @@
       entries = selectedGroup?.entries || [];
     }
     if (query) entries = entries.filter((entry) => itemSearchText(entry).includes(query));
+    syncLibraryStatusFilter();
+    if (state.libraryStatusFilter) entries = entries.filter((entry) => String(itemValues(entry).reading_status || '未开始') === state.libraryStatusFilter);
     entries.sort((a, b) => compareLibraryEntries(a, b, state.librarySort));
     const activeFolder = folderById(state.activeFolderId); const selectedView = activeView(); $('#library-heading').textContent = activeFolder?.name || selectedView?.name || (state.activeGroupValue ? `${groupFieldLabel()}：${state.activeGroupValue}` : (state.activeFolderId === 'system-trash' ? '回收站' : '全部文献'));
-    $('#library-subtitle').textContent = state.activeFolderId === 'system-trash' ? '可恢复的本地文献' : `${entries.length} 篇 · 本机保存 · HTML 连续阅读`;
+    $('#library-subtitle').textContent = state.activeFolderId === 'system-trash' ? '可恢复的本地文献' : `${entries.length} 篇${state.libraryStatusFilter ? ` · 阅读状态：${state.libraryStatusFilter}` : ''} · 本机保存 · HTML 连续阅读`;
     if ($('#library-sort')) $('#library-sort').value = state.librarySort;
     const columns = visibleLibraryColumns();
     const template = libraryGridTemplate(columns);
@@ -1798,6 +1814,7 @@
   }
   $('#library-search').addEventListener('input', () => { clearLibrarySelection(); renderLibrary(); });
   $('#library-sort')?.addEventListener('change', (event) => { state.librarySort = event.target.value; renderLibrary(); });
+  $('#library-status-filter')?.addEventListener('change', (event) => { state.libraryStatusFilter = event.target.value; clearLibrarySelection(); renderLibrary(); });
   function syncLibrarySelection() {
     $$('.library-row').forEach((row) => {
       const selected = state.selectedLibraryJobIds.has(row.dataset.jobId);
