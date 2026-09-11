@@ -2,8 +2,11 @@
 useDefault = true
 
 [allowlist]
-description = "Generated desktop build and packaging output; these paths are gitignored and scanned separately before release"
+description = "Generated desktop build and packaging output, which is gitignored and scanned separately before release, and the renderer's UI state key names: a `*StorageKey = 'my-scholar-...'` constant names a state entry, but the identifier ends in `key` and the value carries enough entropy to read as a generic API key"
 paths = [
   '''^apps/desktop/build/''',
   '''^apps/desktop/dist/'''
+]
+regexes = [
+  '''^my-scholar-[a-z0-9-]+$'''
 ]
