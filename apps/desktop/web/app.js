@@ -610,6 +610,8 @@
       const title = itemTitle({ job, item: state.library?.items?.[job.job_id] || {} });
       return `<div class="document-tab${active}${entering}" data-job-id="${escapeHTML(job.job_id)}" role="tab" aria-selected="${active ? 'true' : 'false'}" tabindex="${job.job_id === rovingJobId ? '0' : '-1'}"><span class="document-tab-label" title="${escapeHTML(title)}">${escapeHTML(title)}</span><button class="document-tab-close" data-close-job-id="${escapeHTML(job.job_id)}" type="button" tabindex="-1" aria-label="关闭 ${escapeHTML(title)}">×</button></div>`;
     }).join('');
+    const busyDocuments = busyDocumentIds();
+    container.querySelectorAll('.document-tab').forEach((tab) => tab.classList.toggle('is-busy', busyDocuments.has(tab.dataset.jobId)));
     container.querySelectorAll('.document-tab').forEach((tab) => tab.addEventListener('click', (event) => {
       if (event.target.closest('[data-close-job-id]')) return;
       const job = state.openDocuments.find((item) => item.job_id === tab.dataset.jobId) || state.jobs.find((item) => item.job_id === tab.dataset.jobId);
@@ -1806,6 +1808,7 @@
     try {
       const [jobsPayload, libraryPayload] = await Promise.all([api('/api/jobs'), api('/api/library')]);
       state.jobs = jobsPayload.jobs || []; state.library = libraryPayload.library || null;
+      resumeRunningReflows();
       const stored = JSON.parse(persistentStateGet(openTabsStorageKey) || '[]');
       if (Array.isArray(stored)) state.openDocuments = stored.map((id) => state.jobs.find((job) => job.job_id === id)).filter((job) => job?.status === 'completed');
       renderLibrary(); renderViews(); renderDocumentTabs();
@@ -2760,6 +2763,7 @@
     if (run?.running) cancelTranslationRun(run);
     state.translationRuns.delete(jobId);
     state.translationCaches.delete(jobId);
+    dropReflowRun(jobId);
     state.jobs = state.jobs.filter((job) => job.job_id !== jobId);
     state.mediaLayouts.delete(jobId);
     state.chatSessions.delete(jobId);
@@ -7318,21 +7322,31 @@
     return true;
   }
 
-  function updateTranslationProgress(done, total, visible = true, detail = '') {
+
+  const translationStatusLabels = { queued: '排队等待翻译', running: '正在翻译全文', stopping: '正在停止翻译', complete: '全文翻译完成' };
+  function translationRunPercent(run) {
+    const total = Math.max(0, Number(run?.total) || 0);
+    const done = Math.max(0, Math.min(total, Number(run?.done) || 0));
+    return total ? Math.round((done / total) * 100) : 0;
+  }
+  // The static panel in the tray always describes the active document's run;
+  // every other document's run is drawn as a card from the same run object.
+  function paintTranslationPanel(run, { visible = Boolean(run?.running) } = {}) {
     const panel = $('#translation-progress');
     if (!panel) return;
-    const safeTotal = Math.max(0, Number(total) || 0);
-    const safeDone = Math.max(0, Math.min(safeTotal, Number(done) || 0));
-    const percent = safeTotal ? Math.round((safeDone / safeTotal) * 100) : 0;
-    const complete = safeTotal > 0 && safeDone >= safeTotal;
+    const total = Math.max(0, Number(run?.total) || 0);
+    const done = Math.max(0, Math.min(total, Number(run?.done) || 0));
+    const percent = translationRunPercent(run);
+    const complete = total > 0 && done >= total;
+    const queued = run?.phase === 'queued';
     panel.hidden = !visible;
-    panel.dataset.state = complete ? 'complete' : 'running';
-    $('#translation-progress-label').textContent = complete ? '全文翻译完成' : '正在翻译全文';
-    $('#translation-progress-count').textContent = safeTotal ? `第 ${complete ? safeTotal : Math.min(safeTotal, safeDone + 1)} / ${safeTotal} 段` : '';
+    panel.dataset.state = queued ? 'queued' : complete ? 'complete' : 'running';
+    $('#translation-progress-label').textContent = run?.running && run?.stop ? translationStatusLabels.stopping : queued ? translationStatusLabels.queued : complete ? translationStatusLabels.complete : translationStatusLabels.running;
+    $('#translation-progress-count').textContent = total ? `第 ${complete ? total : Math.min(total, done + 1)} / ${total} 段` : '';
     $('#translation-progress-value').textContent = `${percent}%`;
     const detailNode = $('#translation-progress-detail');
     if (detailNode) {
-      const text = complete ? '' : String(detail || '');
+      const text = complete ? '' : String(run?.detail || '');
       detailNode.hidden = !text;
       detailNode.textContent = text;
     }
@@ -7341,10 +7355,15 @@
     const track = panel.querySelector('[role="progressbar"]');
     if (track) {
       track.setAttribute('aria-valuenow', String(percent));
-      track.setAttribute('aria-label', `全文翻译进度：${percent}%（${safeDone}/${safeTotal}）`);
+      track.setAttribute('aria-label', `全文翻译进度：${percent}%（${done}/${total}）`);
     }
+    const stopButton = $('#stop-translation-button');
+    if (stopButton) stopButton.disabled = !run?.running || Boolean(run?.stop);
   }
-
+  function updateTranslationProgress(run, options = {}) {
+    if (run && state.activeJob?.job_id === run.jobId) paintTranslationPanel(run, options);
+    refreshBackgroundTasks();
+  }
   function hasUsableTranslation(block) {
     const blockId = block?.dataset.blockId || block?.dataset.translateBlockId || '';
     if (!blockId) return false;
@@ -7358,6 +7377,76 @@
   }
 
   const FULL_TRANSLATION_CONCURRENCY = 3;
+
+
+  // Documents translating at once. The rest wait in the tray, so several
+  // full-document runs do not multiply the request rate against the gateway.
+  const FULL_TRANSLATION_MAX_DOCUMENTS = 2;
+  const translationSlotWaiters = [];
+  function translatingDocumentCount() {
+    let count = 0;
+    state.translationRuns.forEach((run) => { if (run.running && run.phase === 'running') count += 1; });
+    return count;
+  }
+  function acquireTranslationSlot(run) {
+    if (translatingDocumentCount() < FULL_TRANSLATION_MAX_DOCUMENTS) {
+      run.phase = 'running';
+      return Promise.resolve();
+    }
+    run.phase = 'queued';
+    updateTranslationProgress(run);
+    return new Promise((resolve) => {
+      run.wake = () => { run.wake = null; run.phase = 'running'; resolve(); };
+      translationSlotWaiters.push(run);
+    });
+  }
+  function releaseTranslationSlot() {
+    while (translationSlotWaiters.length) {
+      const next = translationSlotWaiters.shift();
+      if (!next.wake) continue;
+      next.wake();
+      if (!next.stop) return;
+    }
+  }
+
+  // One paragraph of a run. The run works from its own snapshot of the source,
+  // so the request goes out whether or not the document is still mounted; the
+  // result is painted into the reader only when this document is on screen and
+  // otherwise waits in the cache for the next mount to replay.
+  async function translateSnapshot(snapshot, run, { refresh = false } = {}) {
+    const { blockId, isTitle, source } = snapshot;
+    if (!blockId || !source?.text) return false;
+    const role = isTitle ? 'title' : '';
+    const mountedDoc = () => (state.activeJob?.job_id === run.jobId ? frameDocument() : null);
+    const profileId = translationProfileId();
+    let doc = mountedDoc();
+    if (doc) insertTranslation(blockId, '正在翻译…', { pending: true, role, doc });
+    const removePendingTranslation = () => {
+      const current = mountedDoc();
+      if (!current) return;
+      current.querySelectorAll(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`).forEach((node) => {
+        if (node.classList.contains('is-pending')) node.remove();
+      });
+    };
+    try {
+      const translated = await requestTranslation(source.text, blockId, source.formulas, { jobId: run.jobId, markers: source.markers, emphasis: source.emphasis, signal: run.abortController.signal, refresh });
+      if (profileId && translationProfileId() !== profileId) {
+        removePendingTranslation();
+        return false;
+      }
+      doc = mountedDoc();
+      if (doc) insertTranslation(blockId, translated.text, { cached: translated.cached, sourceHash: translated.sourceHash, role, formulas: translated.formulas, markers: translated.markers, emphasis: translated.emphasis, doc });
+      return true;
+    } catch (error) {
+      if (error?.name === 'AbortError' || run.abortController.signal.aborted) {
+        removePendingTranslation();
+        return false;
+      }
+      doc = mountedDoc();
+      if (doc) insertTranslation(blockId, `翻译失败：${error.message}`, { error: true, role, doc });
+      return false;
+    }
+  }
 
   async function runFullTranslation({ refresh = false } = {}) {
     const jobId = state.activeJob?.job_id;
@@ -7374,68 +7463,54 @@
     if (!doc) return;
     const blocks = [...(doc?.querySelectorAll('h1.paper-title[data-block-id], p[data-block-id], ul[data-block-id], ol[data-block-id], figcaption[data-translate-block-id]') || [])].filter(translatableParagraph);
     const pendingBlocks = refresh ? blocks : blocks.filter((block) => !hasUsableTranslation(block));
-    const run = { jobId, doc, running: true, stop: false, abortController: new AbortController() };
+    // A full-document run belongs to the document, not to the view or even to
+    // the mounted iframe: snapshotting every source paragraph up front lets it
+    // keep going while the reader shows something else.
+    const snapshots = pendingBlocks.map((block) => ({
+      blockId: block.dataset.blockId || block.dataset.translateBlockId,
+      isTitle: block.matches('h1.paper-title, h1[data-translate-block-id]'),
+      source: paragraphSource(block),
+    }));
+    const run = { jobId, title: documentTitleFor(jobId), running: true, stop: false, phase: 'pending', wake: null, done: blocks.length - pendingBlocks.length, total: blocks.length, failed: 0, detail: '', abortController: new AbortController() };
     state.translationRuns.set(jobId, run);
-    state.translationRun = run;
-    // A full-document run belongs to the document, not to the view. Requiring
-    // the reader to stay on screen made every switch to the library or the
-    // settings abandon the run silently, mid-queue, with the button back to
-    // idle and nothing said. Leaving the document still stops it.
-    const isCurrentRun = () => state.activeJob?.job_id === jobId
-      && frameDocument() === doc
-      && state.translationRuns.get(jobId) === run;
-    $('#full-translate-button').disabled = true;
-    $('#stop-translation-button').disabled = false;
-    let done = blocks.length - pendingBlocks.length;
-    updateTranslationProgress(done, blocks.length, true);
-    let failed = 0;
+    syncTranslationControls();
     let nextIndex = 0;
     try {
+      await acquireTranslationSlot(run);
+      updateTranslationProgress(run);
       const worker = async () => {
-        while (!run.stop && !run.abortController.signal.aborted && isCurrentRun()) {
-          const index = nextIndex++;
-          const block = pendingBlocks[index];
-          if (!block) return;
-          let translated = false;
-          try {
-            const preview = paragraphText(block).slice(0, 72);
-            updateTranslationProgress(done, blocks.length, true, preview ? `正在翻译：${preview}` : '');
-            translated = await translateBlock(block.dataset.blockId || block.dataset.translateBlockId, block.querySelector('.paragraph-translate-trigger'), { silent: true, jobId, doc, signal: run.abortController.signal, refresh });
-          } catch (error) {
-            translated = false;
-          }
-          if (!translated && !run.abortController.signal.aborted) failed += 1;
-          done += 1;
-          if (isCurrentRun()) updateTranslationProgress(done, blocks.length, true);
+        while (!run.stop && !run.abortController.signal.aborted) {
+          const snapshot = snapshots[nextIndex++];
+          if (!snapshot) return;
+          const preview = snapshot.source.text.slice(0, 72);
+          run.detail = preview ? `正在翻译：${preview}` : '';
+          updateTranslationProgress(run);
+          const translated = await translateSnapshot(snapshot, run, { refresh });
+          if (!translated && !run.abortController.signal.aborted) run.failed += 1;
+          run.done += 1;
+          updateTranslationProgress(run);
         }
       };
-      await Promise.all(Array.from({ length: Math.min(FULL_TRANSLATION_CONCURRENCY, pendingBlocks.length) }, worker));
-      if (!isCurrentRun()) return;
+      await Promise.all(Array.from({ length: Math.min(FULL_TRANSLATION_CONCURRENCY, snapshots.length) }, worker));
+      run.detail = '';
+      const prefix = state.activeJob?.job_id === jobId ? '' : `《${run.title}》`;
       if (run.stop) {
-        $('#translation-progress-label').textContent = '全文翻译已停止，可继续复用已完成缓存';
-        showToast('全文翻译已停止，已完成的段落保留在本机。');
-        $('#translation-progress').hidden = true;
-      } else if (failed) {
-        showToast(`全文翻译完成，但有 ${failed} 段失败；失败段落可稍后单独重试。`, true);
-        $('#translation-progress').hidden = true;
+        showToast(`${prefix}全文翻译已停止，已完成的段落保留在本机。`);
+      } else if (run.failed) {
+        showToast(`${prefix}全文翻译完成，但有 ${run.failed} 段失败；失败段落可稍后单独重试。`, true);
       } else {
-        showToast(blocks.length ? (pendingBlocks.length ? '全文翻译完成，译文已插入原文下方。' : '全文译文已存在，已直接复用本机缓存。按住 Option 点击可重新翻译全文。') : '没有找到可翻译的正文段落。');
-        // A completed run should leave the reading surface unobstructed.
-        $('#translation-progress').hidden = true;
+        showToast(blocks.length ? (snapshots.length ? `${prefix}全文翻译完成，译文已插入原文下方。` : '全文译文已存在，已直接复用本机缓存。按住 Option 点击可重新翻译全文。') : '没有找到可翻译的正文段落。');
       }
     } catch (error) {
-      if (isCurrentRun()) {
-        $('#translation-progress').hidden = true;
-        showToast(`全文翻译失败：${error.message}`, true);
-        setPanelStatus(error.message, true);
-      }
+      showToast(`全文翻译失败：${error.message}`, true);
+      if (state.activeJob?.job_id === jobId) setPanelStatus(error.message, true);
     } finally {
       run.running = false;
-      if (state.translationRuns.get(jobId) === run) state.translationRuns.set(jobId, run);
-      if (state.activeJob?.job_id === jobId && state.translationRun === run) {
-        state.translationRun = run;
-        syncTranslationControls();
-      }
+      releaseTranslationSlot();
+      // A finished run leaves the reading surface unobstructed but keeps its
+      // final figures, so the panel still reports them when asked.
+      if (state.translationRuns.get(jobId) === run) updateTranslationProgress(run, { visible: false });
+      syncTranslationControls();
     }
   }
 
@@ -7443,29 +7518,31 @@
     if (!run) return;
     run.stop = true;
     run.abortController?.abort();
-  }
-
-  function stopFullTranslation() {
-    const jobId = state.activeJob?.job_id;
-    const run = jobId ? state.translationRuns.get(jobId) : null;
-    if (run?.running) {
-      cancelTranslationRun(run);
-      $('#stop-translation-button').disabled = true;
+    if (run.wake) {
+      const index = translationSlotWaiters.indexOf(run);
+      if (index >= 0) translationSlotWaiters.splice(index, 1);
+      run.wake();
     }
+    updateTranslationProgress(run);
   }
 
-  function syncTranslationControls({ hideProgress = false } = {}) {
+  function stopFullTranslation(jobId = state.activeJob?.job_id) {
+    const run = jobId ? state.translationRuns.get(jobId) : null;
+    if (run?.running) cancelTranslationRun(run);
+  }
+
+  function syncTranslationControls() {
     const jobId = state.activeJob?.job_id;
     const run = jobId ? state.translationRuns.get(jobId) : null;
     state.translationRun = run || null;
     const running = Boolean(run?.running);
     const fullButton = $('#full-translate-button');
-    const stopButton = $('#stop-translation-button');
     if (fullButton) fullButton.disabled = running;
-    if (stopButton) stopButton.disabled = !running || Boolean(run?.stop);
-    if (hideProgress) $('#translation-progress').hidden = true;
+    // The panel follows whichever document is on screen: a run that carried on
+    // in the background shows up again the moment its document comes back.
+    paintTranslationPanel(run, { visible: running });
+    refreshBackgroundTasks();
   }
-
   $('#selection-popover')?.addEventListener('click', (event) => {
     if (!event.target.closest('[data-selection-translation-retry]') || !state.selection) return;
     beginSelectionTranslation({ ...state.selection }, { immediate: true });
@@ -8872,13 +8949,6 @@
     closeImageLightbox({ restoreFocus: false });
     const previousJobId = state.activeJob?.job_id;
     const notesReady = flushPendingArticleNotes(previousJobId);
-    if (previousJobId && previousJobId !== job.job_id) {
-      // There is one embedded iframe, so a run cannot safely continue writing
-      // into a document that is no longer mounted. Keep its per-document cache
-      // and stop it cleanly; another document remains independently runnable.
-      const previousRun = state.translationRuns.get(previousJobId);
-      if (previousRun?.running) cancelTranslationRun(previousRun);
-    }
     const nextCache = state.translationCaches.get(job.job_id) || [];
     state.translationCaches.set(job.job_id, nextCache);
     state.activeJob = job;
@@ -8914,7 +8984,8 @@
     const completedReflowURL = job.reflow?.status === 'completed' ? safeReflowDocumentURL(job.reflow.document_url, job.job_id, job.reflow.generation) : '';
     beginReaderMount(job.job_id, completedReflowURL || job.links.html);
     switchView('reader-view', { enteringDocumentId: isNewDocument ? job.job_id : null });
-    syncTranslationControls({ hideProgress: true });
+    syncTranslationControls();
+    syncReflowControls();
     markReadingStarted(job.job_id);
     loadReaderData(job.job_id, { notesReady, notesSession }).catch((error) => setPanelStatus(error.message, true));
   }
@@ -11430,11 +11501,13 @@
     applyTranslationVisibility();
     syncTranslationVisibilityButton();
   });
-  let reflowPollToken = 0;
-  let reflowPollTimer = null;
-  let activeReflowJobId = '';
-  let reflowPreflightInFlight = false;
 
+  // One reflow per document; the server queues them, so several documents can
+  // be pending at once and each keeps its own poll loop until it settles.
+  const reflowRuns = new Map();
+  let reflowPreflightInFlight = false;
+  const reflowStatusLabels = { queued: 'AI 重排排队中', running: '正在进行 AI 重排', cancelling: '正在取消 AI 重排', cancelled: 'AI 重排已取消', completed: 'AI 重排已完成', failed: 'AI 重排失败' };
+  const ACTIVE_REFLOW_STATUSES = new Set(['queued', 'running', 'cancelling']);
   function readerDocumentURL(source) {
     const url = new URL(String(source || ''), window.location.href);
     url.searchParams.set('reader', '1');
@@ -11454,6 +11527,7 @@
     }
   }
 
+
   function updateReflowButton(running, progress = 0, runningLabel = '') {
     const button = $('#reflow-button');
     const label = $('#reflow-button-label');
@@ -11465,39 +11539,87 @@
     if (label) label.textContent = running ? runningLabel || `重排中 ${progress}%` : 'AI 重排';
   }
 
-  function renderReflowStatus(reflow = {}) {
-    const panel = $('#reflow-progress');
-    if (!panel) return 0;
+  function reflowPercent(reflow = {}) {
     const raw = Number(reflow.progress);
     const percent = Math.round(Math.max(0, Math.min(100, Number.isFinite(raw) ? (raw <= 1 ? raw * 100 : raw) : 0)));
     const status = String(reflow.status || 'queued');
-    const statusLabels = { queued: 'AI 重排排队中', running: '正在进行 AI 重排', cancelling: '正在取消 AI 重排', cancelled: 'AI 重排已取消', completed: 'AI 重排已完成', failed: 'AI 重排失败' };
-    const displayedPercent = status === 'completed' ? 100 : ['failed', 'cancelled', 'cancelling'].includes(status) ? Math.min(99, percent) : percent;
+    return status === 'completed' ? 100 : ['failed', 'cancelled', 'cancelling'].includes(status) ? Math.min(99, percent) : percent;
+  }
+  function reflowRunFor(jobId) { return jobId ? reflowRuns.get(jobId) || null : null; }
+  function activeReflowRun() { return reflowRunFor(state.activeJob?.job_id); }
+  function reflowRunIsActive(run) { return Boolean(run && ACTIVE_REFLOW_STATUSES.has(String(run.reflow?.status || ''))); }
+  function ensureReflowRun(jobId, { fresh = false } = {}) {
+    const existing = reflowRuns.get(jobId);
+    if (existing && !fresh) return existing;
+    if (existing) {
+      window.clearTimeout(existing.timer);
+      window.clearTimeout(existing.hideTimer);
+    }
+    const run = { jobId, timer: null, hideTimer: null, title: documentTitleFor(jobId), reflow: { status: 'queued', progress: 0, stage: '', error: null } };
+    reflowRuns.set(jobId, run);
+    return run;
+  }
+  function dropReflowRun(jobId) {
+    const run = reflowRuns.get(jobId);
+    if (!run) return;
+    window.clearTimeout(run.timer);
+    window.clearTimeout(run.hideTimer);
+    reflowRuns.delete(jobId);
+    if (state.activeJob?.job_id === jobId) paintReflowPanel();
+    refreshBackgroundTasks();
+  }
+  function dismissReflowRun(jobId) {
+    if (!reflowRunIsActive(reflowRunFor(jobId))) dropReflowRun(jobId);
+  }
+
+  // The static panel in the tray describes the active document's reflow; the
+  // button in the reader toolbar follows it.
+  function paintReflowPanel() {
+    const panel = $('#reflow-progress');
+    if (!panel) return;
+    const run = activeReflowRun();
+    const cancelButton = $('#cancel-reflow-button');
+    if (!run) {
+      panel.hidden = true;
+      updateReflowButton(false);
+      if (cancelButton) cancelButton.hidden = true;
+      return;
+    }
+    const reflow = run.reflow || {};
+    const status = String(reflow.status || 'queued');
+    const displayedPercent = reflowPercent(reflow);
     panel.hidden = false;
     panel.dataset.state = status;
-    $('#reflow-progress-label').textContent = statusLabels[status] || '正在进行 AI 重排';
+    $('#reflow-progress-label').textContent = reflowStatusLabels[status] || reflowStatusLabels.running;
     $('#reflow-progress-stage').textContent = String(reflow.error || reflow.stage || '').slice(0, 240);
     $('#reflow-progress-value').textContent = `${displayedPercent}%`;
     $('#reflow-progress-bar').style.width = `${displayedPercent}%`;
-    const track = $('#reflow-progress-track');
-    track?.setAttribute('aria-valuenow', String(displayedPercent));
-    const active = ['queued', 'running', 'cancelling'].includes(status);
+    $('#reflow-progress-track')?.setAttribute('aria-valuenow', String(displayedPercent));
+    const active = ACTIVE_REFLOW_STATUSES.has(status);
     updateReflowButton(active, displayedPercent, status === 'cancelling' ? '正在取消重排…' : '');
-    const cancelButton = $('#cancel-reflow-button');
     if (cancelButton) {
       cancelButton.hidden = !active;
       cancelButton.disabled = status === 'cancelling';
     }
-    return displayedPercent;
+  }
+  function renderReflowStatus(jobId, reflow = {}) {
+    const run = ensureReflowRun(jobId);
+    run.reflow = { ...run.reflow, ...reflow };
+    if (state.activeJob?.job_id === jobId) paintReflowPanel();
+    refreshBackgroundTasks();
+    return reflowPercent(run.reflow);
+  }
+  function syncReflowControls() {
+    paintReflowPanel();
+    refreshBackgroundTasks();
   }
 
   function renderReflowPreflightFailure(message) {
-    const panel = $('#reflow-progress');
-    if (panel) panel.hidden = true;
+    const run = activeReflowRun();
+    if (run && !reflowRunIsActive(run)) dropReflowRun(run.jobId);
     updateReflowButton(false);
     if (message) showToast(String(message), true);
   }
-
   function mergeReflowJob(job, documentURL = '') {
     const merge = (current) => current?.job_id === job.job_id
       ? { ...current, ...job, links: { ...(current.links || {}), ...(job.links || {}), ...(documentURL ? { html: documentURL } : {}) } }
@@ -11508,47 +11630,48 @@
     renderDocumentTabs();
   }
 
-  function finishReflow(job, token) {
-    if (token !== reflowPollToken || !job?.reflow) return true;
+
+  function finishReflow(job, run) {
+    if (!job?.reflow || reflowRuns.get(run.jobId) !== run) return true;
     const { reflow } = job;
-    renderReflowStatus(reflow);
+    renderReflowStatus(run.jobId, reflow);
     if (!['completed', 'failed', 'cancelled'].includes(reflow.status)) return false;
-    activeReflowJobId = '';
-    updateReflowButton(false);
+    const isActive = state.activeJob?.job_id === job.job_id;
+    const prefix = isActive ? '' : `《${run.title}》`;
     if (['failed', 'cancelled'].includes(reflow.status)) {
       mergeReflowJob(job);
+      if (prefix) showToast(`${prefix}${reflowStatusLabels[reflow.status]}${reflow.error ? `：${String(reflow.error).slice(0, 120)}` : ''}`, reflow.status === 'failed');
       return true;
     }
     const documentURL = safeReflowDocumentURL(reflow.document_url, job.job_id, reflow.generation);
     if (!documentURL) {
-      renderReflowStatus({ status: 'failed', progress: reflow.progress, error: '重排结果地址无效，已保留当前版本。' });
+      renderReflowStatus(run.jobId, { status: 'failed', progress: reflow.progress, error: '重排结果地址无效，已保留当前版本。' });
       return true;
     }
-    if (state.activeJob?.job_id === job.job_id) captureCurrentReadingLocation();
+    if (isActive) captureCurrentReadingLocation();
     mergeReflowJob(job, documentURL);
-    if (state.activeJob?.job_id === job.job_id) {
+    if (isActive) {
       $('#reader-view')?.classList.add('is-document-loading');
       beginReaderMount(job.job_id, documentURL);
+    } else {
+      showToast(`${prefix}AI 重排已完成，下次打开即为新版。`);
     }
-    window.setTimeout(() => {
-      if (token === reflowPollToken && !activeReflowJobId) $('#reflow-progress').hidden = true;
-    }, 2200);
+    run.hideTimer = window.setTimeout(() => dismissReflowRun(run.jobId), 2200);
     return true;
   }
 
-  async function pollReflow(jobId, token) {
-    if (token !== reflowPollToken || activeReflowJobId !== jobId) return;
+  async function pollReflow(run) {
+    if (reflowRuns.get(run.jobId) !== run) return;
     try {
-      const job = await api(`/api/jobs/${jobId}`);
-      if (token !== reflowPollToken || activeReflowJobId !== jobId) return;
-      if (finishReflow(job, token)) return;
+      const job = await api(`/api/jobs/${run.jobId}`);
+      if (reflowRuns.get(run.jobId) !== run) return;
+      if (finishReflow(job, run)) return;
     } catch (_) {
-      if (token !== reflowPollToken || activeReflowJobId !== jobId) return;
-      renderReflowStatus({ status: 'running', stage: '连接暂时中断，正在重试' });
+      if (reflowRuns.get(run.jobId) !== run) return;
+      renderReflowStatus(run.jobId, { status: 'running', stage: '连接暂时中断，正在重试' });
     }
-    reflowPollTimer = window.setTimeout(() => pollReflow(jobId, token), 900);
+    run.timer = window.setTimeout(() => pollReflow(run), 900);
   }
-
   async function ensureReflowCapability() {
     try {
       const provider = await fetchParsingProviders();
@@ -11576,30 +11699,30 @@
     }
   }
 
-  async function cancelReflow() {
-    const jobId = activeReflowJobId;
-    const token = reflowPollToken;
-    if (!jobId) return;
-    const progress = Number.parseInt($('#reflow-progress-value')?.textContent || '0', 10) || 0;
-    window.clearTimeout(reflowPollTimer);
-    reflowPollTimer = null;
-    renderReflowStatus({ status: 'cancelling', stage: '正在停止版面解析进程', progress });
+
+  async function cancelReflow(jobId = state.activeJob?.job_id) {
+    const run = reflowRunFor(jobId);
+    if (!run || !reflowRunIsActive(run)) return;
+    const progress = run.reflow?.progress;
+    window.clearTimeout(run.timer);
+    run.timer = null;
+    renderReflowStatus(jobId, { status: 'cancelling', stage: '正在停止版面解析进程', progress });
     try {
       const payload = await api(`/api/jobs/${jobId}/reflow`, { method: 'DELETE' });
-      if (token !== reflowPollToken || activeReflowJobId !== jobId) return;
+      if (reflowRuns.get(jobId) !== run) return;
       const updated = payload.job || payload;
       mergeReflowJob(updated);
-      if (!finishReflow(updated, token)) reflowPollTimer = window.setTimeout(() => pollReflow(jobId, token), 300);
+      if (!finishReflow(updated, run)) run.timer = window.setTimeout(() => pollReflow(run), 300);
     } catch (error) {
-      if (token !== reflowPollToken || activeReflowJobId !== jobId) return;
-      renderReflowStatus({ status: 'running', stage: `取消失败：${error.message}，任务仍在继续`, progress });
-      reflowPollTimer = window.setTimeout(() => pollReflow(jobId, token), 900);
+      if (reflowRuns.get(jobId) !== run) return;
+      renderReflowStatus(jobId, { status: 'running', stage: `取消失败：${error.message}，任务仍在继续`, progress });
+      run.timer = window.setTimeout(() => pollReflow(run), 900);
     }
   }
 
   async function startReflow() {
     const job = state.activeJob;
-    if (!job || activeReflowJobId || reflowPreflightInFlight) return;
+    if (!job || reflowRunIsActive(reflowRunFor(job.job_id)) || reflowPreflightInFlight) return;
     reflowPreflightInFlight = true;
     const button = $('#reflow-button');
     const label = $('#reflow-button-label');
@@ -11607,30 +11730,95 @@
     if (label) label.textContent = '检查版面引擎…';
     const ready = await ensureReflowCapability();
     reflowPreflightInFlight = false;
-    if (!activeReflowJobId) updateReflowButton(false);
+    if (!reflowRunIsActive(activeReflowRun())) updateReflowButton(false);
     if (!ready || state.activeJob?.job_id !== job.job_id) return;
     const confirmed = await requestConfirmation('AI 重排会在后台重新分析当前文章。完成前会继续显示当前版本；只有成功后才切换到新版。', '开始 AI 重排？');
     if (!confirmed || state.activeJob?.job_id !== job.job_id) return;
-    const token = ++reflowPollToken;
-    window.clearTimeout(reflowPollTimer);
-    reflowPollTimer = null;
-    activeReflowJobId = job.job_id;
-    renderReflowStatus({ status: 'queued', stage: '正在提交重排任务', progress: 0 });
+    const run = ensureReflowRun(job.job_id, { fresh: true });
+    renderReflowStatus(job.job_id, { status: 'queued', stage: '正在提交重排任务', progress: 0, error: null });
     try {
       const updated = await api(`/api/jobs/${job.job_id}/reflow`, { method: 'POST' });
-      if (token !== reflowPollToken || activeReflowJobId !== job.job_id) return;
+      if (reflowRuns.get(job.job_id) !== run) return;
       mergeReflowJob(updated);
-      if (!finishReflow(updated, token)) reflowPollTimer = window.setTimeout(() => pollReflow(job.job_id, token), 500);
+      if (!finishReflow(updated, run)) run.timer = window.setTimeout(() => pollReflow(run), 500);
     } catch (error) {
-      if (token !== reflowPollToken) return;
-      activeReflowJobId = '';
-      renderReflowStatus({ status: 'failed', error: error.message, progress: 0 });
-      updateReflowButton(false);
+      if (reflowRuns.get(job.job_id) !== run) return;
+      renderReflowStatus(job.job_id, { status: 'failed', error: error.message, progress: 0 });
     }
+  }
+
+  // A reflow submitted in an earlier session, or before a reload, is still
+  // running on the server; pick its polling back up from the job list.
+  function resumeRunningReflows() {
+    state.jobs.forEach((job) => {
+      const reflow = job?.reflow;
+      if (!ACTIVE_REFLOW_STATUSES.has(String(reflow?.status || '')) || reflowRuns.has(job.job_id)) return;
+      const run = ensureReflowRun(job.job_id, { fresh: true });
+      renderReflowStatus(job.job_id, reflow);
+      run.timer = window.setTimeout(() => pollReflow(run), 500);
+    });
   }
 
   $('#reflow-button').addEventListener('click', startReflow);
   $('#cancel-reflow-button')?.addEventListener('click', () => { void cancelReflow(); });
+
+  // Background task tray: the active document's panels above are static; the
+  // cards for every other document are rendered from the run maps here.
+  function documentTitleFor(jobId) {
+    const entry = libraryEntry(jobId);
+    if (entry) return itemTitle(entry);
+    const job = state.openDocuments.find((item) => item.job_id === jobId) || state.jobs.find((item) => item.job_id === jobId);
+    return String(job?.source_filename || '未命名文献').replace(/\.pdf$/i, '');
+  }
+  function busyDocumentIds() {
+    const ids = new Set();
+    state.translationRuns.forEach((run, jobId) => { if (run.running) ids.add(jobId); });
+    reflowRuns.forEach((run, jobId) => { if (reflowRunIsActive(run)) ids.add(jobId); });
+    return ids;
+  }
+  const backgroundTasksView = window.MyScholarBackgroundTasks?.create({
+    container: $('#background-tasks'),
+    onOpen: (jobId) => {
+      const job = state.openDocuments.find((item) => item.job_id === jobId) || state.jobs.find((item) => item.job_id === jobId);
+      if (job) openReader(job);
+    },
+    onCancel: (card) => {
+      if (card.kind === 'translation') stopFullTranslation(card.jobId);
+      else void cancelReflow(card.jobId);
+    },
+    onDismiss: (card) => { if (card.kind === 'reflow') dismissReflowRun(card.jobId); },
+  }) || null;
+  function refreshBackgroundTasks() {
+    const activeId = state.activeJob?.job_id || '';
+    const cards = [];
+    state.translationRuns.forEach((run, jobId) => {
+      if (jobId === activeId || !run.running) return;
+      const queued = run.phase === 'queued';
+      cards.push({
+        id: `translation:${jobId}`, kind: 'translation', jobId, title: run.title,
+        status: run.stop ? 'cancelling' : queued ? 'queued' : 'running',
+        progress: translationRunPercent(run),
+        label: run.stop ? translationStatusLabels.stopping : queued ? translationStatusLabels.queued : translationStatusLabels.running,
+        detail: run.total ? `第 ${Math.min(run.total, run.done + 1)} / ${run.total} 段` : '',
+        cancellable: !run.stop, dismissible: false,
+      });
+    });
+    reflowRuns.forEach((run, jobId) => {
+      if (jobId === activeId) return;
+      const status = String(run.reflow?.status || 'queued');
+      const active = ACTIVE_REFLOW_STATUSES.has(status);
+      cards.push({
+        id: `reflow:${jobId}`, kind: 'reflow', jobId, title: run.title, status,
+        progress: reflowPercent(run.reflow),
+        label: reflowStatusLabels[status] || reflowStatusLabels.running,
+        detail: String(run.reflow?.error || run.reflow?.stage || '').slice(0, 160),
+        cancellable: active && status !== 'cancelling', dismissible: !active,
+      });
+    });
+    backgroundTasksView?.render(cards);
+    const busy = busyDocumentIds();
+    $$('#document-tabs .document-tab').forEach((tab) => tab.classList.toggle('is-busy', busy.has(tab.dataset.jobId)));
+  }
   function normalizeTypographyValue(key, value) {
     const limits = typographyLimits[key];
     const numeric = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN;

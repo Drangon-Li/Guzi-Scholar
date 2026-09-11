@@ -153,7 +153,7 @@ h2 { margin: 0; font-size: 22px; line-height: 1.2; letter-spacing: -.02em; }
 .typography-number-control { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 2px; color: var(--muted); font-size: 10px; }
 .typography-number-control input { width: 48px; min-width: 0; padding: 4px 3px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); font: inherit; text-align: right; }
 .typography-number-control input:focus-visible { border-color: var(--accent); outline: 2px solid color-mix(in srgb,var(--accent) 24%,transparent); outline-offset: 1px; }
-.translation-progress { position: fixed; bottom: 26px; left: 50%; z-index: 90; display: flex; align-items: center; gap: 12px; width: min(440px, calc(100vw - 48px)); padding: 10px 14px; border: 1px solid var(--line); border-radius: 11px; background: var(--material-overlay); backdrop-filter: var(--material-filter); box-shadow: var(--shadow-pop); color: var(--text-secondary); font-size: 11px; transform: translateX(-50%); animation: rise-in-centered var(--motion-panel) var(--motion-ease-out); }
+.translation-progress { position: relative; display: flex; align-items: center; gap: 12px; width: 100%; padding: 10px 14px; border: 1px solid var(--line); border-radius: 11px; background: var(--material-overlay); backdrop-filter: var(--material-filter); box-shadow: var(--shadow-pop); color: var(--text-secondary); font-size: 11px; animation: rise-in var(--motion-panel) var(--motion-ease-out); }
 .translation-progress-dots { display: inline-flex; flex: 0 0 auto; gap: 4px; }
 .translation-progress-dots span { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: chat-thinking-bounce 1.2s ease-in-out infinite; }
 .translation-progress-dots span:nth-child(2) { animation-delay: .15s; }
@@ -184,10 +184,26 @@ h2 { margin: 0; font-size: 22px; line-height: 1.2; letter-spacing: -.02em; }
 .translation-progress[data-state="failed"] .translation-progress-head { align-items: flex-start; }
 .translation-progress[data-state="failed"] .translation-progress-count { white-space: normal; overflow: visible; overflow-wrap: anywhere; }
 .reflow-progress[data-state="cancelled"] { color: var(--muted); }
-#translation-progress:not([hidden]) + #reflow-progress { bottom: 94px; }
-.toast { position: fixed; z-index: 100; right: 26px; bottom: 25px; max-width: 360px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--material-overlay); backdrop-filter: var(--material-filter); box-shadow: var(--shadow-pop); color: var(--ink); font-size: 12px; animation: rise-in var(--motion-panel) var(--motion-ease-out); transition: opacity var(--motion-fast) ease, transform var(--motion-fast) ease; }
+.toast { position: fixed; z-index: 100; right: 26px; bottom: calc(25px + var(--background-tasks-offset, 0px)); max-width: 360px; padding: 10px 13px; border: 1px solid var(--line); border-radius: 9px; background: var(--material-overlay); backdrop-filter: var(--material-filter); box-shadow: var(--shadow-pop); color: var(--ink); font-size: 12px; animation: rise-in var(--motion-panel) var(--motion-ease-out); transition: opacity var(--motion-fast) ease, transform var(--motion-fast) ease, bottom var(--motion-fast) var(--motion-ease-out); }
 .toast.is-closing { opacity: 0; transform: translateY(6px); pointer-events: none; }
 .toast.error { border-color: #f0c4c7; color: #a5424c; }
+/* Background work lives in one bottom-right tray: the active document's own
+   translation and reflow panels sit at the top, other documents' runs follow
+   as cards, and the toast lifts above whatever the tray currently shows. */
+.background-tasks { position: fixed; right: 26px; bottom: 25px; z-index: 90; display: flex; flex-direction: column; align-items: stretch; gap: 8px; width: min(400px, calc(100vw - 48px)); }
+.background-tasks:not(:has(.translation-progress:not([hidden]))) { display: none; }
+.background-tasks-cards { display: flex; flex-direction: column; gap: 8px; }
+.background-tasks-list { display: contents; }
+.background-tasks-toggle { display: flex; align-items: center; justify-content: space-between; gap: 8px; align-self: flex-end; padding: 5px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--material-overlay); backdrop-filter: var(--material-filter); box-shadow: var(--shadow); color: var(--text-secondary); font-size: 11px; font-weight: 640; cursor: pointer; }
+.background-tasks-toggle:hover, .background-tasks-toggle:focus-visible { outline: 0; border-color: color-mix(in srgb,var(--accent) 46%,var(--line)); color: var(--accent-dark); }
+.background-tasks-chevron { transition: transform var(--motion-fast) var(--motion-ease-out); }
+.background-tasks.is-collapsed .background-tasks-cards { display: none; }
+.background-tasks.is-collapsed .background-tasks-chevron { transform: rotate(180deg); }
+.background-task-kind { flex: 0 0 auto; font-weight: 640; }
+.background-task-value { margin-left: auto; flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.background-task-actions { display: inline-flex; flex: 0 0 auto; gap: 4px; }
+.translation-progress[data-state="queued"] .translation-progress-dots span { animation-play-state: paused; opacity: .35; }
+.document-tab.is-busy .document-tab-label::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: var(--accent); vertical-align: 1px; animation: settings-save-pulse .9s ease-in-out infinite alternate; }
 
 .drop-overlay { position: fixed; z-index: 90; inset: 0; display: grid; place-content: center; gap: 8px; border: 4px solid color-mix(in srgb,var(--accent) 70%,transparent); background: color-mix(in srgb,var(--accent-soft) 78%,transparent); color: var(--accent-dark); text-align: center; pointer-events: none; backdrop-filter: blur(4px); }
 .drop-overlay strong { font-size: 24px; }.drop-overlay span { font-size: 13px; color: var(--muted); }
@@ -1428,8 +1444,8 @@ body.resizing-library-column, body.resizing-library-column * { cursor: col-resiz
   .details-actions { display: grid; grid-template-columns: 1fr 1fr; }
   .details-actions button { width: 100%; }
   .library-details { padding-inline: 14px; }
-  .toast { right: 12px; left: 12px; bottom: calc(16px + env(safe-area-inset-bottom)); max-width: none; }
-  .translation-progress { width: calc(100vw - 24px); bottom: calc(16px + env(safe-area-inset-bottom)); }
+  .toast { right: 12px; left: 12px; bottom: calc(16px + env(safe-area-inset-bottom) + var(--background-tasks-offset, 0px)); max-width: none; }
+  .background-tasks { right: 12px; left: 12px; width: auto; bottom: calc(16px + env(safe-area-inset-bottom)); }
 }
 
 

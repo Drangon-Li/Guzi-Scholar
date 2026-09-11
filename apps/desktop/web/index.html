@@ -138,31 +138,6 @@
           <button id="typography-reset" class="tiny-button" type="button">恢复默认</button>
         </div>
       </div>
-      <div id="translation-progress" class="translation-progress" hidden>
-        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
-        <div class="translation-progress-main">
-          <div class="translation-progress-head">
-            <span id="translation-progress-label">全文翻译准备中</span>
-            <span id="translation-progress-count" class="translation-progress-count"></span>
-            <span id="translation-progress-value">0%</span>
-          </div>
-          <div class="translation-progress-track" role="progressbar" aria-label="全文翻译进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="translation-progress-bar" class="translation-progress-bar"></div></div>
-          <div id="translation-progress-detail" class="translation-progress-detail" hidden></div>
-        </div>
-        <button id="stop-translation-button" class="tiny-button" type="button">停止</button>
-      </div>
-      <div id="reflow-progress" class="translation-progress reflow-progress" role="status" aria-live="polite" hidden>
-        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
-        <div class="translation-progress-main">
-          <div class="translation-progress-head">
-            <span id="reflow-progress-label">AI 重排准备中</span>
-            <span id="reflow-progress-stage" class="translation-progress-count"></span>
-            <span id="reflow-progress-value">0%</span>
-          </div>
-          <div id="reflow-progress-track" class="translation-progress-track" role="progressbar" aria-label="AI 重排进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="reflow-progress-bar" class="translation-progress-bar"></div></div>
-        </div>
-        <button id="cancel-reflow-button" class="tiny-button" type="button">取消</button>
-      </div>
       <div class="reader-grid">
         <aside id="reader-sidebar" class="reader-sidebar" aria-label="阅读助手" aria-hidden="true">
           <button id="reader-sidebar-resizer" class="reader-sidebar-resizer" type="button" role="separator" aria-label="调整阅读助手宽度" aria-orientation="vertical" aria-controls="reader-sidebar" aria-valuemin="320" aria-valuemax="620" aria-valuenow="380"></button>
@@ -422,6 +397,37 @@
     </section>
   </main>
 
+  <aside id="background-tasks" class="background-tasks" aria-label="后台任务">
+    <button id="background-tasks-toggle" class="background-tasks-toggle" type="button" aria-expanded="true" hidden><span id="background-tasks-summary"></span><span class="background-tasks-chevron" aria-hidden="true">⌄</span></button>
+    <div class="background-tasks-cards">
+      <div id="translation-progress" class="translation-progress" hidden>
+        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+        <div class="translation-progress-main">
+          <div class="translation-progress-head">
+            <span id="translation-progress-label">全文翻译准备中</span>
+            <span id="translation-progress-count" class="translation-progress-count"></span>
+            <span id="translation-progress-value">0%</span>
+          </div>
+          <div class="translation-progress-track" role="progressbar" aria-label="全文翻译进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="translation-progress-bar" class="translation-progress-bar"></div></div>
+          <div id="translation-progress-detail" class="translation-progress-detail" hidden></div>
+        </div>
+        <button id="stop-translation-button" class="tiny-button" type="button">停止</button>
+      </div>
+      <div id="reflow-progress" class="translation-progress reflow-progress" role="status" aria-live="polite" hidden>
+        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+        <div class="translation-progress-main">
+          <div class="translation-progress-head">
+            <span id="reflow-progress-label">AI 重排准备中</span>
+            <span id="reflow-progress-stage" class="translation-progress-count"></span>
+            <span id="reflow-progress-value">0%</span>
+          </div>
+          <div id="reflow-progress-track" class="translation-progress-track" role="progressbar" aria-label="AI 重排进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="reflow-progress-bar" class="translation-progress-bar"></div></div>
+        </div>
+        <button id="cancel-reflow-button" class="tiny-button" type="button">取消</button>
+      </div>
+      <div id="background-tasks-list" class="background-tasks-list"></div>
+    </div>
+  </aside>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
   <dialog id="onboarding-dialog" class="onboarding-dialog" aria-labelledby="onboarding-title-1" aria-describedby="onboarding-description-1">
@@ -565,6 +571,7 @@
   <script src="/web/graph-view.js"></script>
   <script src="/web/core.js"></script>
   <script src="/web/onboarding.js"></script>
+  <script src="/web/background-tasks.js"></script>
   <script src="/web/app.js"></script>
 </body>
 </html>
