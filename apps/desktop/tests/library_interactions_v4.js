@@ -662,6 +662,17 @@ async function waitForLibrary(page) {
     await cellEditor.locator('[data-cell-save]').click();
     await inlineTopicPatch;
     await page.waitForFunction((id) => [...document.querySelectorAll(`.library-row[data-job-id="${id}"] .tag-chip`)].some((chip) => chip.textContent.trim() === '快速编辑标签'), firstId);
+    // A tag already used in the library is offered when tagging another paper,
+    // so one topic does not end up stored under two spellings.
+    await valueCell(secondId, 'research_topic').click();
+    await cellEditor.locator('[data-cell-tag="快速编辑标签"]').waitFor();
+    if (await cellEditor.locator('[data-cell-tag="快速编辑标签"]').getAttribute('aria-pressed') !== 'false') throw new Error('其他文献的候选标签被预先选中。');
+    const reusePatch = page.waitForResponse((response) => response.request().method() === 'PATCH' && response.url().endsWith(`/api/library/items/${secondId}`));
+    await cellEditor.locator('[data-cell-tag="快速编辑标签"]').click();
+    await cellEditor.locator('[data-cell-save]').click();
+    await reusePatch;
+    await page.waitForFunction((id) => [...document.querySelectorAll(`.library-row[data-job-id="${id}"] .tag-chip`)].some((chip) => chip.textContent.trim() === '快速编辑标签'), secondId);
+
     await valueCell(firstId, 'venue').click();
     await cellEditor.waitFor({ state: 'visible' });
     await page.keyboard.press('Escape');
@@ -683,6 +694,7 @@ async function waitForLibrary(page) {
       placeholders: true,
       readingStatusDropdown: true,
       inlineCellEditing: true,
+      existingTagsOfferedAsCandidates: true,
       readingStatusMenuVisible: true,
       flatAllPapersAndCategoryPage: true,
       columnSettingsPreserveWidth: true,

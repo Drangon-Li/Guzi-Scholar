@@ -1655,6 +1655,27 @@
   // own type.
   const libraryCellEditor = { jobId: '', propertyId: '', anchor: null };
   const CELL_EDITOR_WIDTH = 248;
+  // What to offer when setting a property. A curated option list is offered
+  // verbatim; an open one (研究主题 ships with none) is answered by what the
+  // library already uses, most-used first, so a tag is picked rather than
+  // retyped -- and retyping it slightly differently is how a library ends up
+  // with two tags for one topic.
+  function libraryPropertyChoices(property, current = []) {
+    const chosen = (Array.isArray(current) ? current : [current]).map(String).filter(Boolean);
+    const configured = (property?.options || []).map(String);
+    if (configured.length) return [...new Set([...configured, ...chosen])];
+    const usage = new Map();
+    Object.values(libraryState().items || {}).forEach((item) => {
+      if (!item || item.deleted_at) return;
+      const value = item.values?.[property.id];
+      (Array.isArray(value) ? value : [value]).forEach((entry) => {
+        const text = String(entry ?? '').trim();
+        if (text) usage.set(text, (usage.get(text) || 0) + 1);
+      });
+    });
+    chosen.forEach((entry) => { if (!usage.has(entry)) usage.set(entry, 0); });
+    return [...usage.keys()].sort((left, right) => (usage.get(right) - usage.get(left)) || left.localeCompare(right, 'zh-CN'));
+  }
   function libraryCellCurrent(entry, property) {
     const values = itemValues(entry);
     if (property.type === 'multi-select') return Array.isArray(values[property.id]) ? [...values[property.id]] : [];
@@ -1672,13 +1693,13 @@
       return `${heading}<div class="cell-editor-stars" role="radiogroup" aria-label="${escapeHTML(label)}">${Array.from({ length: max }, (_, index) => { const score = index + 1; return `<button type="button" class="${score <= current ? 'is-filled' : ''}" data-cell-star="${score}" role="radio" aria-checked="${score === current ? 'true' : 'false'}" aria-label="${score} 星">★</button>`; }).join('')}</div><div class="cell-editor-hint">再次点击当前星级可清空。</div>`;
     }
     if (property.type === 'select') {
-      const options = property.id === 'reading_status' ? readingStatusOptions() : (property.options || []);
+      const options = property.id === 'reading_status' ? readingStatusOptions() : libraryPropertyChoices(property, current);
       const clearable = property.id !== 'reading_status';
       return `${heading}<div class="cell-editor-options" role="listbox" aria-label="${escapeHTML(label)}">${options.map((option) => `<button type="button" class="cell-editor-option" role="option" aria-selected="${option === current ? 'true' : 'false'}" data-cell-option="${escapeHTML(option)}">${escapeHTML(option)}</button>`).join('')}${clearable ? `<button type="button" class="cell-editor-option" role="option" aria-selected="${current ? 'false' : 'true'}" data-cell-option="">清除</button>` : ''}</div>`;
     }
     if (property.type === 'multi-select') {
-      const choices = [...new Set([...(property.options || []), ...current])];
-      return `${heading}<div class="cell-editor-tags">${choices.map((choice) => `<button type="button" class="cell-editor-tag" data-cell-tag="${escapeHTML(choice)}" aria-pressed="${current.includes(choice) ? 'true' : 'false'}">${escapeHTML(choice)}</button>`).join('')}</div><input class="cell-editor-input" data-cell-input type="text" placeholder="输入后回车新增" aria-label="新增${escapeHTML(label)}"><div class="cell-editor-actions"><button type="button" class="tiny-button" data-cell-cancel>取消</button><button type="button" class="primary-button compact-button" data-cell-save>完成</button></div>`;
+      const choices = libraryPropertyChoices(property, current);
+      return `${heading}<div class="cell-editor-tags">${choices.length ? choices.map((choice) => `<button type="button" class="cell-editor-tag" data-cell-tag="${escapeHTML(choice)}" aria-pressed="${current.includes(choice) ? 'true' : 'false'}">${escapeHTML(choice)}</button>`).join('') : '<span class="cell-editor-hint">文献库里还没有这个属性的标签，在下面新建。</span>'}</div><input class="cell-editor-input" data-cell-input type="text" placeholder="输入后回车新增" aria-label="新增${escapeHTML(label)}"><div class="cell-editor-actions"><button type="button" class="tiny-button" data-cell-cancel>取消</button><button type="button" class="primary-button compact-button" data-cell-save>完成</button></div>`;
     }
     return `${heading}<input class="cell-editor-input" data-cell-input type="text" maxlength="1000" value="${escapeHTML(current)}" aria-label="${escapeHTML(label)}"><div class="cell-editor-actions"><button type="button" class="tiny-button" data-cell-cancel>取消</button><button type="button" class="primary-button compact-button" data-cell-save>保存</button></div>`;
   }
@@ -3128,9 +3149,9 @@
     let content = '';
     if (property.type === 'rating') content = `<div class="rating-picker">${Array.from({ length: property.max || 5 }, (_, index) => `<button type="button" data-rating="${index + 1}" aria-label="${index + 1} 星">${index < Number(current || 0) ? '★' : '☆'}</button>`).join('')}</div><input id="editor-rating" type="hidden" value="${Number(current || 0)}">`;
     else if (property.type === 'multi-select') {
-      const choices = new Set([...(property.options || []), ...((current instanceof Array) ? current : [])]);
+      const choices = libraryPropertyChoices(property, current);
       content = `<label>${escapeHTML(property.label)}<input id="editor-multi" value="${escapeHTML((current || []).join(', '))}" placeholder="多个标签用逗号分隔"></label><div class="tag-option-list">${[...choices].map((item) => `<button class="tag-option${(current || []).includes(item) ? ' active' : ''}" type="button" data-tag-choice="${escapeHTML(item)}">${escapeHTML(item)}</button>`).join('')}</div>`;
-    } else if (property.type === 'select') content = `<label>${escapeHTML(property.label)}<select id="editor-value">${(property.options || []).map((item) => `<option${item === current ? ' selected' : ''}>${escapeHTML(item)}</option>`).join('')}</select></label>`;
+    } else if (property.type === 'select') content = `<label>${escapeHTML(property.label)}<select id="editor-value">${libraryPropertyChoices(property, current).map((item) => `<option${item === current ? ' selected' : ''}>${escapeHTML(item)}</option>`).join('')}</select></label>`;
     else content = `<label>${escapeHTML(property.label)}<input id="editor-value" maxlength="1000" value="${escapeHTML(current)}" autofocus></label>`;
     openLibraryEditor(`设置${property.label}`, content, async (node) => {
       if (property.type === 'rating') value = Number(node.querySelector('#editor-rating').value);
