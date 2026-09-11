@@ -66,7 +66,7 @@
     openDocuments: [], translationCache: [], translationCaches: new Map(), translationRun: null, translationRuns: new Map(),
     hiddenTranslationJobs: new Set(),
     mediaLayouts: new Map(),
-    health: null, library: null, activeFolderId: 'system-all', activeViewId: 'view-all', librarySort: 'updated_at-desc', libraryMode: 'list', primaryView: 'library-view',
+    health: null, library: null, activeFolderId: 'system-all', activeViewId: 'view-all', librarySort: 'updated_at-desc', libraryStatusFilter: '', libraryMode: 'list', primaryView: 'library-view',
     selectedLibraryJobId: null, selectedLibraryJobIds: new Set(), activeGroupValue: null, groupingMenuOpen: false,
     graphController: null, graphData: null, graphConfig: { showSimilarity: false, showAttributes: true, attributeIds: null, topK: 2, viewportScale: 0.85 },
     inlineImportanceSaving: new Set(),
@@ -370,9 +370,28 @@
     node.hidden = !message;
   }
 
+  // The outgoing view stays painted for one short exit animation, laid over
+  // the incoming one; the new view is active synchronously, so callers and
+  // tests that look for `.active-view` right away still find it.
+  function retireView(view) {
+    if (reducedMotionQuery.matches) {
+      view.hidden = true;
+      return;
+    }
+    view.classList.add('is-leaving');
+    const finish = () => {
+      if (!view.classList.contains('is-leaving')) return;
+      view.classList.remove('is-leaving');
+      if (!view.classList.contains('active-view')) view.hidden = true;
+    };
+    view.addEventListener('animationend', finish, { once: true });
+    window.setTimeout(finish, 240);
+  }
   function switchView(viewId, { enteringDocumentId = null } = {}) {
     if (viewId !== 'library-view' && state.groupingMenuOpen) setGroupingMenuOpen(false);
+    if (viewId !== 'library-view' && viewId !== 'views-view') closeLibraryCellEditor();
     if (viewId !== 'reader-view') closeChatSessionMenu();
+    if (viewId !== 'reader-view') closeTranslationScopeMenu();
     if (viewId !== 'reader-view') closeReaderSearch({ reset: true });
     if (viewId !== 'reader-view') clearReaderSentenceHover(frameDocument());
     if (viewId !== 'reader-view' && $('#reader-view')?.classList.contains('active-view')) captureCurrentReadingLocation();
@@ -391,7 +410,18 @@
     if (viewId !== 'reader-view' && state.activeJob) {
       flushPendingArticleNotes(state.activeJob.job_id);
     }
-    $$('.view').forEach((view) => { view.hidden = view.id !== viewId; view.classList.toggle('active-view', view.id === viewId); });
+    $$('.view').forEach((view) => {
+      const active = view.id === viewId;
+      if (active) {
+        view.classList.remove('is-leaving');
+        view.hidden = false;
+      } else if (view.classList.contains('active-view')) {
+        retireView(view);
+      } else if (!view.classList.contains('is-leaving')) {
+        view.hidden = true;
+      }
+      view.classList.toggle('active-view', active);
+    });
     if (viewId !== 'reader-view') state.primaryView = viewId;
     // The document tab is the active surface while reading. Keep the library
     // or saved-view context in state for returning there, but do not paint a
@@ -610,6 +640,8 @@
       const title = itemTitle({ job, item: state.library?.items?.[job.job_id] || {} });
       return `<div class="document-tab${active}${entering}" data-job-id="${escapeHTML(job.job_id)}" role="tab" aria-selected="${active ? 'true' : 'false'}" tabindex="${job.job_id === rovingJobId ? '0' : '-1'}"><span class="document-tab-label" title="${escapeHTML(title)}">${escapeHTML(title)}</span><button class="document-tab-close" data-close-job-id="${escapeHTML(job.job_id)}" type="button" tabindex="-1" aria-label="关闭 ${escapeHTML(title)}">×</button></div>`;
     }).join('');
+    const busyDocuments = busyDocumentIds();
+    container.querySelectorAll('.document-tab').forEach((tab) => tab.classList.toggle('is-busy', busyDocuments.has(tab.dataset.jobId)));
     container.querySelectorAll('.document-tab').forEach((tab) => tab.addEventListener('click', (event) => {
       if (event.target.closest('[data-close-job-id]')) return;
       const job = state.openDocuments.find((item) => item.job_id === tab.dataset.jobId) || state.jobs.find((item) => item.job_id === tab.dataset.jobId);
@@ -993,6 +1025,13 @@
   const systemLibraryColumnIds = new Set(['name', 'title', 'research_topic', 'importance', 'reading_status', 'venue']);
   function libraryState() { return state.library || { folders: [], properties: [], items: {}, views: [], folder_counts: {} }; }
   function libraryProperties() { return (libraryState().properties || []).filter((item) => item && !item.hidden).sort((a, b) => (a.order || 0) - (b.order || 0)); }
+  // The status vocabulary is served by the library store; the literal list only
+  // covers a render before the first snapshot arrives.
+  function readingStatusOptions() {
+    const options = (libraryState().properties || []).find((property) => property?.id === 'reading_status')?.options;
+    return Array.isArray(options) && options.length ? options.map(String) : ['未开始', '计划中', '阅读中', '已完成'];
+  }
+  const PRE_READING_STATUSES = new Set(['未开始', '计划中']);
   function allLibraryProperties() { return (libraryState().properties || []).filter((item) => item).sort((a, b) => (a.order || 0) - (b.order || 0)); }
   function libraryDisplayColumns() {
     const library = libraryState();
@@ -1017,14 +1056,26 @@
     const value = Number(column?.width);
     return Number.isFinite(value) ? Math.max(libraryColumnMinWidth(column), Math.min(520, Math.round(value))) : null;
   }
+  // One table of minimum widths and growth factors feeds both the grid
+  // template and the row's minimum width, so a row is always at least as
+  // wide as its tracks: a fixed-width column set that outgrows the default
+  // minimum used to spill past the row box and lose its background.
+  const libraryColumnTracks = { name: [150, '1.65fr'], title: [140, '1.35fr'], research_topic: [92, '1.05fr'], importance: [86, '.8fr'], reading_status: [84, '.82fr'], venue: [96, '1.08fr'] };
+  const LIBRARY_ACTIONS_TRACK = 40;
+  const LIBRARY_COLUMN_GAP = 8;
+  const LIBRARY_ROW_INSET = 24;
+  function libraryColumnTrack(column) {
+    const fixed = libraryColumnWidth(column);
+    if (fixed) return { min: fixed, track: `${fixed}px` };
+    const [min, grow] = libraryColumnTracks[column?.id] || [88, '1fr'];
+    return { min, track: `minmax(${min}px,${grow})` };
+  }
   function libraryGridTemplate(columns) {
-    const widths = columns.map((column) => {
-      const fixed = libraryColumnWidth(column);
-      if (fixed) return `${fixed}px`;
-      return column.id === 'name' ? 'minmax(150px,1.65fr)' : column.id === 'title' ? 'minmax(140px,1.35fr)' : column.id === 'research_topic' ? 'minmax(92px,1.05fr)' : column.id === 'importance' ? 'minmax(86px,.8fr)' : column.id === 'reading_status' ? 'minmax(84px,.82fr)' : column.id === 'venue' ? 'minmax(96px,1.08fr)' : 'minmax(88px,1fr)';
-    });
-    widths.push('minmax(40px,auto)');
-    return widths.join(' ');
+    return [...columns.map((column) => libraryColumnTrack(column).track), `minmax(${LIBRARY_ACTIONS_TRACK}px,auto)`].join(' ');
+  }
+  function libraryTableMinWidth(columns) {
+    const tracks = columns.reduce((sum, column) => sum + libraryColumnTrack(column).min, LIBRARY_ACTIONS_TRACK);
+    return `${tracks + columns.length * LIBRARY_COLUMN_GAP + LIBRARY_ROW_INSET}px`;
   }
   function libraryItemEntries() {
     // The library snapshot intentionally carries a compact job record for
@@ -1034,7 +1085,11 @@
   }
   function itemValues(entry) { return entry.item?.values || {}; }
   function itemMetadata(entry) { return entry.item?.metadata?.fields || {}; }
-  function itemTitle(entry) { return String(itemMetadata(entry).title || entry.job?.source_filename || '未命名文献').replace(/\.pdf$/i, ''); }
+  // The alias is what the reader wants to see; the original title is what the
+  // paper is called, kept for tooltips, search and the metadata itself.
+  function itemOriginalTitle(entry) { return String(itemMetadata(entry).title || entry.job?.source_filename || '未命名文献').replace(/\.pdf$/i, ''); }
+  function itemAlias(entry) { return String(entry.item?.alias || '').trim(); }
+  function itemTitle(entry) { return itemAlias(entry) || itemOriginalTitle(entry); }
   const VENUE_ABBREVIATIONS = [
     [/neural information processing systems/, 'NIPS'],
     [/international conference on machine learning/, 'ICML'],
@@ -1108,7 +1163,7 @@
   function itemSearchText(entry) {
     const values = itemValues(entry);
     const metadata = itemMetadata(entry);
-    return [entry.job?.source_filename, itemTitle(entry), itemVenue(entry), metadata.doi, metadata.arxiv_id, metadata.pmid, ...(values.research_topic || [])].join(' ').toLowerCase();
+    return [entry.job?.source_filename, itemTitle(entry), itemOriginalTitle(entry), itemVenue(entry), metadata.doi, metadata.arxiv_id, metadata.pmid, ...(values.research_topic || [])].join(' ').toLowerCase();
   }
   const systemGroupLabels = { name: '名称', title: '标题', research_topic: '研究主题', importance: '重要程度', reading_status: '阅读状态', venue: '接收/来源' };
   function groupableColumns() {
@@ -1594,32 +1649,205 @@
     syncGraphSelectionDetails();
   }
 
+  // Inline cell editing. The list used to be read-only data with every change
+  // routed through the details panel; a quick change is faster where the value
+  // is read. One popover serves every editable cell, shaped by the property's
+  // own type.
+  const libraryCellEditor = { jobId: '', propertyId: '', anchor: null };
+  const CELL_EDITOR_WIDTH = 248;
+  // What to offer when setting a property. A curated option list is offered
+  // verbatim; an open one (研究主题 ships with none) is answered by what the
+  // library already uses, most-used first, so a tag is picked rather than
+  // retyped -- and retyping it slightly differently is how a library ends up
+  // with two tags for one topic.
+  function libraryPropertyChoices(property, current = []) {
+    const chosen = (Array.isArray(current) ? current : [current]).map(String).filter(Boolean);
+    const configured = (property?.options || []).map(String);
+    if (configured.length) return [...new Set([...configured, ...chosen])];
+    const usage = new Map();
+    Object.values(libraryState().items || {}).forEach((item) => {
+      if (!item || item.deleted_at) return;
+      const value = item.values?.[property.id];
+      (Array.isArray(value) ? value : [value]).forEach((entry) => {
+        const text = String(entry ?? '').trim();
+        if (text) usage.set(text, (usage.get(text) || 0) + 1);
+      });
+    });
+    chosen.forEach((entry) => { if (!usage.has(entry)) usage.set(entry, 0); });
+    return [...usage.keys()].sort((left, right) => (usage.get(right) - usage.get(left)) || left.localeCompare(right, 'zh-CN'));
+  }
+  function libraryCellCurrent(entry, property) {
+    const values = itemValues(entry);
+    if (property.type === 'multi-select') return Array.isArray(values[property.id]) ? [...values[property.id]] : [];
+    if (property.type === 'rating') return Math.max(0, Math.min(Number(property.max) || 5, Number(values[property.id]) || 0));
+    // A venue nobody edited by hand is still shown, derived from the metadata;
+    // the editor opens on what the row displays.
+    if (property.id === 'venue') return String(values.venue || itemVenue(entry) || '');
+    return values[property.id] == null ? '' : String(values[property.id]);
+  }
+  function libraryCellEditorHTML(property, current) {
+    const label = String(property.label || property.id);
+    const heading = `<div class="cell-editor-title">${escapeHTML(label)}</div>`;
+    if (property.type === 'rating') {
+      const max = Math.max(1, Math.min(10, Number(property.max) || 5));
+      return `${heading}<div class="cell-editor-stars" role="radiogroup" aria-label="${escapeHTML(label)}">${Array.from({ length: max }, (_, index) => { const score = index + 1; return `<button type="button" class="${score <= current ? 'is-filled' : ''}" data-cell-star="${score}" role="radio" aria-checked="${score === current ? 'true' : 'false'}" aria-label="${score} 星">★</button>`; }).join('')}</div><div class="cell-editor-hint">再次点击当前星级可清空。</div>`;
+    }
+    if (property.type === 'select') {
+      const options = property.id === 'reading_status' ? readingStatusOptions() : libraryPropertyChoices(property, current);
+      const clearable = property.id !== 'reading_status';
+      return `${heading}<div class="cell-editor-options" role="listbox" aria-label="${escapeHTML(label)}">${options.map((option) => `<button type="button" class="cell-editor-option" role="option" aria-selected="${option === current ? 'true' : 'false'}" data-cell-option="${escapeHTML(option)}">${escapeHTML(option)}</button>`).join('')}${clearable ? `<button type="button" class="cell-editor-option" role="option" aria-selected="${current ? 'false' : 'true'}" data-cell-option="">清除</button>` : ''}</div>`;
+    }
+    if (property.type === 'multi-select') {
+      const choices = libraryPropertyChoices(property, current);
+      return `${heading}<div class="cell-editor-tags">${choices.length ? choices.map((choice) => `<button type="button" class="cell-editor-tag" data-cell-tag="${escapeHTML(choice)}" aria-pressed="${current.includes(choice) ? 'true' : 'false'}">${escapeHTML(choice)}</button>`).join('') : '<span class="cell-editor-hint">文献库里还没有这个属性的标签，在下面新建。</span>'}</div><input class="cell-editor-input" data-cell-input type="text" placeholder="输入后回车新增" aria-label="新增${escapeHTML(label)}"><div class="cell-editor-actions"><button type="button" class="tiny-button" data-cell-cancel>取消</button><button type="button" class="primary-button compact-button" data-cell-save>完成</button></div>`;
+    }
+    return `${heading}<input class="cell-editor-input" data-cell-input type="text" maxlength="1000" value="${escapeHTML(current)}" aria-label="${escapeHTML(label)}"><div class="cell-editor-actions"><button type="button" class="tiny-button" data-cell-cancel>取消</button><button type="button" class="primary-button compact-button" data-cell-save>保存</button></div>`;
+  }
+  function closeLibraryCellEditor({ restoreFocus = false } = {}) {
+    const popover = $('#cell-editor-popover');
+    if (!popover || popover.hidden) return false;
+    const anchor = libraryCellEditor.anchor;
+    popover.hidden = true;
+    popover.replaceChildren();
+    ['left', 'top', 'width', 'max-height'].forEach((property) => popover.style.removeProperty(property));
+    delete popover.dataset.placement;
+    libraryCellEditor.jobId = '';
+    libraryCellEditor.propertyId = '';
+    libraryCellEditor.anchor = null;
+    if (restoreFocus && anchor?.isConnected) anchor.focus({ preventScroll: true });
+    return true;
+  }
+  function openLibraryCellEditor(cell) {
+    const popover = $('#cell-editor-popover');
+    const jobId = cell?.dataset.cellJob || '';
+    const propertyId = cell?.dataset.cellEdit || '';
+    const entry = libraryEntryById(jobId);
+    const property = propertyById(propertyId);
+    const reopening = Boolean(popover && !popover.hidden && libraryCellEditor.anchor === cell);
+    closeLibraryCellEditor();
+    if (reopening || !popover || !entry || !property) return;
+    libraryCellEditor.jobId = jobId;
+    libraryCellEditor.propertyId = propertyId;
+    libraryCellEditor.anchor = cell;
+    popover.innerHTML = libraryCellEditorHTML(property, libraryCellCurrent(entry, property));
+    popover.hidden = false;
+    positionViewportMenu(popover, cell.getBoundingClientRect(), { width: CELL_EDITOR_WIDTH });
+    window.requestAnimationFrame(() => {
+      (popover.querySelector('[data-cell-input]') || popover.querySelector('[aria-selected="true"],[aria-checked="true"],button'))?.focus({ preventScroll: true });
+    });
+  }
+  function libraryCellEditorValue(popover, property) {
+    if (property.type !== 'multi-select') return String(popover.querySelector('[data-cell-input]')?.value || '');
+    const chosen = [...popover.querySelectorAll('[data-cell-tag][aria-pressed="true"]')].map((node) => node.dataset.cellTag);
+    String(popover.querySelector('[data-cell-input]')?.value || '').split(/[,，、]/).map((item) => item.trim()).filter(Boolean)
+      .forEach((item) => { if (!chosen.includes(item)) chosen.push(item); });
+    return chosen;
+  }
+  async function commitLibraryCellValue(value) {
+    const { jobId, propertyId } = libraryCellEditor;
+    if (!jobId || !propertyId) return;
+    closeLibraryCellEditor();
+    await updateLibraryItem(jobId, { values: { [propertyId]: value } });
+  }
+  // A save re-renders the list, so the popover's anchor is replaced rather
+  // than moved; re-find the same cell instead of leaving the popover adrift.
+  function resyncLibraryCellEditor() {
+    const popover = $('#cell-editor-popover');
+    if (!popover || popover.hidden || libraryCellEditor.anchor?.isConnected) return;
+    const next = document.querySelector(`.library-row[data-job-id="${cssEscape(libraryCellEditor.jobId)}"] [data-cell-edit="${cssEscape(libraryCellEditor.propertyId)}"]`);
+    if (!next) { closeLibraryCellEditor(); return; }
+    libraryCellEditor.anchor = next;
+    positionViewportMenu(popover, next.getBoundingClientRect(), { width: CELL_EDITOR_WIDTH });
+  }
+  function repositionLibraryCellEditor() {
+    const popover = $('#cell-editor-popover');
+    if (!popover || popover.hidden) return;
+    if (!libraryCellEditor.anchor?.isConnected) { closeLibraryCellEditor(); return; }
+    positionViewportMenu(popover, libraryCellEditor.anchor.getBoundingClientRect(), { width: CELL_EDITOR_WIDTH });
+  }
+  $('#cell-editor-popover')?.addEventListener('click', async (event) => {
+    const popover = $('#cell-editor-popover');
+    const property = propertyById(libraryCellEditor.propertyId);
+    if (!property) return;
+    const option = event.target.closest('[data-cell-option]');
+    if (option) { await commitLibraryCellValue(option.dataset.cellOption); return; }
+    const star = event.target.closest('[data-cell-star]');
+    if (star) {
+      const entry = libraryEntryById(libraryCellEditor.jobId);
+      const current = entry ? libraryCellCurrent(entry, property) : 0;
+      const next = Number(star.dataset.cellStar);
+      await commitLibraryCellValue(next === current ? 0 : next);
+      return;
+    }
+    const tag = event.target.closest('[data-cell-tag]');
+    if (tag) { tag.setAttribute('aria-pressed', String(tag.getAttribute('aria-pressed') !== 'true')); return; }
+    if (event.target.closest('[data-cell-cancel]')) { closeLibraryCellEditor({ restoreFocus: true }); return; }
+    if (event.target.closest('[data-cell-save]')) await commitLibraryCellValue(libraryCellEditorValue(popover, property));
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && closeLibraryCellEditor({ restoreFocus: true })) event.preventDefault();
+  });
+  $('#cell-editor-popover')?.addEventListener('keydown', async (event) => {
+    if (event.key !== 'Enter' || !event.target.closest('[data-cell-input]')) return;
+    event.preventDefault();
+    const popover = $('#cell-editor-popover');
+    const property = propertyById(libraryCellEditor.propertyId);
+    if (!property) return;
+    const added = property.type === 'multi-select'
+      ? String(event.target.value || '').split(/[,，、]/).map((item) => item.trim()).filter(Boolean)
+      : [];
+    if (!added.length) { await commitLibraryCellValue(libraryCellEditorValue(popover, property)); return; }
+    // Enter on a non-empty field adds the tag and keeps the editor open, so
+    // several can be typed in a row before committing.
+    const list = popover.querySelector('.cell-editor-tags');
+    added.forEach((item) => {
+      const existing = list?.querySelector(`[data-cell-tag="${cssEscape(item)}"]`);
+      if (existing) { existing.setAttribute('aria-pressed', 'true'); return; }
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'cell-editor-tag';
+      button.dataset.cellTag = item;
+      button.setAttribute('aria-pressed', 'true');
+      button.textContent = item;
+      list?.append(button);
+    });
+    event.target.value = '';
+  });
+  document.addEventListener('pointerdown', (event) => {
+    const popover = $('#cell-editor-popover');
+    if (!popover || popover.hidden || popover.contains(event.target) || event.target.closest?.('[data-cell-edit]')) return;
+    closeLibraryCellEditor();
+  });
+
   function renderLibraryRows(entries) {
     const columns = visibleLibraryColumns();
     const propertyMap = new Map(libraryProperties().map((property) => [property.id, property]));
     return entries.map((entry) => {
       const values = itemValues(entry); const job = entry.job || {}; const counts = job.manifest?.counts || {};
+      // A trashed paper is restored before it is edited, so its cells stay flat.
+      const editableCell = (propertyId, inner, label) => (entry.item?.deleted_at
+        ? inner
+        : `<button class="row-cell-button" type="button" data-cell-edit="${escapeHTML(propertyId)}" data-cell-job="${escapeHTML(entry.jobId)}" aria-haspopup="dialog" aria-label="设置${escapeHTML(label)}">${inner}</button>`);
       const topics = Array.isArray(values.research_topic) ? values.research_topic : [];
       const title = itemTitle(entry);
       const cell = (column) => {
         const id = String(column.id);
-        if (id === 'name') return `<div class="library-row-name"><div class="library-row-name-text"><strong title="${escapeHTML(title)}">${escapeHTML(title || '未命名文献')}</strong><small>${escapeHTML(job.created_at ? new Date(job.created_at).toLocaleDateString('zh-CN') : '')} · ${counts.pages || '—'} 页</small></div></div>`;
+        if (id === 'name') return `<div class="library-row-name"><div class="library-row-name-text"><strong title="${escapeHTML(itemAlias(entry) ? `原题：${itemOriginalTitle(entry)}` : title)}">${escapeHTML(title || '未命名文献')}</strong><small>${escapeHTML(job.created_at ? new Date(job.created_at).toLocaleDateString('zh-CN') : '')} · ${counts.pages || '—'} 页</small></div></div>`;
         if (id === 'title') return `<div class="library-row-title" title="${escapeHTML(title)}">${escapeHTML(title)}</div>`;
-        // Rows are read-only data (Zotero-style); editing lives in the
-        // details panel so the table stays scannable.
-        if (id === 'research_topic') return `<div class="library-tags">${topics.length ? topics.map((topic) => `<span class="tag-chip">${escapeHTML(topic)}</span>`).join('') : '<span class="property-placeholder">—</span>'}</div>`;
+        if (id === 'research_topic') return editableCell('research_topic', `<div class="library-tags">${topics.length ? topics.map((topic) => `<span class="tag-chip">${escapeHTML(topic)}</span>`).join('') : '<span class="property-placeholder">—</span>'}</div>`, '研究主题');
         if (id === 'importance') {
           const rating = Math.max(0, Math.min(5, Number(values.importance) || 0));
-          return `<span class="row-stars" aria-label="重要程度 ${rating} 星">${'★'.repeat(rating)}<span class="star-empty">${'★'.repeat(5 - rating)}</span></span>`;
+          return editableCell('importance', `<span class="row-stars" aria-label="重要程度 ${rating} 星">${'★'.repeat(rating)}<span class="star-empty">${'★'.repeat(5 - rating)}</span></span>`, '重要程度');
         }
         if (id === 'reading_status') {
           const currentStatus = String(values.reading_status || '未开始');
-          return `<span class="row-status" data-status="${escapeHTML(currentStatus)}">${escapeHTML(currentStatus)}</span>`;
+          return editableCell('reading_status', `<span class="row-status" data-status="${escapeHTML(currentStatus)}">${escapeHTML(currentStatus)}</span>`, '阅读状态');
         }
-        if (id === 'venue') return `<span class="row-venue" title="${escapeHTML(itemVenue(entry))}">${escapeHTML(itemVenue(entry) || '—')}</span>`;
+        if (id === 'venue') return editableCell('venue', `<span class="row-venue" title="${escapeHTML(itemVenue(entry))}">${escapeHTML(itemVenue(entry) || '—')}</span>`, '接收/来源');
         const property = propertyMap.get(id);
         const hasValue = Array.isArray(values[id]) ? values[id].length : values[id] != null && values[id] !== '';
-        return `<span class="row-plain">${hasValue ? escapeHTML(formatPropertyValue(property || { type: 'text' }, values[id])) : '—'}</span>`;
+        const plain = `<span class="row-plain">${hasValue ? escapeHTML(formatPropertyValue(property || { type: 'text' }, values[id])) : '—'}</span>`;
+        return property ? editableCell(property.id, plain, property.label || property.id) : plain;
       };
       const shortcut = (label) => `<kbd>${escapeHTML(label)}</kbd>`;
       const selectedCount = selectedLibraryJobIds().length;
@@ -1650,7 +1878,13 @@
   }
   function applyLibraryGridTemplate() {
     const template = libraryGridTemplate(visibleLibraryColumns());
-    ['#library-columns', '#recent-list', '#view-results'].forEach((selector) => $(selector)?.style.setProperty('--library-grid-template', template));
+    const minWidth = libraryTableMinWidth(visibleLibraryColumns());
+    ['#library-columns', '#recent-list', '#view-results'].forEach((selector) => {
+      const node = $(selector);
+      if (!node) return;
+      node.style.setProperty('--library-grid-template', template);
+      node.style.setProperty('--library-table-min-width', minWidth);
+    });
     $$('.library-row').forEach((row) => row.style.setProperty('--library-grid-template', template));
     syncColumnResizerARIA();
   }
@@ -1726,6 +1960,21 @@
     persistColumnResize(column.id, previousWidth, hadPreviousWidth);
   }
   function formatPropertyValue(property, value) { if (property.type === 'multi-select') return Array.isArray(value) ? value.join(', ') || '添加标签' : '添加标签'; if (property.type === 'rating') return `${value || 0}/${property.max || 5}`; return String(value || '设置'); }
+  // The quick filter is a temporary overlay on whatever folder or saved view is
+  // open; it is not persisted and never rewrites the view's own filters.
+  function syncLibraryStatusFilter() {
+    const select = $('#library-status-filter');
+    if (!select) return;
+    const options = readingStatusOptions();
+    const rendered = [...select.options].slice(1).map((option) => option.value);
+    if (rendered.join('\u0000') !== options.join('\u0000')) {
+      select.replaceChildren(new Option('全部状态', ''), ...options.map((status) => new Option(status, status)));
+    }
+    if (!options.includes(state.libraryStatusFilter)) state.libraryStatusFilter = '';
+    select.value = state.libraryStatusFilter;
+    select.classList.toggle('is-filtering', Boolean(state.libraryStatusFilter));
+  }
+  let renderedLibraryMode = null;
   function renderLibrary(jobs = state.jobs) {
     const library = libraryState();
     const graphMode = state.libraryMode === 'graph';
@@ -1735,6 +1984,12 @@
     $('#library-graph-actions').hidden = !graphMode;
     $('#library-list-surface').hidden = graphMode;
     $('#library-graph-surface').hidden = !graphMode;
+    if (renderedLibraryMode !== null && renderedLibraryMode !== state.libraryMode && !reducedMotionQuery.matches) {
+      const surface = $(graphMode ? '#library-graph-surface' : '#library-list-surface');
+      surface.classList.add('library-surface-entering');
+      surface.addEventListener('animationend', () => surface.classList.remove('library-surface-entering'), { once: true });
+    }
+    renderedLibraryMode = state.libraryMode;
     $('#library-count').textContent = String(Object.keys(library.items || {}).filter((id) => !library.items[id]?.deleted_at).length || jobs.length);
     renderFolderTree(); updateFolderCounts(); renderSidebarViews();
     $$('[data-library-folder]').forEach((button) => button.classList.toggle('active', !graphMode && button.dataset.libraryFolder === state.activeFolderId));
@@ -1761,28 +2016,34 @@
       entries = selectedGroup?.entries || [];
     }
     if (query) entries = entries.filter((entry) => itemSearchText(entry).includes(query));
+    syncLibraryStatusFilter();
+    if (state.libraryStatusFilter) entries = entries.filter((entry) => String(itemValues(entry).reading_status || '未开始') === state.libraryStatusFilter);
     entries.sort((a, b) => compareLibraryEntries(a, b, state.librarySort));
     const activeFolder = folderById(state.activeFolderId); const selectedView = activeView(); $('#library-heading').textContent = activeFolder?.name || selectedView?.name || (state.activeGroupValue ? `${groupFieldLabel()}：${state.activeGroupValue}` : (state.activeFolderId === 'system-trash' ? '回收站' : '全部文献'));
-    $('#library-subtitle').textContent = state.activeFolderId === 'system-trash' ? '可恢复的本地文献' : `${entries.length} 篇 · 本机保存 · HTML 连续阅读`;
+    $('#library-subtitle').textContent = state.activeFolderId === 'system-trash' ? '可恢复的本地文献' : `${entries.length} 篇${state.libraryStatusFilter ? ` · 阅读状态：${state.libraryStatusFilter}` : ''} · 本机保存 · HTML 连续阅读`;
     if ($('#library-sort')) $('#library-sort').value = state.librarySort;
     const columns = visibleLibraryColumns();
     const template = libraryGridTemplate(columns);
     const header = $('#library-columns');
     if (header) {
       header.style.setProperty('--library-grid-template', template);
+      header.style.setProperty('--library-table-min-width', libraryTableMinWidth(columns));
       header.innerHTML = `${columns.map((column) => `<span class="library-column-header" data-column-id="${escapeHTML(column.id)}" role="columnheader"><span class="library-column-label">${escapeHTML(libraryColumnLabel(column))}</span><button class="column-resizer" data-column-resizer="${escapeHTML(column.id)}" type="button" role="separator" aria-orientation="vertical" aria-valuemin="${libraryColumnMinWidth(column)}" aria-valuemax="520" aria-valuenow="${libraryColumnWidth(column) || libraryColumnMinWidth(column)}" aria-label="调整${escapeHTML(libraryColumnLabel(column))}列宽"></button></span>`).join('')}<span class="library-actions-header" aria-hidden="true"></span>`;
       syncColumnResizerARIA();
     }
     if (!entries.length) { clearLibrarySelection(); $('#recent-list').innerHTML = `<div class="empty-state">${state.activeFolderId === 'system-trash' ? '回收站为空。' : '没有匹配的文献。拖入一份 PDF 开始。'}</div>`; return; }
     $('#recent-list').style.setProperty('--library-grid-template', template);
+    $('#recent-list').style.setProperty('--library-table-min-width', libraryTableMinWidth(columns));
     $('#recent-list').innerHTML = renderLibraryContent(entries);
     syncLibrarySelection();
     renderLibraryDetails();
+    resyncLibraryCellEditor();
   }
   async function loadLibrary() {
     try {
       const [jobsPayload, libraryPayload] = await Promise.all([api('/api/jobs'), api('/api/library')]);
       state.jobs = jobsPayload.jobs || []; state.library = libraryPayload.library || null;
+      resumeRunningReflows();
       const stored = JSON.parse(persistentStateGet(openTabsStorageKey) || '[]');
       if (Array.isArray(stored)) state.openDocuments = stored.map((id) => state.jobs.find((job) => job.job_id === id)).filter((job) => job?.status === 'completed');
       renderLibrary(); renderViews(); renderDocumentTabs();
@@ -1791,6 +2052,7 @@
   }
   $('#library-search').addEventListener('input', () => { clearLibrarySelection(); renderLibrary(); });
   $('#library-sort')?.addEventListener('change', (event) => { state.librarySort = event.target.value; renderLibrary(); });
+  $('#library-status-filter')?.addEventListener('change', (event) => { state.libraryStatusFilter = event.target.value; clearLibrarySelection(); renderLibrary(); });
   function syncLibrarySelection() {
     $$('.library-row').forEach((row) => {
       const selected = state.selectedLibraryJobIds.has(row.dataset.jobId);
@@ -2060,15 +2322,19 @@
     const editButton = (propertyId) => `<button class="details-edit-button" data-details-edit="${escapeHTML(propertyId)}" type="button">编辑</button>`;
     const actions = trashed
       ? `<button class="primary-button" data-details-action="restore" type="button">恢复文献</button><button class="secondary-button" data-details-action="metadata" type="button">元数据</button>`
-      : `<button class="primary-button" data-details-action="open" type="button"${job.status === 'completed' ? '' : ' disabled'}>打开阅读</button><button class="secondary-button" data-details-action="metadata" type="button">元数据</button><button class="secondary-button" data-details-action="folders" type="button">文件夹…</button><button class="secondary-button" data-details-action="trash" type="button">回收站</button>`;
+      // Opening and trashing both live on the row itself (double-click, the
+      // ⋯ menu), so the panel keeps only what it alone offers.
+      : `<button class="secondary-button" data-details-action="metadata" type="button">元数据</button><button class="secondary-button" data-details-action="folders" type="button">文件夹…</button>`;
     renderDetailsPanel(panel, `
-      <h2 title="${escapeHTML(itemTitle(entry))}">${escapeHTML(itemTitle(entry))}</h2>
+      <h2 title="${escapeHTML(itemOriginalTitle(entry))}">${escapeHTML(itemTitle(entry))}</h2>
+      ${itemAlias(entry) ? `<p class="details-meta secondary details-original-title">原题：${escapeHTML(itemOriginalTitle(entry))}</p>` : ''}
       ${authors.length ? `<p class="details-meta">${escapeHTML(authors.slice(0, 6).join('，'))}${authors.length > 6 ? ' 等' : ''}</p>` : ''}
       <p class="details-meta secondary">${escapeHTML([metadata.year, itemVenue(entry)].filter(Boolean).join(' · ') || '来源未识别')}</p>
       <div class="details-actions">${actions}</div>
       <dl class="details-fields">
+        ${field('显示名称', `<span class="details-edit-value"><span>${itemAlias(entry) ? escapeHTML(itemAlias(entry)) : '<span class="property-placeholder">未设置</span>'}</span>${editButton('alias')}</span>`)}
         ${field('重要程度', `<span class="details-stars" role="radiogroup" aria-label="重要程度">${Array.from({ length: 5 }, (_, index) => { const score = index + 1; return `<button type="button" class="${score <= rating ? 'is-filled' : ''}" data-details-importance="${score}" role="radio" aria-checked="${score === rating ? 'true' : 'false'}" aria-label="设为 ${score} 星">★</button>`; }).join('')}</span>`)}
-        ${field('阅读状态', `<span class="details-status" role="radiogroup" aria-label="阅读状态">${['未开始', '阅读中', '已完成'].map((option) => `<button type="button" class="${option === currentStatus ? 'active' : ''}" data-details-status="${escapeHTML(option)}" role="radio" aria-checked="${option === currentStatus ? 'true' : 'false'}">${option}</button>`).join('')}</span>`)}
+        ${field('阅读状态', `<select class="details-status-select" data-details-status-select aria-label="阅读状态">${readingStatusOptions().map((option) => `<option${option === currentStatus ? ' selected' : ''}>${escapeHTML(option)}</option>`).join('')}</select>`)}
         ${field('研究主题', `<span class="details-edit-value">${topics.length ? topics.map((topic) => `<span class="tag-chip">${escapeHTML(topic)}</span>`).join('') : '<span class="property-placeholder">未设置</span>'}${editButton('research_topic')}</span>`)}
         ${field('接收/来源', `<span class="details-edit-value"><span>${escapeHTML(itemVenue(entry) || '未设置')}</span>${editButton('venue')}</span>`)}
         ${customProperties.map((property) => { const raw = values[property.id]; const has = Array.isArray(raw) ? raw.length : raw != null && raw !== ''; return field(property.label || property.id, `<span class="details-edit-value"><span>${has ? escapeHTML(formatPropertyValue(property, raw)) : '<span class="property-placeholder">未设置</span>'}</span>${editButton(property.id)}</span>`); }).join('')}
@@ -2079,6 +2345,11 @@
       ${metadata.abstract ? `<h3 class="details-abstract-heading">摘要</h3><p class="details-abstract">${escapeHTML(String(metadata.abstract).slice(0, 900))}${String(metadata.abstract).length > 900 ? '…' : ''}</p>` : ''}
       ${renderGraphPaperConnections(entry.jobId)}`, `library-paper:${entry.jobId}`);
   }
+  $('#library-details')?.addEventListener('change', (event) => {
+    const select = event.target.closest('[data-details-status-select]');
+    const jobId = state.selectedLibraryJobId;
+    if (select && jobId) updateLibraryItem(jobId, { values: { reading_status: select.value } });
+  });
   $('#library-details')?.addEventListener('click', async (event) => {
     if (event.target.closest('[data-details-close]')) {
       setDetailsOpen(false, { restoreFocus: true });
@@ -2101,13 +2372,11 @@
       await setInlineImportance(jobId, next === current ? 0 : next);
       return;
     }
-    const status = event.target.closest('[data-details-status]');
-    if (status) {
-      updateLibraryItem(jobId, { values: { reading_status: status.dataset.detailsStatus } });
-      return;
-    }
     const edit = event.target.closest('[data-details-edit]');
-    if (edit) editLibraryProperty(jobId, edit.dataset.detailsEdit);
+    if (edit) {
+      if (edit.dataset.detailsEdit === 'alias') editLibraryAlias(jobId);
+      else editLibraryProperty(jobId, edit.dataset.detailsEdit);
+    }
   });
 
   async function handleLibraryListClick(event) {
@@ -2155,13 +2424,27 @@
       await performLibraryRowAction(jobId, action);
       return;
     }
+    const cell = event.target.closest('[data-cell-edit]');
+    if (cell) {
+      event.stopPropagation();
+      const cellRow = cell.closest('.library-row');
+      if (cellRow && !state.selectedLibraryJobIds.has(cellRow.dataset.jobId)) selectLibraryRow(cellRow);
+      openLibraryCellEditor(cell);
+      return;
+    }
     // Row controls own their click lifecycle; clicking a button or link must
     // not unexpectedly navigate into the reader.
     if (event.target.closest('button, select, input, a')) return;
   }
   async function handleLibraryListDblClick(event) {
     const row = event.target.closest('.library-row');
-    if (!row || event.target.closest('button, select, input, a, [data-row-more-menu]')) return;
+    if (!row) return;
+    // Value cells are buttons, and they cover most of a row. Double-clicking
+    // one still means "open this paper" -- the quick editor the first click
+    // opened gives way rather than swallowing the gesture.
+    const control = event.target.closest('button, select, input, a, [data-row-more-menu]');
+    if (control && !control.closest('[data-cell-edit]')) return;
+    closeLibraryCellEditor();
     event.preventDefault();
     selectLibraryRow(row);
     await performLibraryRowAction(row.dataset.jobId, 'open');
@@ -2450,6 +2733,7 @@
   }
   function repositionOpenRowMenus() {
     $$('.library-row.menu-open').forEach((row) => positionRowMenu(row, row.querySelector('.row-more-menu')));
+    repositionLibraryCellEditor();
   }
   window.addEventListener('resize', repositionOpenRowMenus, { passive: true });
   window.addEventListener('scroll', repositionOpenRowMenus, { passive: true });
@@ -2736,6 +3020,7 @@
     if (run?.running) cancelTranslationRun(run);
     state.translationRuns.delete(jobId);
     state.translationCaches.delete(jobId);
+    dropReflowRun(jobId);
     state.jobs = state.jobs.filter((job) => job.job_id !== jobId);
     state.mediaLayouts.delete(jobId);
     state.chatSessions.delete(jobId);
@@ -2849,6 +3134,14 @@
     catch (error) { showToast(error.message, true); }
   }
   function propertyById(propertyId) { return libraryProperties().find((property) => property.id === propertyId) || (libraryState().properties || []).find((property) => property.id === propertyId); }
+  function editLibraryAlias(jobId) {
+    const entry = libraryItemEntries().find((candidate) => candidate.jobId === jobId);
+    if (!entry) return;
+    const content = `<label>显示名称<input id="editor-value" maxlength="200" value="${escapeHTML(itemAlias(entry))}" placeholder="留空则显示原始标题" autofocus></label><p class="details-meta secondary">原题：${escapeHTML(itemOriginalTitle(entry))}</p>`;
+    openLibraryEditor('设置显示名称', content, async (node) => {
+      await updateLibraryItem(jobId, { alias: node.querySelector('#editor-value').value });
+    });
+  }
   async function editLibraryProperty(jobId, propertyId) {
     const property = propertyById(propertyId); const entry = libraryItemEntries().find((candidate) => candidate.jobId === jobId); if (!property || !entry) return;
     const values = itemValues(entry); let value;
@@ -2856,9 +3149,9 @@
     let content = '';
     if (property.type === 'rating') content = `<div class="rating-picker">${Array.from({ length: property.max || 5 }, (_, index) => `<button type="button" data-rating="${index + 1}" aria-label="${index + 1} 星">${index < Number(current || 0) ? '★' : '☆'}</button>`).join('')}</div><input id="editor-rating" type="hidden" value="${Number(current || 0)}">`;
     else if (property.type === 'multi-select') {
-      const choices = new Set([...(property.options || []), ...((current instanceof Array) ? current : [])]);
+      const choices = libraryPropertyChoices(property, current);
       content = `<label>${escapeHTML(property.label)}<input id="editor-multi" value="${escapeHTML((current || []).join(', '))}" placeholder="多个标签用逗号分隔"></label><div class="tag-option-list">${[...choices].map((item) => `<button class="tag-option${(current || []).includes(item) ? ' active' : ''}" type="button" data-tag-choice="${escapeHTML(item)}">${escapeHTML(item)}</button>`).join('')}</div>`;
-    } else if (property.type === 'select') content = `<label>${escapeHTML(property.label)}<select id="editor-value">${(property.options || []).map((item) => `<option${item === current ? ' selected' : ''}>${escapeHTML(item)}</option>`).join('')}</select></label>`;
+    } else if (property.type === 'select') content = `<label>${escapeHTML(property.label)}<select id="editor-value">${libraryPropertyChoices(property, current).map((item) => `<option${item === current ? ' selected' : ''}>${escapeHTML(item)}</option>`).join('')}</select></label>`;
     else content = `<label>${escapeHTML(property.label)}<input id="editor-value" maxlength="1000" value="${escapeHTML(current)}" autofocus></label>`;
     openLibraryEditor(`设置${property.label}`, content, async (node) => {
       if (property.type === 'rating') value = Number(node.querySelector('#editor-rating').value);
@@ -3012,6 +3305,7 @@
     const count = $('#view-results-count'); if (count) count.textContent = `${entries.length} 篇`;
     const label = $('#view-results-label'); if (label) label.textContent = view?.name || '当前视图文献';
     target.style.setProperty('--library-grid-template', template);
+    target.style.setProperty('--library-table-min-width', libraryTableMinWidth(columns));
     target.innerHTML = entries.length ? renderLibraryContent(entries) : '<div class="empty-state">这个视图暂时没有匹配的文献。</div>';
     applyLibraryGridTemplate();
   }
@@ -5139,7 +5433,7 @@
 
   async function markReadingStarted(jobId) {
     const entry = libraryEntry(jobId);
-    if (!entry || entry.item?.deleted_at || itemValues(entry).reading_status !== '未开始') return;
+    if (!entry || entry.item?.deleted_at || !PRE_READING_STATUSES.has(String(itemValues(entry).reading_status || '未开始'))) return;
     try {
       const payload = await api(`/api/library/items/${jobId}`, jsonOptions({ values: { reading_status: '阅读中' } }, 'PATCH'));
       if (payload.library) { state.library = payload.library; renderLibrary(); renderViews(); }
@@ -7294,21 +7588,31 @@
     return true;
   }
 
-  function updateTranslationProgress(done, total, visible = true, detail = '') {
+
+  const translationStatusLabels = { queued: '排队等待翻译', running: '正在翻译全文', stopping: '正在停止翻译', complete: '全文翻译完成' };
+  function translationRunPercent(run) {
+    const total = Math.max(0, Number(run?.total) || 0);
+    const done = Math.max(0, Math.min(total, Number(run?.done) || 0));
+    return total ? Math.round((done / total) * 100) : 0;
+  }
+  // The static panel in the tray always describes the active document's run;
+  // every other document's run is drawn as a card from the same run object.
+  function paintTranslationPanel(run, { visible = Boolean(run?.running) } = {}) {
     const panel = $('#translation-progress');
     if (!panel) return;
-    const safeTotal = Math.max(0, Number(total) || 0);
-    const safeDone = Math.max(0, Math.min(safeTotal, Number(done) || 0));
-    const percent = safeTotal ? Math.round((safeDone / safeTotal) * 100) : 0;
-    const complete = safeTotal > 0 && safeDone >= safeTotal;
+    const total = Math.max(0, Number(run?.total) || 0);
+    const done = Math.max(0, Math.min(total, Number(run?.done) || 0));
+    const percent = translationRunPercent(run);
+    const complete = total > 0 && done >= total;
+    const queued = run?.phase === 'queued';
     panel.hidden = !visible;
-    panel.dataset.state = complete ? 'complete' : 'running';
-    $('#translation-progress-label').textContent = complete ? '全文翻译完成' : '正在翻译全文';
-    $('#translation-progress-count').textContent = safeTotal ? `第 ${complete ? safeTotal : Math.min(safeTotal, safeDone + 1)} / ${safeTotal} 段` : '';
+    panel.dataset.state = queued ? 'queued' : complete ? 'complete' : 'running';
+    $('#translation-progress-label').textContent = run?.running && run?.stop ? translationStatusLabels.stopping : queued ? translationStatusLabels.queued : complete ? translationStatusLabels.complete : translationStatusLabels.running;
+    $('#translation-progress-count').textContent = total ? `第 ${complete ? total : Math.min(total, done + 1)} / ${total} 段` : '';
     $('#translation-progress-value').textContent = `${percent}%`;
     const detailNode = $('#translation-progress-detail');
     if (detailNode) {
-      const text = complete ? '' : String(detail || '');
+      const text = complete ? '' : String(run?.detail || '');
       detailNode.hidden = !text;
       detailNode.textContent = text;
     }
@@ -7317,10 +7621,15 @@
     const track = panel.querySelector('[role="progressbar"]');
     if (track) {
       track.setAttribute('aria-valuenow', String(percent));
-      track.setAttribute('aria-label', `全文翻译进度：${percent}%（${safeDone}/${safeTotal}）`);
+      track.setAttribute('aria-label', `全文翻译进度：${percent}%（${done}/${total}）`);
     }
+    const stopButton = $('#stop-translation-button');
+    if (stopButton) stopButton.disabled = !run?.running || Boolean(run?.stop);
   }
-
+  function updateTranslationProgress(run, options = {}) {
+    if (run && state.activeJob?.job_id === run.jobId) paintTranslationPanel(run, options);
+    refreshBackgroundTasks();
+  }
   function hasUsableTranslation(block) {
     const blockId = block?.dataset.blockId || block?.dataset.translateBlockId || '';
     if (!blockId) return false;
@@ -7335,7 +7644,133 @@
 
   const FULL_TRANSLATION_CONCURRENCY = 3;
 
-  async function runFullTranslation({ refresh = false } = {}) {
+
+  // Documents translating at once. The rest wait in the tray, so several
+  // full-document runs do not multiply the request rate against the gateway.
+  const FULL_TRANSLATION_MAX_DOCUMENTS = 2;
+  const translationSlotWaiters = [];
+  function translatingDocumentCount() {
+    let count = 0;
+    state.translationRuns.forEach((run) => { if (run.running && run.phase === 'running') count += 1; });
+    return count;
+  }
+  function acquireTranslationSlot(run) {
+    if (translatingDocumentCount() < FULL_TRANSLATION_MAX_DOCUMENTS) {
+      run.phase = 'running';
+      return Promise.resolve();
+    }
+    run.phase = 'queued';
+    updateTranslationProgress(run);
+    return new Promise((resolve) => {
+      run.wake = () => { run.wake = null; run.phase = 'running'; resolve(); };
+      translationSlotWaiters.push(run);
+    });
+  }
+  function releaseTranslationSlot() {
+    while (translationSlotWaiters.length) {
+      const next = translationSlotWaiters.shift();
+      if (!next.wake) continue;
+      next.wake();
+      if (!next.stop) return;
+    }
+  }
+
+  // One paragraph of a run. The run works from its own snapshot of the source,
+  // so the request goes out whether or not the document is still mounted; the
+  // result is painted into the reader only when this document is on screen and
+  // otherwise waits in the cache for the next mount to replay.
+  async function translateSnapshot(snapshot, run, { refresh = false } = {}) {
+    const { blockId, isTitle, source } = snapshot;
+    if (!blockId || !source?.text) return false;
+    const role = isTitle ? 'title' : '';
+    const mountedDoc = () => (state.activeJob?.job_id === run.jobId ? frameDocument() : null);
+    const profileId = translationProfileId();
+    let doc = mountedDoc();
+    if (doc) insertTranslation(blockId, '正在翻译…', { pending: true, role, doc });
+    const removePendingTranslation = () => {
+      const current = mountedDoc();
+      if (!current) return;
+      current.querySelectorAll(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`).forEach((node) => {
+        if (node.classList.contains('is-pending')) node.remove();
+      });
+    };
+    try {
+      const translated = await requestTranslation(source.text, blockId, source.formulas, { jobId: run.jobId, markers: source.markers, emphasis: source.emphasis, signal: run.abortController.signal, refresh });
+      if (profileId && translationProfileId() !== profileId) {
+        removePendingTranslation();
+        return false;
+      }
+      doc = mountedDoc();
+      if (doc) insertTranslation(blockId, translated.text, { cached: translated.cached, sourceHash: translated.sourceHash, role, formulas: translated.formulas, markers: translated.markers, emphasis: translated.emphasis, doc });
+      return true;
+    } catch (error) {
+      if (error?.name === 'AbortError' || run.abortController.signal.aborted) {
+        removePendingTranslation();
+        return false;
+      }
+      doc = mountedDoc();
+      if (doc) insertTranslation(blockId, `翻译失败：${error.message}`, { error: true, role, doc });
+      return false;
+    }
+  }
+
+  // Which part of the document a full run covers. The body stops at the first
+  // heading that announces an appendix or supplementary material; with no
+  // such heading the body is the whole document.
+  const translationScopeStorageKey = 'my-scholar-translation-scope-v1';
+  const APPENDIX_HEADING = /^(?:[A-Z]\.?\s+|\d+\.?\s+)?(?:appendix|appendices|supplementa(?:ry|l)\b|supporting information|附录|补充材料|附加材料)/iu;
+  function translationScope() { return persistentStateGet(translationScopeStorageKey) === 'body' ? 'body' : 'all'; }
+  function setTranslationScope(scope) {
+    persistentStateSet(translationScopeStorageKey, scope === 'body' ? 'body' : 'all');
+    syncTranslationScopeControls();
+  }
+  function appendixBoundary(doc) {
+    return [...(doc?.querySelectorAll('h1, h2, h3, h4') || [])].find((heading) => !heading.matches('h1.paper-title') && APPENDIX_HEADING.test(String(heading.textContent || '').replace(/\s+/g, ' ').trim())) || null;
+  }
+  function translatableBlocks(doc, scope = translationScope()) {
+    const blocks = [...(doc?.querySelectorAll('h1.paper-title[data-block-id], p[data-block-id], ul[data-block-id], ol[data-block-id], figcaption[data-translate-block-id]') || [])].filter(translatableParagraph);
+    if (scope !== 'body') return blocks;
+    const boundary = appendixBoundary(doc);
+    if (!boundary) return blocks;
+    return blocks.filter((block) => Boolean(boundary.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_PRECEDING));
+  }
+  function syncTranslationScopeControls() {
+    const scope = translationScope();
+    const label = $('#full-translate-label');
+    if (label) label.textContent = scope === 'body' ? '正文翻译' : '全文翻译';
+    const button = $('#full-translate-button');
+    if (button) button.title = `${scope === 'body' ? '翻译正文（不含附录）' : '翻译全文（含附录）'}；按住 Option 点击可重新翻译已有译文的段落`;
+    $$('#translation-scope-menu [data-translation-scope]').forEach((item) => item.setAttribute('aria-checked', String(item.dataset.translationScope === scope)));
+  }
+  function closeTranslationScopeMenu() {
+    const menu = $('#translation-scope-menu');
+    if (!menu || menu.hidden) return;
+    menu.hidden = true;
+    ['left', 'top', 'width', 'max-height'].forEach((property) => menu.style.removeProperty(property));
+    delete menu.dataset.placement;
+    $('#full-translate-scope-button')?.setAttribute('aria-expanded', 'false');
+  }
+  function toggleTranslationScopeMenu(button) {
+    const menu = $('#translation-scope-menu');
+    if (!menu || !button) return;
+    if (!menu.hidden) {
+      closeTranslationScopeMenu();
+      return;
+    }
+    const doc = frameDocument();
+    const boundary = appendixBoundary(doc);
+    const all = translatableBlocks(doc, 'all').length;
+    const body = boundary ? translatableBlocks(doc, 'body').length : all;
+    $('#translation-scope-body-count').textContent = boundary ? `不含附录 · ${body} 段` : '没有检测到附录，与全文相同';
+    $('#translation-scope-all-count').textContent = boundary ? `含附录 · ${all} 段` : `${all} 段`;
+    syncTranslationScopeControls();
+    menu.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    positionViewportMenu(menu, button.getBoundingClientRect(), {});
+    window.requestAnimationFrame(() => menu.querySelector('[aria-checked="true"]')?.focus({ preventScroll: true }));
+  }
+
+  async function runFullTranslation({ refresh = false, scope = translationScope() } = {}) {
     const jobId = state.activeJob?.job_id;
     if (!jobId) return;
     const existingRun = state.translationRuns.get(jobId);
@@ -7348,70 +7783,57 @@
     }
     const doc = frameDocument();
     if (!doc) return;
-    const blocks = [...(doc?.querySelectorAll('h1.paper-title[data-block-id], p[data-block-id], ul[data-block-id], ol[data-block-id], figcaption[data-translate-block-id]') || [])].filter(translatableParagraph);
+    const blocks = translatableBlocks(doc, scope);
     const pendingBlocks = refresh ? blocks : blocks.filter((block) => !hasUsableTranslation(block));
-    const run = { jobId, doc, running: true, stop: false, abortController: new AbortController() };
+    // A full-document run belongs to the document, not to the view or even to
+    // the mounted iframe: snapshotting every source paragraph up front lets it
+    // keep going while the reader shows something else.
+    const snapshots = pendingBlocks.map((block) => ({
+      blockId: block.dataset.blockId || block.dataset.translateBlockId,
+      isTitle: block.matches('h1.paper-title, h1[data-translate-block-id]'),
+      source: paragraphSource(block),
+    }));
+    const run = { jobId, title: documentTitleFor(jobId), running: true, stop: false, phase: 'pending', wake: null, done: blocks.length - pendingBlocks.length, total: blocks.length, failed: 0, detail: '', abortController: new AbortController() };
     state.translationRuns.set(jobId, run);
-    state.translationRun = run;
-    // A full-document run belongs to the document, not to the view. Requiring
-    // the reader to stay on screen made every switch to the library or the
-    // settings abandon the run silently, mid-queue, with the button back to
-    // idle and nothing said. Leaving the document still stops it.
-    const isCurrentRun = () => state.activeJob?.job_id === jobId
-      && frameDocument() === doc
-      && state.translationRuns.get(jobId) === run;
-    $('#full-translate-button').disabled = true;
-    $('#stop-translation-button').disabled = false;
-    let done = blocks.length - pendingBlocks.length;
-    updateTranslationProgress(done, blocks.length, true);
-    let failed = 0;
+    syncTranslationControls();
     let nextIndex = 0;
     try {
+      await acquireTranslationSlot(run);
+      updateTranslationProgress(run);
       const worker = async () => {
-        while (!run.stop && !run.abortController.signal.aborted && isCurrentRun()) {
-          const index = nextIndex++;
-          const block = pendingBlocks[index];
-          if (!block) return;
-          let translated = false;
-          try {
-            const preview = paragraphText(block).slice(0, 72);
-            updateTranslationProgress(done, blocks.length, true, preview ? `正在翻译：${preview}` : '');
-            translated = await translateBlock(block.dataset.blockId || block.dataset.translateBlockId, block.querySelector('.paragraph-translate-trigger'), { silent: true, jobId, doc, signal: run.abortController.signal, refresh });
-          } catch (error) {
-            translated = false;
-          }
-          if (!translated && !run.abortController.signal.aborted) failed += 1;
-          done += 1;
-          if (isCurrentRun()) updateTranslationProgress(done, blocks.length, true);
+        while (!run.stop && !run.abortController.signal.aborted) {
+          const snapshot = snapshots[nextIndex++];
+          if (!snapshot) return;
+          const preview = snapshot.source.text.slice(0, 72);
+          run.detail = preview ? `正在翻译：${preview}` : '';
+          updateTranslationProgress(run);
+          const translated = await translateSnapshot(snapshot, run, { refresh });
+          if (!translated && !run.abortController.signal.aborted) run.failed += 1;
+          run.done += 1;
+          updateTranslationProgress(run);
         }
       };
-      await Promise.all(Array.from({ length: Math.min(FULL_TRANSLATION_CONCURRENCY, pendingBlocks.length) }, worker));
-      if (!isCurrentRun()) return;
+      await Promise.all(Array.from({ length: Math.min(FULL_TRANSLATION_CONCURRENCY, snapshots.length) }, worker));
+      run.detail = '';
+      const prefix = state.activeJob?.job_id === jobId ? '' : `《${run.title}》`;
+      const scopeLabel = scope === 'body' ? '正文' : '全文';
       if (run.stop) {
-        $('#translation-progress-label').textContent = '全文翻译已停止，可继续复用已完成缓存';
-        showToast('全文翻译已停止，已完成的段落保留在本机。');
-        $('#translation-progress').hidden = true;
-      } else if (failed) {
-        showToast(`全文翻译完成，但有 ${failed} 段失败；失败段落可稍后单独重试。`, true);
-        $('#translation-progress').hidden = true;
+        showToast(`${prefix}${scopeLabel}翻译已停止，已完成的段落保留在本机。`);
+      } else if (run.failed) {
+        showToast(`${prefix}${scopeLabel}翻译完成，但有 ${run.failed} 段失败；失败段落可稍后单独重试。`, true);
       } else {
-        showToast(blocks.length ? (pendingBlocks.length ? '全文翻译完成，译文已插入原文下方。' : '全文译文已存在，已直接复用本机缓存。按住 Option 点击可重新翻译全文。') : '没有找到可翻译的正文段落。');
-        // A completed run should leave the reading surface unobstructed.
-        $('#translation-progress').hidden = true;
+        showToast(blocks.length ? (snapshots.length ? `${prefix}${scopeLabel}翻译完成，译文已插入原文下方。` : `${scopeLabel}译文已存在，已直接复用本机缓存。按住 Option 点击可重新翻译${scopeLabel}。`) : '没有找到可翻译的正文段落。');
       }
     } catch (error) {
-      if (isCurrentRun()) {
-        $('#translation-progress').hidden = true;
-        showToast(`全文翻译失败：${error.message}`, true);
-        setPanelStatus(error.message, true);
-      }
+      showToast(`全文翻译失败：${error.message}`, true);
+      if (state.activeJob?.job_id === jobId) setPanelStatus(error.message, true);
     } finally {
       run.running = false;
-      if (state.translationRuns.get(jobId) === run) state.translationRuns.set(jobId, run);
-      if (state.activeJob?.job_id === jobId && state.translationRun === run) {
-        state.translationRun = run;
-        syncTranslationControls();
-      }
+      releaseTranslationSlot();
+      // A finished run leaves the reading surface unobstructed but keeps its
+      // final figures, so the panel still reports them when asked.
+      if (state.translationRuns.get(jobId) === run) updateTranslationProgress(run, { visible: false });
+      syncTranslationControls();
     }
   }
 
@@ -7419,29 +7841,31 @@
     if (!run) return;
     run.stop = true;
     run.abortController?.abort();
-  }
-
-  function stopFullTranslation() {
-    const jobId = state.activeJob?.job_id;
-    const run = jobId ? state.translationRuns.get(jobId) : null;
-    if (run?.running) {
-      cancelTranslationRun(run);
-      $('#stop-translation-button').disabled = true;
+    if (run.wake) {
+      const index = translationSlotWaiters.indexOf(run);
+      if (index >= 0) translationSlotWaiters.splice(index, 1);
+      run.wake();
     }
+    updateTranslationProgress(run);
   }
 
-  function syncTranslationControls({ hideProgress = false } = {}) {
+  function stopFullTranslation(jobId = state.activeJob?.job_id) {
+    const run = jobId ? state.translationRuns.get(jobId) : null;
+    if (run?.running) cancelTranslationRun(run);
+  }
+
+  function syncTranslationControls() {
     const jobId = state.activeJob?.job_id;
     const run = jobId ? state.translationRuns.get(jobId) : null;
     state.translationRun = run || null;
     const running = Boolean(run?.running);
     const fullButton = $('#full-translate-button');
-    const stopButton = $('#stop-translation-button');
     if (fullButton) fullButton.disabled = running;
-    if (stopButton) stopButton.disabled = !running || Boolean(run?.stop);
-    if (hideProgress) $('#translation-progress').hidden = true;
+    // The panel follows whichever document is on screen: a run that carried on
+    // in the background shows up again the moment its document comes back.
+    paintTranslationPanel(run, { visible: running });
+    refreshBackgroundTasks();
   }
-
   $('#selection-popover')?.addEventListener('click', (event) => {
     if (!event.target.closest('[data-selection-translation-retry]') || !state.selection) return;
     beginSelectionTranslation({ ...state.selection }, { immediate: true });
@@ -8848,13 +9272,6 @@
     closeImageLightbox({ restoreFocus: false });
     const previousJobId = state.activeJob?.job_id;
     const notesReady = flushPendingArticleNotes(previousJobId);
-    if (previousJobId && previousJobId !== job.job_id) {
-      // There is one embedded iframe, so a run cannot safely continue writing
-      // into a document that is no longer mounted. Keep its per-document cache
-      // and stop it cleanly; another document remains independently runnable.
-      const previousRun = state.translationRuns.get(previousJobId);
-      if (previousRun?.running) cancelTranslationRun(previousRun);
-    }
     const nextCache = state.translationCaches.get(job.job_id) || [];
     state.translationCaches.set(job.job_id, nextCache);
     state.activeJob = job;
@@ -8890,7 +9307,9 @@
     const completedReflowURL = job.reflow?.status === 'completed' ? safeReflowDocumentURL(job.reflow.document_url, job.job_id, job.reflow.generation) : '';
     beginReaderMount(job.job_id, completedReflowURL || job.links.html);
     switchView('reader-view', { enteringDocumentId: isNewDocument ? job.job_id : null });
-    syncTranslationControls({ hideProgress: true });
+    syncTranslationControls();
+    syncReflowControls();
+    syncTranslationScopeControls();
     markReadingStarted(job.job_id);
     loadReaderData(job.job_id, { notesReady, notesSession }).catch((error) => setPanelStatus(error.message, true));
   }
@@ -11382,6 +11801,22 @@
     // have a stored translation.
     runFullTranslation({ refresh: event.altKey });
   });
+  $('#full-translate-scope-button')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleTranslationScopeMenu(event.currentTarget);
+  });
+  $$('#translation-scope-menu [data-translation-scope]').forEach((item) => item.addEventListener('click', (event) => {
+    const scope = item.dataset.translationScope === 'body' ? 'body' : 'all';
+    closeTranslationScopeMenu();
+    setTranslationScope(scope);
+    runFullTranslation({ refresh: event.altKey, scope });
+  }));
+  document.addEventListener('pointerdown', (event) => {
+    const menu = $('#translation-scope-menu');
+    if (!menu || menu.hidden || menu.contains(event.target) || event.target.closest?.('#full-translate-scope-button')) return;
+    closeTranslationScopeMenu();
+  });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeTranslationScopeMenu(); });
   $('#stop-translation-button').addEventListener('click', stopFullTranslation);
   $('#open-source-button')?.addEventListener('click', () => {
     const job = state.activeJob;
@@ -11406,11 +11841,13 @@
     applyTranslationVisibility();
     syncTranslationVisibilityButton();
   });
-  let reflowPollToken = 0;
-  let reflowPollTimer = null;
-  let activeReflowJobId = '';
-  let reflowPreflightInFlight = false;
 
+  // One reflow per document; the server queues them, so several documents can
+  // be pending at once and each keeps its own poll loop until it settles.
+  const reflowRuns = new Map();
+  let reflowPreflightInFlight = false;
+  const reflowStatusLabels = { queued: 'AI 重排排队中', running: '正在进行 AI 重排', cancelling: '正在取消 AI 重排', cancelled: 'AI 重排已取消', completed: 'AI 重排已完成', failed: 'AI 重排失败' };
+  const ACTIVE_REFLOW_STATUSES = new Set(['queued', 'running', 'cancelling']);
   function readerDocumentURL(source) {
     const url = new URL(String(source || ''), window.location.href);
     url.searchParams.set('reader', '1');
@@ -11430,6 +11867,7 @@
     }
   }
 
+
   function updateReflowButton(running, progress = 0, runningLabel = '') {
     const button = $('#reflow-button');
     const label = $('#reflow-button-label');
@@ -11441,39 +11879,87 @@
     if (label) label.textContent = running ? runningLabel || `重排中 ${progress}%` : 'AI 重排';
   }
 
-  function renderReflowStatus(reflow = {}) {
-    const panel = $('#reflow-progress');
-    if (!panel) return 0;
+  function reflowPercent(reflow = {}) {
     const raw = Number(reflow.progress);
     const percent = Math.round(Math.max(0, Math.min(100, Number.isFinite(raw) ? (raw <= 1 ? raw * 100 : raw) : 0)));
     const status = String(reflow.status || 'queued');
-    const statusLabels = { queued: 'AI 重排排队中', running: '正在进行 AI 重排', cancelling: '正在取消 AI 重排', cancelled: 'AI 重排已取消', completed: 'AI 重排已完成', failed: 'AI 重排失败' };
-    const displayedPercent = status === 'completed' ? 100 : ['failed', 'cancelled', 'cancelling'].includes(status) ? Math.min(99, percent) : percent;
+    return status === 'completed' ? 100 : ['failed', 'cancelled', 'cancelling'].includes(status) ? Math.min(99, percent) : percent;
+  }
+  function reflowRunFor(jobId) { return jobId ? reflowRuns.get(jobId) || null : null; }
+  function activeReflowRun() { return reflowRunFor(state.activeJob?.job_id); }
+  function reflowRunIsActive(run) { return Boolean(run && ACTIVE_REFLOW_STATUSES.has(String(run.reflow?.status || ''))); }
+  function ensureReflowRun(jobId, { fresh = false } = {}) {
+    const existing = reflowRuns.get(jobId);
+    if (existing && !fresh) return existing;
+    if (existing) {
+      window.clearTimeout(existing.timer);
+      window.clearTimeout(existing.hideTimer);
+    }
+    const run = { jobId, timer: null, hideTimer: null, title: documentTitleFor(jobId), reflow: { status: 'queued', progress: 0, stage: '', error: null } };
+    reflowRuns.set(jobId, run);
+    return run;
+  }
+  function dropReflowRun(jobId) {
+    const run = reflowRuns.get(jobId);
+    if (!run) return;
+    window.clearTimeout(run.timer);
+    window.clearTimeout(run.hideTimer);
+    reflowRuns.delete(jobId);
+    if (state.activeJob?.job_id === jobId) paintReflowPanel();
+    refreshBackgroundTasks();
+  }
+  function dismissReflowRun(jobId) {
+    if (!reflowRunIsActive(reflowRunFor(jobId))) dropReflowRun(jobId);
+  }
+
+  // The static panel in the tray describes the active document's reflow; the
+  // button in the reader toolbar follows it.
+  function paintReflowPanel() {
+    const panel = $('#reflow-progress');
+    if (!panel) return;
+    const run = activeReflowRun();
+    const cancelButton = $('#cancel-reflow-button');
+    if (!run) {
+      panel.hidden = true;
+      updateReflowButton(false);
+      if (cancelButton) cancelButton.hidden = true;
+      return;
+    }
+    const reflow = run.reflow || {};
+    const status = String(reflow.status || 'queued');
+    const displayedPercent = reflowPercent(reflow);
     panel.hidden = false;
     panel.dataset.state = status;
-    $('#reflow-progress-label').textContent = statusLabels[status] || '正在进行 AI 重排';
+    $('#reflow-progress-label').textContent = reflowStatusLabels[status] || reflowStatusLabels.running;
     $('#reflow-progress-stage').textContent = String(reflow.error || reflow.stage || '').slice(0, 240);
     $('#reflow-progress-value').textContent = `${displayedPercent}%`;
     $('#reflow-progress-bar').style.width = `${displayedPercent}%`;
-    const track = $('#reflow-progress-track');
-    track?.setAttribute('aria-valuenow', String(displayedPercent));
-    const active = ['queued', 'running', 'cancelling'].includes(status);
+    $('#reflow-progress-track')?.setAttribute('aria-valuenow', String(displayedPercent));
+    const active = ACTIVE_REFLOW_STATUSES.has(status);
     updateReflowButton(active, displayedPercent, status === 'cancelling' ? '正在取消重排…' : '');
-    const cancelButton = $('#cancel-reflow-button');
     if (cancelButton) {
       cancelButton.hidden = !active;
       cancelButton.disabled = status === 'cancelling';
     }
-    return displayedPercent;
+  }
+  function renderReflowStatus(jobId, reflow = {}) {
+    const run = ensureReflowRun(jobId);
+    run.reflow = { ...run.reflow, ...reflow };
+    if (state.activeJob?.job_id === jobId) paintReflowPanel();
+    refreshBackgroundTasks();
+    return reflowPercent(run.reflow);
+  }
+  function syncReflowControls() {
+    paintReflowPanel();
+    refreshBackgroundTasks();
   }
 
   function renderReflowPreflightFailure(message) {
-    const panel = $('#reflow-progress');
-    if (panel) panel.hidden = true;
+    const run = activeReflowRun();
+    if (run && !reflowRunIsActive(run)) dropReflowRun(run.jobId);
     updateReflowButton(false);
     if (message) showToast(String(message), true);
   }
-
   function mergeReflowJob(job, documentURL = '') {
     const merge = (current) => current?.job_id === job.job_id
       ? { ...current, ...job, links: { ...(current.links || {}), ...(job.links || {}), ...(documentURL ? { html: documentURL } : {}) } }
@@ -11484,47 +11970,48 @@
     renderDocumentTabs();
   }
 
-  function finishReflow(job, token) {
-    if (token !== reflowPollToken || !job?.reflow) return true;
+
+  function finishReflow(job, run) {
+    if (!job?.reflow || reflowRuns.get(run.jobId) !== run) return true;
     const { reflow } = job;
-    renderReflowStatus(reflow);
+    renderReflowStatus(run.jobId, reflow);
     if (!['completed', 'failed', 'cancelled'].includes(reflow.status)) return false;
-    activeReflowJobId = '';
-    updateReflowButton(false);
+    const isActive = state.activeJob?.job_id === job.job_id;
+    const prefix = isActive ? '' : `《${run.title}》`;
     if (['failed', 'cancelled'].includes(reflow.status)) {
       mergeReflowJob(job);
+      if (prefix) showToast(`${prefix}${reflowStatusLabels[reflow.status]}${reflow.error ? `：${String(reflow.error).slice(0, 120)}` : ''}`, reflow.status === 'failed');
       return true;
     }
     const documentURL = safeReflowDocumentURL(reflow.document_url, job.job_id, reflow.generation);
     if (!documentURL) {
-      renderReflowStatus({ status: 'failed', progress: reflow.progress, error: '重排结果地址无效，已保留当前版本。' });
+      renderReflowStatus(run.jobId, { status: 'failed', progress: reflow.progress, error: '重排结果地址无效，已保留当前版本。' });
       return true;
     }
-    if (state.activeJob?.job_id === job.job_id) captureCurrentReadingLocation();
+    if (isActive) captureCurrentReadingLocation();
     mergeReflowJob(job, documentURL);
-    if (state.activeJob?.job_id === job.job_id) {
+    if (isActive) {
       $('#reader-view')?.classList.add('is-document-loading');
       beginReaderMount(job.job_id, documentURL);
+    } else {
+      showToast(`${prefix}AI 重排已完成，下次打开即为新版。`);
     }
-    window.setTimeout(() => {
-      if (token === reflowPollToken && !activeReflowJobId) $('#reflow-progress').hidden = true;
-    }, 2200);
+    run.hideTimer = window.setTimeout(() => dismissReflowRun(run.jobId), 2200);
     return true;
   }
 
-  async function pollReflow(jobId, token) {
-    if (token !== reflowPollToken || activeReflowJobId !== jobId) return;
+  async function pollReflow(run) {
+    if (reflowRuns.get(run.jobId) !== run) return;
     try {
-      const job = await api(`/api/jobs/${jobId}`);
-      if (token !== reflowPollToken || activeReflowJobId !== jobId) return;
-      if (finishReflow(job, token)) return;
+      const job = await api(`/api/jobs/${run.jobId}`);
+      if (reflowRuns.get(run.jobId) !== run) return;
+      if (finishReflow(job, run)) return;
     } catch (_) {
-      if (token !== reflowPollToken || activeReflowJobId !== jobId) return;
-      renderReflowStatus({ status: 'running', stage: '连接暂时中断，正在重试' });
+      if (reflowRuns.get(run.jobId) !== run) return;
+      renderReflowStatus(run.jobId, { status: 'running', stage: '连接暂时中断，正在重试' });
     }
-    reflowPollTimer = window.setTimeout(() => pollReflow(jobId, token), 900);
+    run.timer = window.setTimeout(() => pollReflow(run), 900);
   }
-
   async function ensureReflowCapability() {
     try {
       const provider = await fetchParsingProviders();
@@ -11552,30 +12039,30 @@
     }
   }
 
-  async function cancelReflow() {
-    const jobId = activeReflowJobId;
-    const token = reflowPollToken;
-    if (!jobId) return;
-    const progress = Number.parseInt($('#reflow-progress-value')?.textContent || '0', 10) || 0;
-    window.clearTimeout(reflowPollTimer);
-    reflowPollTimer = null;
-    renderReflowStatus({ status: 'cancelling', stage: '正在停止版面解析进程', progress });
+
+  async function cancelReflow(jobId = state.activeJob?.job_id) {
+    const run = reflowRunFor(jobId);
+    if (!run || !reflowRunIsActive(run)) return;
+    const progress = run.reflow?.progress;
+    window.clearTimeout(run.timer);
+    run.timer = null;
+    renderReflowStatus(jobId, { status: 'cancelling', stage: '正在停止版面解析进程', progress });
     try {
       const payload = await api(`/api/jobs/${jobId}/reflow`, { method: 'DELETE' });
-      if (token !== reflowPollToken || activeReflowJobId !== jobId) return;
+      if (reflowRuns.get(jobId) !== run) return;
       const updated = payload.job || payload;
       mergeReflowJob(updated);
-      if (!finishReflow(updated, token)) reflowPollTimer = window.setTimeout(() => pollReflow(jobId, token), 300);
+      if (!finishReflow(updated, run)) run.timer = window.setTimeout(() => pollReflow(run), 300);
     } catch (error) {
-      if (token !== reflowPollToken || activeReflowJobId !== jobId) return;
-      renderReflowStatus({ status: 'running', stage: `取消失败：${error.message}，任务仍在继续`, progress });
-      reflowPollTimer = window.setTimeout(() => pollReflow(jobId, token), 900);
+      if (reflowRuns.get(jobId) !== run) return;
+      renderReflowStatus(jobId, { status: 'running', stage: `取消失败：${error.message}，任务仍在继续`, progress });
+      run.timer = window.setTimeout(() => pollReflow(run), 900);
     }
   }
 
   async function startReflow() {
     const job = state.activeJob;
-    if (!job || activeReflowJobId || reflowPreflightInFlight) return;
+    if (!job || reflowRunIsActive(reflowRunFor(job.job_id)) || reflowPreflightInFlight) return;
     reflowPreflightInFlight = true;
     const button = $('#reflow-button');
     const label = $('#reflow-button-label');
@@ -11583,30 +12070,95 @@
     if (label) label.textContent = '检查版面引擎…';
     const ready = await ensureReflowCapability();
     reflowPreflightInFlight = false;
-    if (!activeReflowJobId) updateReflowButton(false);
+    if (!reflowRunIsActive(activeReflowRun())) updateReflowButton(false);
     if (!ready || state.activeJob?.job_id !== job.job_id) return;
     const confirmed = await requestConfirmation('AI 重排会在后台重新分析当前文章。完成前会继续显示当前版本；只有成功后才切换到新版。', '开始 AI 重排？');
     if (!confirmed || state.activeJob?.job_id !== job.job_id) return;
-    const token = ++reflowPollToken;
-    window.clearTimeout(reflowPollTimer);
-    reflowPollTimer = null;
-    activeReflowJobId = job.job_id;
-    renderReflowStatus({ status: 'queued', stage: '正在提交重排任务', progress: 0 });
+    const run = ensureReflowRun(job.job_id, { fresh: true });
+    renderReflowStatus(job.job_id, { status: 'queued', stage: '正在提交重排任务', progress: 0, error: null });
     try {
       const updated = await api(`/api/jobs/${job.job_id}/reflow`, { method: 'POST' });
-      if (token !== reflowPollToken || activeReflowJobId !== job.job_id) return;
+      if (reflowRuns.get(job.job_id) !== run) return;
       mergeReflowJob(updated);
-      if (!finishReflow(updated, token)) reflowPollTimer = window.setTimeout(() => pollReflow(job.job_id, token), 500);
+      if (!finishReflow(updated, run)) run.timer = window.setTimeout(() => pollReflow(run), 500);
     } catch (error) {
-      if (token !== reflowPollToken) return;
-      activeReflowJobId = '';
-      renderReflowStatus({ status: 'failed', error: error.message, progress: 0 });
-      updateReflowButton(false);
+      if (reflowRuns.get(job.job_id) !== run) return;
+      renderReflowStatus(job.job_id, { status: 'failed', error: error.message, progress: 0 });
     }
+  }
+
+  // A reflow submitted in an earlier session, or before a reload, is still
+  // running on the server; pick its polling back up from the job list.
+  function resumeRunningReflows() {
+    state.jobs.forEach((job) => {
+      const reflow = job?.reflow;
+      if (!ACTIVE_REFLOW_STATUSES.has(String(reflow?.status || '')) || reflowRuns.has(job.job_id)) return;
+      const run = ensureReflowRun(job.job_id, { fresh: true });
+      renderReflowStatus(job.job_id, reflow);
+      run.timer = window.setTimeout(() => pollReflow(run), 500);
+    });
   }
 
   $('#reflow-button').addEventListener('click', startReflow);
   $('#cancel-reflow-button')?.addEventListener('click', () => { void cancelReflow(); });
+
+  // Background task tray: the active document's panels above are static; the
+  // cards for every other document are rendered from the run maps here.
+  function documentTitleFor(jobId) {
+    const entry = libraryEntry(jobId);
+    if (entry) return itemTitle(entry);
+    const job = state.openDocuments.find((item) => item.job_id === jobId) || state.jobs.find((item) => item.job_id === jobId);
+    return String(job?.source_filename || '未命名文献').replace(/\.pdf$/i, '');
+  }
+  function busyDocumentIds() {
+    const ids = new Set();
+    state.translationRuns.forEach((run, jobId) => { if (run.running) ids.add(jobId); });
+    reflowRuns.forEach((run, jobId) => { if (reflowRunIsActive(run)) ids.add(jobId); });
+    return ids;
+  }
+  const backgroundTasksView = window.MyScholarBackgroundTasks?.create({
+    container: $('#background-tasks'),
+    onOpen: (jobId) => {
+      const job = state.openDocuments.find((item) => item.job_id === jobId) || state.jobs.find((item) => item.job_id === jobId);
+      if (job) openReader(job);
+    },
+    onCancel: (card) => {
+      if (card.kind === 'translation') stopFullTranslation(card.jobId);
+      else void cancelReflow(card.jobId);
+    },
+    onDismiss: (card) => { if (card.kind === 'reflow') dismissReflowRun(card.jobId); },
+  }) || null;
+  function refreshBackgroundTasks() {
+    const activeId = state.activeJob?.job_id || '';
+    const cards = [];
+    state.translationRuns.forEach((run, jobId) => {
+      if (jobId === activeId || !run.running) return;
+      const queued = run.phase === 'queued';
+      cards.push({
+        id: `translation:${jobId}`, kind: 'translation', jobId, title: run.title,
+        status: run.stop ? 'cancelling' : queued ? 'queued' : 'running',
+        progress: translationRunPercent(run),
+        label: run.stop ? translationStatusLabels.stopping : queued ? translationStatusLabels.queued : translationStatusLabels.running,
+        detail: run.total ? `第 ${Math.min(run.total, run.done + 1)} / ${run.total} 段` : '',
+        cancellable: !run.stop, dismissible: false,
+      });
+    });
+    reflowRuns.forEach((run, jobId) => {
+      if (jobId === activeId) return;
+      const status = String(run.reflow?.status || 'queued');
+      const active = ACTIVE_REFLOW_STATUSES.has(status);
+      cards.push({
+        id: `reflow:${jobId}`, kind: 'reflow', jobId, title: run.title, status,
+        progress: reflowPercent(run.reflow),
+        label: reflowStatusLabels[status] || reflowStatusLabels.running,
+        detail: String(run.reflow?.error || run.reflow?.stage || '').slice(0, 160),
+        cancellable: active && status !== 'cancelling', dismissible: !active,
+      });
+    });
+    backgroundTasksView?.render(cards);
+    const busy = busyDocumentIds();
+    $$('#document-tabs .document-tab').forEach((tab) => tab.classList.toggle('is-busy', busy.has(tab.dataset.jobId)));
+  }
   function normalizeTypographyValue(key, value) {
     const limits = typographyLimits[key];
     const numeric = typeof value === 'number' ? value : typeof value === 'string' && value.trim() ? Number(value) : Number.NaN;

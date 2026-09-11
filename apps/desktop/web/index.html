@@ -51,7 +51,7 @@
         <main class="library-main">
           <div class="library-main-heading">
             <div><div class="eyebrow">LOCAL LIBRARY</div><h1 id="library-heading">全部文献</h1><p id="library-subtitle" class="library-subtitle">本机保存 · HTML 连续阅读</p></div>
-            <div id="library-list-actions" class="library-main-actions"><label class="search-box"><span>⌕</span><input id="library-search" type="search" placeholder="搜索名称、标题或标签"></label><select id="library-sort" aria-label="文献排序"><option value="updated_at-desc">最近更新</option><option value="created_at-desc">最近加入</option><option value="title-asc">标题 A–Z</option><option value="importance-desc">重要程度</option></select><button id="columns-button" class="secondary-button compact-button" type="button">列设置</button><button id="import-pdf-button" class="primary-button compact-button" type="button">导入 PDF</button></div>
+            <div id="library-list-actions" class="library-main-actions"><label class="search-box"><span>⌕</span><input id="library-search" type="search" placeholder="搜索名称、标题或标签"></label><select id="library-sort" aria-label="文献排序"><option value="updated_at-desc">最近更新</option><option value="created_at-desc">最近加入</option><option value="title-asc">标题 A–Z</option><option value="importance-desc">重要程度</option></select><select id="library-status-filter" aria-label="按阅读状态筛选"><option value="">全部状态</option></select><button id="columns-button" class="secondary-button compact-button" type="button">列设置</button><button id="import-pdf-button" class="primary-button compact-button" type="button">导入 PDF</button></div>
             <div id="library-graph-actions" class="library-main-actions graph-header-actions" hidden><label class="search-box"><span>⌕</span><input id="graph-search" type="search" placeholder="搜索图谱中的文献"></label><button id="graph-fit-button" class="secondary-button compact-button" type="button">适应画布</button></div>
           </div>
           <div id="library-list-surface">
@@ -64,8 +64,10 @@
               <div id="import-queue-list" class="import-queue-list"></div>
             </section>
             <div id="upload-error" class="inline-error" role="alert" hidden></div>
-            <div id="library-columns" class="library-columns" role="row" aria-label="文献列设置"></div>
-            <div id="recent-list" class="library-list"><div class="empty-state">还没有转换任务。拖入一份 PDF 开始。</div></div>
+            <div class="library-table-scroll">
+              <div id="library-columns" class="library-columns" role="row" aria-label="文献列设置"></div>
+              <div id="recent-list" class="library-list"><div class="empty-state">还没有转换任务。拖入一份 PDF 开始。</div></div>
+            </div>
           </div>
           <section id="library-graph-surface" class="library-graph-surface" aria-label="文献关系图谱" hidden>
             <div class="graph-toolbar" aria-label="图谱显示设置">
@@ -105,7 +107,7 @@
     <section id="views-view" class="view" hidden>
       <div class="views-layout">
         <aside class="views-sidebar"><button id="views-back-button" class="views-back-button" type="button">‹ 返回文献库</button><div class="views-sidebar-heading"><div><div class="eyebrow">SAVED VIEWS</div><h2>视图管理</h2></div><button id="create-view-button" class="tiny-icon-button" type="button" title="新建视图">＋</button></div><div id="saved-views-list" class="saved-views-list"></div><div class="views-sidebar-divider"></div><div class="property-heading"><strong>属性</strong><button id="create-property-button" class="tiny-button" type="button">新增属性</button></div><div id="properties-list" class="properties-list"></div></aside>
-        <main class="view-editor"><div class="library-main-heading"><div><div class="eyebrow">FILTERED READING SET</div><h1 id="view-editor-title">全部文献</h1><p class="library-subtitle">视图用于呈现文献分类，不会改变文献库导航。</p></div></div><section class="view-results-card"><div class="view-results-heading"><strong id="view-results-label">当前视图文献</strong><span id="view-results-count"></span></div><div id="view-results" class="library-list"><div class="empty-state">选择一个视图开始。</div></div></section><form id="view-form" class="view-form"><label>视图名称<input id="view-name" type="text" maxlength="80" placeholder="例如：待读 · 视觉语言"></label><div class="filter-builder"><div class="filter-builder-heading"><strong>筛选条件</strong><button id="add-filter-button" class="tiny-button" type="button">添加条件</button></div><div id="view-filters" class="view-filters"><div class="empty-state">没有筛选条件，视图将显示全部文献。</div></div></div><div class="view-form-actions"><button id="save-view-button" class="primary-button compact-button" type="submit">保存视图</button><button id="delete-view-button" class="secondary-button" type="button">删除视图</button><span id="view-status" class="panel-status" hidden></span></div></form></main>
+        <main class="view-editor"><div class="library-main-heading"><div><div class="eyebrow">FILTERED READING SET</div><h1 id="view-editor-title">全部文献</h1><p class="library-subtitle">视图用于呈现文献分类，不会改变文献库导航。</p></div></div><section class="view-results-card"><div class="view-results-heading"><strong id="view-results-label">当前视图文献</strong><span id="view-results-count"></span></div><div class="library-table-scroll"><div id="view-results" class="library-list"><div class="empty-state">选择一个视图开始。</div></div></div></section><form id="view-form" class="view-form"><label>视图名称<input id="view-name" type="text" maxlength="80" placeholder="例如：待读 · 视觉语言"></label><div class="filter-builder"><div class="filter-builder-heading"><strong>筛选条件</strong><button id="add-filter-button" class="tiny-button" type="button">添加条件</button></div><div id="view-filters" class="view-filters"><div class="empty-state">没有筛选条件，视图将显示全部文献。</div></div></div><div class="view-form-actions"><button id="save-view-button" class="primary-button compact-button" type="submit">保存视图</button><button id="delete-view-button" class="secondary-button" type="button">删除视图</button><span id="view-status" class="panel-status" hidden></span></div></form></main>
       </div>
     </section>
 
@@ -116,7 +118,7 @@
           <button id="reader-info-button" class="toolbar-icon-button" type="button" title="文档信息" aria-label="文档信息">ⓘ</button>
         </div>
         <div class="reader-actions" aria-label="阅读动作">
-          <button id="full-translate-button" class="action-button" type="button" title="翻译全文；按住 Option 点击可重新翻译已有译文的段落"><span class="action-icon">文</span>全文翻译</button>
+          <span class="action-split" role="group" aria-label="全文翻译"><button id="full-translate-button" class="action-button" type="button" title="翻译全文（含附录）；按住 Option 点击可重新翻译已有译文的段落"><span class="action-icon">文</span><span id="full-translate-label">全文翻译</span></button><button id="full-translate-scope-button" class="action-button action-split-caret" type="button" title="选择翻译范围" aria-label="选择翻译范围" aria-haspopup="menu" aria-controls="translation-scope-menu" aria-expanded="false">⌄</button></span>
           <button id="reflow-button" class="action-button" type="button"><span class="action-icon">✧</span><span id="reflow-button-label">AI 重排</span></button>
           <button id="auto-highlight-button" class="action-button" type="button"><span class="action-icon">✦</span>重点高亮</button>
           <button id="open-source-button" class="action-button" type="button"><span class="action-icon">⇱</span>切换源文件</button>
@@ -135,31 +137,6 @@
           <label><span>页边距</span><input id="page-margin-range" type="range" min="0" max="250" step="1" value="100"><span class="typography-number-control"><input id="page-margin-value" type="number" min="0" max="250" step="1" value="100" inputmode="numeric" aria-label="页边距百分比"><span aria-hidden="true">%</span></span></label>
           <button id="typography-reset" class="tiny-button" type="button">恢复默认</button>
         </div>
-      </div>
-      <div id="translation-progress" class="translation-progress" hidden>
-        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
-        <div class="translation-progress-main">
-          <div class="translation-progress-head">
-            <span id="translation-progress-label">全文翻译准备中</span>
-            <span id="translation-progress-count" class="translation-progress-count"></span>
-            <span id="translation-progress-value">0%</span>
-          </div>
-          <div class="translation-progress-track" role="progressbar" aria-label="全文翻译进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="translation-progress-bar" class="translation-progress-bar"></div></div>
-          <div id="translation-progress-detail" class="translation-progress-detail" hidden></div>
-        </div>
-        <button id="stop-translation-button" class="tiny-button" type="button">停止</button>
-      </div>
-      <div id="reflow-progress" class="translation-progress reflow-progress" role="status" aria-live="polite" hidden>
-        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
-        <div class="translation-progress-main">
-          <div class="translation-progress-head">
-            <span id="reflow-progress-label">AI 重排准备中</span>
-            <span id="reflow-progress-stage" class="translation-progress-count"></span>
-            <span id="reflow-progress-value">0%</span>
-          </div>
-          <div id="reflow-progress-track" class="translation-progress-track" role="progressbar" aria-label="AI 重排进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="reflow-progress-bar" class="translation-progress-bar"></div></div>
-        </div>
-        <button id="cancel-reflow-button" class="tiny-button" type="button">取消</button>
       </div>
       <div class="reader-grid">
         <aside id="reader-sidebar" class="reader-sidebar" aria-label="阅读助手" aria-hidden="true">
@@ -420,6 +397,37 @@
     </section>
   </main>
 
+  <aside id="background-tasks" class="background-tasks" aria-label="后台任务">
+    <button id="background-tasks-toggle" class="background-tasks-toggle" type="button" aria-expanded="true" hidden><span id="background-tasks-summary"></span><span class="background-tasks-chevron" aria-hidden="true">⌄</span></button>
+    <div class="background-tasks-cards">
+      <div id="translation-progress" class="translation-progress" hidden>
+        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+        <div class="translation-progress-main">
+          <div class="translation-progress-head">
+            <span id="translation-progress-label">全文翻译准备中</span>
+            <span id="translation-progress-count" class="translation-progress-count"></span>
+            <span id="translation-progress-value">0%</span>
+          </div>
+          <div class="translation-progress-track" role="progressbar" aria-label="全文翻译进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="translation-progress-bar" class="translation-progress-bar"></div></div>
+          <div id="translation-progress-detail" class="translation-progress-detail" hidden></div>
+        </div>
+        <button id="stop-translation-button" class="tiny-button" type="button">停止</button>
+      </div>
+      <div id="reflow-progress" class="translation-progress reflow-progress" role="status" aria-live="polite" hidden>
+        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+        <div class="translation-progress-main">
+          <div class="translation-progress-head">
+            <span id="reflow-progress-label">AI 重排准备中</span>
+            <span id="reflow-progress-stage" class="translation-progress-count"></span>
+            <span id="reflow-progress-value">0%</span>
+          </div>
+          <div id="reflow-progress-track" class="translation-progress-track" role="progressbar" aria-label="AI 重排进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="reflow-progress-bar" class="translation-progress-bar"></div></div>
+        </div>
+        <button id="cancel-reflow-button" class="tiny-button" type="button">取消</button>
+      </div>
+      <div id="background-tasks-list" class="background-tasks-list"></div>
+    </div>
+  </aside>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
   <dialog id="onboarding-dialog" class="onboarding-dialog" aria-labelledby="onboarding-title-1" aria-describedby="onboarding-description-1">
@@ -529,6 +537,10 @@
   </div>
   <div id="global-menu-layer" class="global-menu-layer">
     <div id="grouping-field-menu" class="grouping-field-menu" role="listbox" aria-labelledby="grouping-button" hidden></div>
+    <div id="translation-scope-menu" class="chat-session-menu translation-scope-menu" role="menu" aria-label="翻译范围" hidden>
+      <button type="button" role="menuitemradio" aria-checked="false" data-translation-scope="body"><span>翻译正文</span><small id="translation-scope-body-count">不含附录</small></button>
+      <button type="button" role="menuitemradio" aria-checked="true" data-translation-scope="all"><span>翻译全文</span><small id="translation-scope-all-count">含附录</small></button>
+    </div>
     <div id="chat-session-menu" class="chat-session-menu" role="menu" aria-label="会话操作" hidden>
       <button type="button" role="menuitem" data-chat-session-action="pin">置顶</button>
       <button type="button" role="menuitem" data-chat-session-action="rename">重命名</button>
@@ -536,6 +548,7 @@
     </div>
   </div>
 
+  <div id="cell-editor-popover" class="cell-editor-popover" role="dialog" aria-label="快速编辑" hidden></div>
   <dialog id="library-editor-dialog" class="library-dialog" aria-labelledby="library-editor-title">
     <form id="library-editor-form" method="dialog">
       <div class="dialog-heading"><div><div class="eyebrow">LIBRARY EDITOR</div><h2 id="library-editor-title">编辑属性</h2></div><button id="library-editor-close" class="dialog-close" value="cancel" type="submit" aria-label="关闭">×</button></div>
@@ -563,6 +576,7 @@
   <script src="/web/graph-view.js"></script>
   <script src="/web/core.js"></script>
   <script src="/web/onboarding.js"></script>
+  <script src="/web/background-tasks.js"></script>
   <script src="/web/app.js"></script>
 </body>
 </html>
