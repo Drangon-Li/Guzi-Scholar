@@ -390,6 +390,7 @@
   function switchView(viewId, { enteringDocumentId = null } = {}) {
     if (viewId !== 'library-view' && state.groupingMenuOpen) setGroupingMenuOpen(false);
     if (viewId !== 'reader-view') closeChatSessionMenu();
+    if (viewId !== 'reader-view') closeTranslationScopeMenu();
     if (viewId !== 'reader-view') closeReaderSearch({ reset: true });
     if (viewId !== 'reader-view') clearReaderSentenceHover(frameDocument());
     if (viewId !== 'reader-view' && $('#reader-view')?.classList.contains('active-view')) captureCurrentReadingLocation();
@@ -7504,7 +7505,63 @@
     }
   }
 
-  async function runFullTranslation({ refresh = false } = {}) {
+  // Which part of the document a full run covers. The body stops at the first
+  // heading that announces an appendix or supplementary material; with no
+  // such heading the body is the whole document.
+  const translationScopeStorageKey = 'my-scholar-translation-scope-v1';
+  const APPENDIX_HEADING = /^(?:[A-Z]\.?\s+|\d+\.?\s+)?(?:appendix|appendices|supplementa(?:ry|l)\b|supporting information|附录|补充材料|附加材料)/iu;
+  function translationScope() { return persistentStateGet(translationScopeStorageKey) === 'body' ? 'body' : 'all'; }
+  function setTranslationScope(scope) {
+    persistentStateSet(translationScopeStorageKey, scope === 'body' ? 'body' : 'all');
+    syncTranslationScopeControls();
+  }
+  function appendixBoundary(doc) {
+    return [...(doc?.querySelectorAll('h1, h2, h3, h4') || [])].find((heading) => !heading.matches('h1.paper-title') && APPENDIX_HEADING.test(String(heading.textContent || '').replace(/\s+/g, ' ').trim())) || null;
+  }
+  function translatableBlocks(doc, scope = translationScope()) {
+    const blocks = [...(doc?.querySelectorAll('h1.paper-title[data-block-id], p[data-block-id], ul[data-block-id], ol[data-block-id], figcaption[data-translate-block-id]') || [])].filter(translatableParagraph);
+    if (scope !== 'body') return blocks;
+    const boundary = appendixBoundary(doc);
+    if (!boundary) return blocks;
+    return blocks.filter((block) => Boolean(boundary.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_PRECEDING));
+  }
+  function syncTranslationScopeControls() {
+    const scope = translationScope();
+    const label = $('#full-translate-label');
+    if (label) label.textContent = scope === 'body' ? '正文翻译' : '全文翻译';
+    const button = $('#full-translate-button');
+    if (button) button.title = `${scope === 'body' ? '翻译正文（不含附录）' : '翻译全文（含附录）'}；按住 Option 点击可重新翻译已有译文的段落`;
+    $$('#translation-scope-menu [data-translation-scope]').forEach((item) => item.setAttribute('aria-checked', String(item.dataset.translationScope === scope)));
+  }
+  function closeTranslationScopeMenu() {
+    const menu = $('#translation-scope-menu');
+    if (!menu || menu.hidden) return;
+    menu.hidden = true;
+    ['left', 'top', 'width', 'max-height'].forEach((property) => menu.style.removeProperty(property));
+    delete menu.dataset.placement;
+    $('#full-translate-scope-button')?.setAttribute('aria-expanded', 'false');
+  }
+  function toggleTranslationScopeMenu(button) {
+    const menu = $('#translation-scope-menu');
+    if (!menu || !button) return;
+    if (!menu.hidden) {
+      closeTranslationScopeMenu();
+      return;
+    }
+    const doc = frameDocument();
+    const boundary = appendixBoundary(doc);
+    const all = translatableBlocks(doc, 'all').length;
+    const body = boundary ? translatableBlocks(doc, 'body').length : all;
+    $('#translation-scope-body-count').textContent = boundary ? `不含附录 · ${body} 段` : '没有检测到附录，与全文相同';
+    $('#translation-scope-all-count').textContent = boundary ? `含附录 · ${all} 段` : `${all} 段`;
+    syncTranslationScopeControls();
+    menu.hidden = false;
+    button.setAttribute('aria-expanded', 'true');
+    positionViewportMenu(menu, button.getBoundingClientRect(), {});
+    window.requestAnimationFrame(() => menu.querySelector('[aria-checked="true"]')?.focus({ preventScroll: true }));
+  }
+
+  async function runFullTranslation({ refresh = false, scope = translationScope() } = {}) {
     const jobId = state.activeJob?.job_id;
     if (!jobId) return;
     const existingRun = state.translationRuns.get(jobId);
@@ -7517,7 +7574,7 @@
     }
     const doc = frameDocument();
     if (!doc) return;
-    const blocks = [...(doc?.querySelectorAll('h1.paper-title[data-block-id], p[data-block-id], ul[data-block-id], ol[data-block-id], figcaption[data-translate-block-id]') || [])].filter(translatableParagraph);
+    const blocks = translatableBlocks(doc, scope);
     const pendingBlocks = refresh ? blocks : blocks.filter((block) => !hasUsableTranslation(block));
     // A full-document run belongs to the document, not to the view or even to
     // the mounted iframe: snapshotting every source paragraph up front lets it
@@ -7550,12 +7607,13 @@
       await Promise.all(Array.from({ length: Math.min(FULL_TRANSLATION_CONCURRENCY, snapshots.length) }, worker));
       run.detail = '';
       const prefix = state.activeJob?.job_id === jobId ? '' : `《${run.title}》`;
+      const scopeLabel = scope === 'body' ? '正文' : '全文';
       if (run.stop) {
-        showToast(`${prefix}全文翻译已停止，已完成的段落保留在本机。`);
+        showToast(`${prefix}${scopeLabel}翻译已停止，已完成的段落保留在本机。`);
       } else if (run.failed) {
-        showToast(`${prefix}全文翻译完成，但有 ${run.failed} 段失败；失败段落可稍后单独重试。`, true);
+        showToast(`${prefix}${scopeLabel}翻译完成，但有 ${run.failed} 段失败；失败段落可稍后单独重试。`, true);
       } else {
-        showToast(blocks.length ? (snapshots.length ? `${prefix}全文翻译完成，译文已插入原文下方。` : '全文译文已存在，已直接复用本机缓存。按住 Option 点击可重新翻译全文。') : '没有找到可翻译的正文段落。');
+        showToast(blocks.length ? (snapshots.length ? `${prefix}${scopeLabel}翻译完成，译文已插入原文下方。` : `${scopeLabel}译文已存在，已直接复用本机缓存。按住 Option 点击可重新翻译${scopeLabel}。`) : '没有找到可翻译的正文段落。');
       }
     } catch (error) {
       showToast(`全文翻译失败：${error.message}`, true);
@@ -9042,6 +9100,7 @@
     switchView('reader-view', { enteringDocumentId: isNewDocument ? job.job_id : null });
     syncTranslationControls();
     syncReflowControls();
+    syncTranslationScopeControls();
     markReadingStarted(job.job_id);
     loadReaderData(job.job_id, { notesReady, notesSession }).catch((error) => setPanelStatus(error.message, true));
   }
@@ -11533,6 +11592,22 @@
     // have a stored translation.
     runFullTranslation({ refresh: event.altKey });
   });
+  $('#full-translate-scope-button')?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    toggleTranslationScopeMenu(event.currentTarget);
+  });
+  $$('#translation-scope-menu [data-translation-scope]').forEach((item) => item.addEventListener('click', (event) => {
+    const scope = item.dataset.translationScope === 'body' ? 'body' : 'all';
+    closeTranslationScopeMenu();
+    setTranslationScope(scope);
+    runFullTranslation({ refresh: event.altKey, scope });
+  }));
+  document.addEventListener('pointerdown', (event) => {
+    const menu = $('#translation-scope-menu');
+    if (!menu || menu.hidden || menu.contains(event.target) || event.target.closest?.('#full-translate-scope-button')) return;
+    closeTranslationScopeMenu();
+  });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeTranslationScopeMenu(); });
   $('#stop-translation-button').addEventListener('click', stopFullTranslation);
   $('#open-source-button')?.addEventListener('click', () => {
     const job = state.activeJob;

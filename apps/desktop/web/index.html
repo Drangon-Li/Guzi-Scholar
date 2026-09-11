@@ -118,7 +118,7 @@
           <button id="reader-info-button" class="toolbar-icon-button" type="button" title="文档信息" aria-label="文档信息">ⓘ</button>
         </div>
         <div class="reader-actions" aria-label="阅读动作">
-          <button id="full-translate-button" class="action-button" type="button" title="翻译全文；按住 Option 点击可重新翻译已有译文的段落"><span class="action-icon">文</span>全文翻译</button>
+          <span class="action-split" role="group" aria-label="全文翻译"><button id="full-translate-button" class="action-button" type="button" title="翻译全文（含附录）；按住 Option 点击可重新翻译已有译文的段落"><span class="action-icon">文</span><span id="full-translate-label">全文翻译</span></button><button id="full-translate-scope-button" class="action-button action-split-caret" type="button" title="选择翻译范围" aria-label="选择翻译范围" aria-haspopup="menu" aria-controls="translation-scope-menu" aria-expanded="false">⌄</button></span>
           <button id="reflow-button" class="action-button" type="button"><span class="action-icon">✧</span><span id="reflow-button-label">AI 重排</span></button>
           <button id="auto-highlight-button" class="action-button" type="button"><span class="action-icon">✦</span>重点高亮</button>
           <button id="open-source-button" class="action-button" type="button"><span class="action-icon">⇱</span>切换源文件</button>
@@ -537,6 +537,10 @@
   </div>
   <div id="global-menu-layer" class="global-menu-layer">
     <div id="grouping-field-menu" class="grouping-field-menu" role="listbox" aria-labelledby="grouping-button" hidden></div>
+    <div id="translation-scope-menu" class="chat-session-menu translation-scope-menu" role="menu" aria-label="翻译范围" hidden>
+      <button type="button" role="menuitemradio" aria-checked="false" data-translation-scope="body"><span>翻译正文</span><small id="translation-scope-body-count">不含附录</small></button>
+      <button type="button" role="menuitemradio" aria-checked="true" data-translation-scope="all"><span>翻译全文</span><small id="translation-scope-all-count">含附录</small></button>
+    </div>
     <div id="chat-session-menu" class="chat-session-menu" role="menu" aria-label="会话操作" hidden>
       <button type="button" role="menuitem" data-chat-session-action="pin">置顶</button>
       <button type="button" role="menuitem" data-chat-session-action="rename">重命名</button>
