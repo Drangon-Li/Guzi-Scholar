@@ -27,6 +27,15 @@ function documentHTML(id) {
 
 function instrument(source) {
   assert.match(source, /function wireFrame\(/u);
+  const restoreStart = source.indexOf('  async function restoreReadingLocationAfterLoad(');
+  const fontsStart = source.indexOf('    if (doc.fonts?.ready) {', restoreStart);
+  assert.ok(restoreStart >= 0 && fontsStart > restoreStart, 'Font readiness instrumentation target must exist');
+  source = source.slice(0, fontsStart) + `
+    if (window.__memoryHoldFonts) {
+      Object.defineProperty(doc.fonts, 'ready', { configurable: true, value: new doc.defaultView.Promise(() => {}) });
+      window.__memoryFontTimers.gatedDocuments += 1;
+    }
+` + source.slice(fontsStart);
   const injection = `
   {
     const documents = [];
@@ -44,7 +53,7 @@ function instrument(source) {
         chatStreaming: [...state.chatSessions.values()].reduce((count, envelope) => count + (envelope.sessions || []).reduce((total, thread) => total + thread.messages.filter((message) => message.streaming).length, 0), 0),
         activeMount: Number(Boolean(readerMount)), activeReady: Boolean(readerMount?.ready), sections: readerSections.length,
         fontWaits: [...readerMounts.values()].filter((mount) => mount.cancelFontWait).length,
-        fontTimers: window.__memoryFontTimers.active.size,
+        fontTimers: window.__memoryFontTimers.active.size, fontCallbacks: window.__memoryFontTimers.manual.size,
         activeTranslations: state.translationCache.length, activeChat: state.chat.length, annotations: state.annotations.length, aiHighlights: state.aiHighlights.length,
         sentenceDocuments: Number(Boolean(readerSentenceState.doc)), sentencePairs: readerSentenceState.pairs.length,
         sentencePending: readerSentenceState.pendingTranslations.size, searchMatches: readerSearchState.matches.length,
@@ -109,18 +118,23 @@ async function signal(promise, label) {
       gates.set(id, gate); pending.push(gate); return gate;
     };
     await page.addInitScript(() => {
-      if (window !== window.top) {
-        // Keep the unresolved promise in its frame; a host-held resolver would itself pin the Document.
-        if (window.top.__memoryHoldFonts) Object.defineProperty(document.fonts, 'ready', { get: () => new Promise(() => {}) });
-        return;
-      }
+      if (window !== window.top) return;
       window.__memoryHoldFonts = false;
-      window.__memoryFontTimers = { active: new Set(), scheduled: 0, cleared: 0, fired: 0 };
+      window.__memoryFontTimers = { active: new Set(), manual: new Map(), scheduled: 0, cleared: 0, fired: 0, gatedDocuments: 0 };
+      let manualTimerId = 0;
       const setTimeout = window.setTimeout.bind(window);
       const clearTimeout = window.clearTimeout.bind(window);
       window.setTimeout = (callback, delay, ...args) => {
         if (delay !== 600) return setTimeout(callback, delay, ...args);
         const counters = window.__memoryFontTimers;
+        if (window.__memoryHoldFonts) {
+          // Only this font-cancellation case uses a manual clock: CI scheduling
+          // must not race a real 600ms deadline between protocol commands.
+          const id = --manualTimerId;
+          counters.manual.set(id, () => callback(...args));
+          counters.active.add(id); counters.scheduled += 1;
+          return id;
+        }
         const id = setTimeout(() => { counters.active.delete(id); counters.fired += 1; callback(...args); }, delay);
         counters.active.add(id); counters.scheduled += 1;
         return id;
@@ -128,7 +142,8 @@ async function signal(promise, label) {
       window.clearTimeout = (id) => {
         const counters = window.__memoryFontTimers;
         if (counters.active.delete(id)) counters.cleared += 1;
-        return clearTimeout(id);
+        counters.manual.delete(id);
+        return id < 0 ? undefined : clearTimeout(id);
       };
       const originalFetch = window.fetch.bind(window);
       window.__memoryChatStream = { requests: 0, finish: null };
@@ -300,11 +315,13 @@ async function signal(promise, label) {
       const fontsBefore = await page.evaluate(() => ({ ...window.__memoryFontTimers, active: window.__memoryFontTimers.active.size }));
       await open(ids[0], false);
       await page.waitForFunction(() => window.__readerMemory.counts().fontWaits === 1);
+      assert.equal(await page.evaluate(() => window.__memoryFontTimers.gatedDocuments), fontsBefore.gatedDocuments + 1, 'The restored Document must consume the controlled font promise');
       assert.equal(await page.evaluate(() => window.__readerMemory.counts().fontTimers), 1, 'Unresolved font readiness must exercise the timeout path');
       await close(ids[0]);
       const fontsClosed = await page.evaluate(() => ({ ...window.__memoryFontTimers, active: window.__memoryFontTimers.active.size }));
       assert.equal(fontsClosed.fired, fontsBefore.fired, 'Closing must cancel font waiting before the fallback timeout fires');
       assert.equal(fontsClosed.active, 0, 'Closing a reader must synchronously clear its font fallback timer');
+      assert.equal(await page.evaluate(() => window.__memoryFontTimers.manual.size), 0, 'Closing must release the fallback callback, including its captured document');
       assert.ok(fontsClosed.cleared > fontsBefore.cleared);
       await page.evaluate(() => { window.__memoryHoldFonts = false; });
       await measure('pending-fonts-closed');
