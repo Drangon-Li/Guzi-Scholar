@@ -186,7 +186,7 @@
             </div>
             <div id="highlights-list" class="highlights-list"><div class="chat-empty">打开文章后自动识别阅读重点。</div></div>
           </section>
-          <section id="annotations-panel" class="sidebar-panel" hidden><div class="panel-intro annotations-panel-header"><div class="annotations-panel-heading"><strong>高亮笔记</strong><span id="annotation-count">0 条笔记</span></div><button id="clear-annotations-button" class="tiny-button danger-button" type="button" disabled>清空全部标注</button></div><div id="annotations-list" class="annotations-list"><div class="chat-empty">还没有添加笔记。正文中的高亮和划线仍会保留。</div></div></section>
+          <section id="annotations-panel" class="sidebar-panel" hidden><div class="panel-intro annotations-panel-header"><div class="annotations-panel-heading"><strong>高亮笔记</strong><span id="annotation-count">0 条笔记</span></div><button id="clear-annotations-button" class="tiny-button danger-button" type="button" disabled>清空全部标注</button></div><p id="annotation-anchor-status" class="parsing-provider-detail" role="status" hidden></p><div id="annotations-list" class="annotations-list"><div class="chat-empty">还没有添加笔记。正文中的高亮和划线仍会保留。</div></div></section>
           <section id="notes-panel" class="sidebar-panel" hidden>
             <div class="panel-intro"><strong>文章笔记</strong><span>直接编辑与排版 · 自动保存到本机</span></div>
             <div class="notes-tools" role="toolbar" aria-label="文章笔记格式">
@@ -283,7 +283,7 @@
             <label class="settings-field">Crossref 联系邮箱（可选）<input id="setting-metadata-email" type="email" placeholder="用于礼貌请求与限流识别"></label>
           </section>
           <section id="settings-parsing" class="settings-section" hidden>
-            <div class="settings-section-heading"><div><h2>版面引擎</h2><p>管理高级 AI 重排所需的解析组件。基础导入与阅读仍使用内置转换器。</p></div><span class="settings-badge">按需安装</span></div>
+            <div class="settings-section-heading"><div><h2>版面引擎</h2><p>远端融合解析用于文献导入与重新排版，结果下载后保存在当前设备。</p></div><span class="settings-badge">远端解析</span></div>
             <label class="settings-select-field" for="setting-parsing-backend"><span><strong>解析精度</strong><small>高精度使用 MinerU 官方默认的 hybrid 引擎，公式与版面识别明显更准，但首次运行需要下载视觉模型，且单篇耗时更长。</small></span><select id="setting-parsing-backend"><option value="pipeline">快速（专用小模型）</option><option value="hybrid-engine">高精度（hybrid 引擎）</option><option value="vlm-http-client">远程服务器（轻量客户端）</option><option value="hybrid-http-client">远程服务器（本地混合）</option></select></label>
             <label id="setting-parsing-server-field" class="settings-field" hidden>版面引擎服务器地址<input id="setting-parsing-server-url" type="url" placeholder="http://127.0.0.1:30000" autocomplete="off" spellcheck="false"><small>指向 <code>mineru-openai-server</code> 的地址。选择远程解析后，PDF 原文会上传到该服务器，请只填写你自己或团队控制的地址。</small></label>
             <div class="parsing-provider-grid">
@@ -310,8 +310,11 @@
                 </div>
               </article>
               <article id="remote-parsing-provider" class="parsing-provider-card is-disabled" aria-labelledby="remote-parsing-title">
-                <div class="parsing-provider-heading"><span class="ai-service-icon" aria-hidden="true">云</span><div><h3 id="remote-parsing-title">谷子在线解析服务</h3><p>未来可在相同解析接口中使用</p></div><span class="ai-service-status is-unknown">尚未提供</span></div>
-                <p class="parsing-provider-detail">当前版本不会上传 PDF，也没有配置在线服务地址。</p>
+                <div class="parsing-provider-heading"><span class="ai-service-icon" aria-hidden="true">云</span><div><h3 id="remote-parsing-title">远端融合解析服务</h3><p>PDF 上传至已配置的解析服务器 · 结果保存在本机</p></div><span id="remote-parsing-status" class="ai-service-status is-unknown">正在检测</span></div>
+                <dl class="parsing-provider-facts"><div><dt>服务版本</dt><dd id="remote-parsing-version">—</dd></div></dl>
+                <p id="remote-parsing-detail" class="parsing-provider-detail" role="status" aria-live="polite">正在检查远端服务连接。</p>
+                <p class="parsing-provider-detail">连接地址、凭据与 SSH 信息读取当前设备的私有配置；凭据不会发送到页面。</p>
+                <div class="parsing-provider-actions"><button id="connect-remote-parser" class="primary-button compact-button" type="button">连接并检测</button><button id="disconnect-remote-parser" class="secondary-button compact-button" type="button">断开连接</button></div>
               </article>
             </div>
           </section>
@@ -577,6 +580,7 @@
   <script src="/web/core.js"></script>
   <script src="/web/onboarding.js"></script>
   <script src="/web/background-tasks.js"></script>
+  <script src="/web/paragraph_continuation.js"></script>
   <script src="/web/app.js"></script>
 </body>
 </html>

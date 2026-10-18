@@ -1,0 +1,9 @@
+# Tested together in the isolated Linux CUDA environment.
+torch==2.10.0
+torchvision==0.25.0
+transformers==5.20.1
+vllm==0.19.1
+mineru==4.0.12
+glmocr==0.1.5
+pymupdf==1.28.2
+pypdfium2==5.14.0

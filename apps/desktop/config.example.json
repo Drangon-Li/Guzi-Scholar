@@ -8,5 +8,20 @@
     "base_url": "https://chat-gateway.example/v1",
     "api_key": "replace-with-local-secret",
     "model": "chat-model"
+  },
+  "remote_parser": {
+    "enabled": false,
+    "base_url": "http://127.0.0.1:18770",
+    "token": "replace-with-private-parser-token",
+    "ssh": {
+      "enabled": true,
+      "host": "parser.example.com",
+      "port": 22,
+      "user": "guzi",
+      "identity_file": "~/.ssh/guzi-parser",
+      "known_hosts_file": "~/.ssh/known_hosts",
+      "local_port": 18770,
+      "remote_port": 18770
+    }
   }
 }

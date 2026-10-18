@@ -167,6 +167,42 @@ class LayoutPipelineTest(unittest.TestCase):
             # the trailing slash is normalised away
             self.assertEqual(command[command.index("-u") + 1], "http://gpu-box.internal:30000")
 
+    def test_mineru_command_carries_the_parse_method(self) -> None:
+        for configured, expected in (
+            (None, "auto"),
+            ("", "auto"),
+            ("   ", "auto"),
+            ("auto", "auto"),
+            ("txt", "txt"),
+            ("ocr", "ocr"),
+            (" OCR ", "ocr"),
+        ):
+            with self.subTest(configured=configured), tempfile.TemporaryDirectory(
+                prefix="guzi-mineru-method-"
+            ) as temp, patch.dict(os.environ, {}, clear=False), patch(
+                "layout_pipeline.subprocess.Popen", return_value=self._complete_process(),
+            ) as popen:
+                if configured is None:
+                    os.environ.pop("MY_SCHOLAR_MINERU_PARSE_METHOD", None)
+                else:
+                    os.environ["MY_SCHOLAR_MINERU_PARSE_METHOD"] = configured
+                root = Path(temp)
+                with self.assertRaisesRegex(LayoutPipelineError, "content_list_v2"):
+                    _run_mineru(root / "mineru", root / "source.pdf", root / "output")
+                command = popen.call_args.args[0]
+                self.assertEqual(command[command.index("-m") + 1], expected)
+
+    def test_mineru_invalid_parse_method_is_refused_before_launch(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="guzi-mineru-method-invalid-") as temp, patch.dict(
+            os.environ, {"MY_SCHOLAR_MINERU_PARSE_METHOD": "invalid"}
+        ), patch("layout_pipeline.subprocess.Popen") as popen:
+            root = Path(temp)
+            with self.assertRaisesRegex(
+                LayoutPipelineError, "MY_SCHOLAR_MINERU_PARSE_METHOD.*auto.*txt.*ocr"
+            ):
+                _run_mineru(root / "mineru", root / "source.pdf", root / "output")
+            popen.assert_not_called()
+
     def test_remote_backend_without_a_server_url_is_refused(self) -> None:
         with tempfile.TemporaryDirectory(prefix="guzi-mineru-remote-missing-") as temp, patch(
             "layout_pipeline.subprocess.Popen"

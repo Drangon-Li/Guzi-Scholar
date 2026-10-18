@@ -1,0 +1,2 @@
+-r requirements-cpu.txt
+reportlab>=4,<5
