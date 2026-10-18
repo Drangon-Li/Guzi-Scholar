@@ -1521,7 +1521,7 @@ def build_handler(store: AccountStore) -> type:
                     self._send_json({
                         "ok": True,
                         "service": "my-scholar-account",
-                        "version": "0.3.0",
+                        "version": "0.4.0",
                         "email_auth_available": store.email_auth_available,
                     })
                 elif self.path == "/api/auth/profile":

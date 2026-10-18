@@ -189,7 +189,8 @@ async function launchManagedChromium() {
   );
   session.runTimer.unref();
 
-  console.error(`[my-scholar-playwright] launched pid=${session.browserProcess.pid}`);
+  const profileArgument = session.browserProcess.spawnargs.find((arg) => arg.startsWith('--user-data-dir='));
+  console.error(`[my-scholar-playwright] launched pid=${session.browserProcess.pid} ${profileArgument || ''}`.trim());
   try {
     session.browser = await playwright.chromium.connect(server.wsEndpoint(), { timeout: DEFAULT_CONNECT_TIMEOUT_MS });
   } catch (error) {

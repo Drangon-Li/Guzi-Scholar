@@ -38,7 +38,10 @@ def _translation_key(
     profile_id: str = "",
 ) -> str:
     digest = source_hash.strip() or hashlib.sha256(text.encode("utf-8")).hexdigest()
-    material = "\n".join((profile_id.strip(), target_language.strip() or "中文", block_id.strip(), digest))
+    target = target_language.strip() or "中文"
+    if target.lower().replace("_", "-") in {"zh", "zh-cn", "zh-hans", "chinese", "简体中文", "中文（简体）"}:
+        target = "中文"
+    material = "\n".join((profile_id.strip(), target, block_id.strip(), digest))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 def _translation_records(job_dir: Path) -> List[Dict[str, Any]]:

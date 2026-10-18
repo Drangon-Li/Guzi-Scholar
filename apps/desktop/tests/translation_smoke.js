@@ -152,6 +152,7 @@ let browserSession;
   await page.keyboard.press('Escape');
   await page.locator('#reader-search[hidden]').waitFor({ state: 'attached' });
 
+  await frame.locator(`[data-block-id="${blockId}"]`).scrollIntoViewIfNeeded();
   const sentenceHoverState = await frame.locator(`[data-block-id="${blockId}"]`).evaluate((source) => {
     const doc = source.ownerDocument;
     const walker = doc.createTreeWalker(source, NodeFilter.SHOW_TEXT);
@@ -167,12 +168,15 @@ let browserSession;
   });
   if (!sentenceHoverState.ready) throw new Error(`Sentence hover fixture unavailable (${sentenceHoverState.reason})`);
   await frame.locator('body').evaluate(async () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await frame.locator('.reader-sentence-tooltip').waitFor();
   const hoverState = await frame.locator('body').evaluate(() => ({
     custom: Boolean(document.defaultView.CSS?.highlights?.has('my-scholar-sentence-hover')),
     customRanges: document.defaultView.CSS?.highlights?.get('my-scholar-sentence-hover')?.size || 0,
+    translatedRanges: [...(CSS.highlights?.get('my-scholar-sentence-hover') || [])].filter((range) => (range.commonAncestorContainer.parentElement || range.commonAncestorContainer).closest('.my-scholar-translation')).length,
     fallback: document.querySelectorAll('.reader-sentence-hover-fallback').length,
+    tooltip: document.querySelector('.reader-sentence-tooltip')?.textContent,
   }));
-  if ((hoverState.custom && hoverState.customRanges < 2) || (!hoverState.custom && hoverState.fallback < 2)) throw new Error(`Hovering a sentence did not link source and translation (${JSON.stringify(hoverState)})`);
+  if (!hoverState.custom || hoverState.customRanges !== 1 || hoverState.translatedRanges || hoverState.fallback || !hoverState.tooltip) throw new Error(`Sentence hover did not show a source-only background with its tooltip (${JSON.stringify(hoverState)})`);
 
   const reverseHoverState = await frame.locator(`.my-scholar-translation[data-for="${blockId}"]`).evaluate((translation) => {
     const doc = translation.ownerDocument;
@@ -189,12 +193,13 @@ let browserSession;
   });
   if (!reverseHoverState.ready) throw new Error(`Reverse sentence hover fixture unavailable (${reverseHoverState.reason})`);
   await frame.locator('body').evaluate(async () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await frame.locator('.reader-sentence-tooltip').waitFor({ state: 'detached' });
   const reverseHoverResult = await frame.locator('body').evaluate(() => ({
     custom: Boolean(document.defaultView.CSS?.highlights?.has('my-scholar-sentence-hover')),
     customRanges: document.defaultView.CSS?.highlights?.get('my-scholar-sentence-hover')?.size || 0,
     fallback: document.querySelectorAll('.reader-sentence-hover-fallback').length,
   }));
-  if ((reverseHoverResult.custom && reverseHoverResult.customRanges < 2) || (!reverseHoverResult.custom && reverseHoverResult.fallback < 2)) throw new Error(`Hovering a translation did not link source and translation (${JSON.stringify(reverseHoverResult)})`);
+  if (reverseHoverResult.custom || reverseHoverResult.fallback) throw new Error(`Translation hover still linked source and translation (${JSON.stringify(reverseHoverResult)})`);
 
   const boundaryBlockId = translationSpacingFixture.boundary.sourceId;
   let boundaryTranslation = frame.locator(`.my-scholar-translation[data-for="${boundaryBlockId}"]:not(.is-pending):not(.is-error)`);
@@ -268,6 +273,36 @@ let browserSession;
   const markerRequest = translationPostPayloads.at(-1);
   if (!markerRequest?.text.includes('__MY_SCHOLAR_MARKER_0__')) throw new Error(`Inline marker was not protected in the translation request (${JSON.stringify(markerRequest)})`);
 
+  const formatFixture = await frame.locator(`[data-block-id="${blockId}"]`).evaluate((block) => {
+    const trigger = block.querySelector('.paragraph-translate-trigger');
+    const fragment = block.ownerDocument.createElement('span');
+    fragment.innerHTML = '<strong>Outer bold <span class="pdf-text-tone pdf-text-tone-blue">inner blue <sub>i</sub></span></strong> '
+      + '<span class="pdf-text-tone pdf-text-tone-red">Outer red <strong>inner bold <sup>2</sup></strong></span> '
+      + '<math xmlns="http://www.w3.org/1998/Math/MathML" alttext="x/y"><mfrac><mi>x</mi><mi>y</mi></mfrac></math> '
+      + '<span class="inline-legend-marker inline-legend-marker-square inline-legend-marker-orange"><span class="inline-legend-line"></span><span class="inline-legend-shape"></span></span> '
+      + Array.from({ length: 12 }, (_, index) => `<strong>bold-${index}</strong> <span class="pdf-text-tone pdf-text-tone-green">green-${index}</span> `).join('');
+    const expected = { strong: fragment.querySelectorAll('strong').length, tones: fragment.querySelectorAll('.pdf-text-tone').length, math: fragment.querySelector('math').innerHTML };
+    block.replaceChildren(...fragment.childNodes, trigger);
+    return expected;
+  });
+  await frame.locator(`[data-block-id="${blockId}"] .paragraph-translate-trigger`).click();
+  const formatTranslation = frame.locator(`.my-scholar-translation[data-for="${blockId}"]:not(.is-pending):not(.is-error) .translation-text`);
+  await formatTranslation.waitFor();
+  const formatResult = await formatTranslation.evaluate((node) => ({
+    strong: node.querySelectorAll('strong').length,
+    tones: node.querySelectorAll('.pdf-text-tone').length,
+    boldBlue: node.querySelector('strong > .pdf-text-tone-blue')?.textContent,
+    redBold: node.querySelector('.pdf-text-tone-red > strong')?.textContent,
+    sub: node.querySelector('strong > .pdf-text-tone-blue > sub')?.textContent,
+    sup: node.querySelector('.pdf-text-tone-red > strong > sup')?.textContent,
+    math: node.querySelector('math.translation-math')?.innerHTML,
+    marker: node.querySelectorAll('.inline-legend-marker-square.inline-legend-marker-orange .inline-legend-line, .inline-legend-marker-square.inline-legend-marker-orange .inline-legend-shape').length,
+    leaked: /__MY_SCHOLAR_/u.test(node.textContent),
+  }));
+  if (formatResult.strong !== formatFixture.strong || formatResult.tones !== formatFixture.tones || !formatResult.boldBlue?.includes('inner blue') || !formatResult.redBold?.includes('inner bold') || formatResult.sub !== 'i' || formatResult.sup !== '2' || formatResult.math !== formatFixture.math || formatResult.marker !== 2 || formatResult.leaked) {
+    throw new Error(`Translation did not restore nested styles, all emphasis runs, math and legend (${JSON.stringify({ formatFixture, formatResult })})`);
+  }
+
   frame = await openFirstDocument();
   const cached = frame.locator(`.my-scholar-translation.is-cached[data-for="${blockId}"]`);
   await cached.waitFor();
@@ -333,7 +368,42 @@ let browserSession;
     throw new Error(`A repeated full translation issued ${translationPostCount - postCountAfterCompletedRun} unnecessary model requests (${repeated.join(', ')})`);
   }
 
-  console.log(JSON.stringify({ blockId, titleBlockId, formulaBlockId, titleTranslated: true, metadataSkipped: true, inlineFormulaRendered: true, captionTranslations, listTranslations, translatedText, translationSpacing: { ...translationSpacing, sourceGapRatio, followingGapDelta }, specialTokenPreserved: tokenTranslationText.includes('[I_CLS]'), cacheRestored: true, fullTranslationPeakConcurrency, repeatedFullTranslationRequests: 0, placedAfterSource: true, progress, errors }));
+  // A synthetic fetch response exercises the real API error path without
+  // emitting expected HTTP failures into the browser's console-error audit.
+  await page.evaluate(() => {
+    const originalFetch = window.fetch;
+    window.__translationErrorFixtureRequests = 0;
+    window.fetch = function (url, options) {
+      if (/\/translate$/u.test(String(url)) && options?.body) {
+        const text = String(JSON.parse(options.body).text || '');
+        if (/ERROR_FIXTURE_(?:PREFIXED|PLAIN)/u.test(text)) window.__translationErrorFixtureRequests += 1;
+        if (text.includes('ERROR_FIXTURE_PREFIXED')) return Promise.resolve(new Response(JSON.stringify({ error: '翻译失败：测试服务不可用' }), { status: 503 }));
+        if (text.includes('ERROR_FIXTURE_PLAIN')) return Promise.resolve(new Response(JSON.stringify({ error: '测试服务不可用' }), { status: 503 }));
+      }
+      return originalFetch.apply(this, arguments);
+    };
+  });
+  const errorFixtureIds = [blockId, formulaBlockId === blockId ? boundaryBlockId : formulaBlockId];
+  if (errorFixtureIds[0] === errorFixtureIds[1]) throw new Error('Error regression needs two distinct paragraph blocks');
+  for (const [index, id] of errorFixtureIds.entries()) {
+    await frame.locator(`[data-block-id="${id}"]`).evaluate((block, suffix) => {
+      const trigger = block.querySelector('.paragraph-translate-trigger');
+      block.replaceChildren(block.ownerDocument.createTextNode(`ERROR_FIXTURE_${suffix} This paragraph tests the translation error label.`), trigger);
+    }, index ? 'PLAIN' : 'PREFIXED');
+    await frame.locator(`[data-block-id="${id}"] .paragraph-translate-trigger`).click();
+    const failure = frame.locator(`.my-scholar-translation.is-error[data-for="${id}"] .translation-text`);
+    await failure.waitFor();
+    if ((await failure.textContent()).trim() !== '翻译失败：测试服务不可用') throw new Error(`Paragraph error prefix repeated (${await failure.textContent()})`);
+  }
+  await page.locator('#full-translate-button').click();
+  await page.waitForFunction(() => window.__translationErrorFixtureRequests === 4 && document.querySelector('#translation-progress')?.hidden);
+  for (const id of errorFixtureIds) {
+    const failure = frame.locator(`.my-scholar-translation.is-error[data-for="${id}"] .translation-text`);
+    await failure.waitFor();
+    if ((await failure.textContent()).trim() !== '翻译失败：测试服务不可用') throw new Error(`Full translation error prefix repeated (${await failure.textContent()})`);
+  }
+
+  console.log(JSON.stringify({ blockId, titleBlockId, formulaBlockId, titleTranslated: true, metadataSkipped: true, inlineFormulaRendered: true, nestedStylesAndManyRunsRestored: true, errorPrefixNormalized: true, captionTranslations, listTranslations, translatedText, translationSpacing: { ...translationSpacing, sourceGapRatio, followingGapDelta }, specialTokenPreserved: tokenTranslationText.includes('[I_CLS]'), cacheRestored: true, fullTranslationPeakConcurrency, repeatedFullTranslationRequests: 0, placedAfterSource: true, progress, errors }));
   if (errors.length) process.exitCode = 1;
 })().catch((error) => {
   console.error(error);

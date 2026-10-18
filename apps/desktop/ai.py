@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from config import AI_SERVICES, AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE, resolve_ai_profile
 from pipeline import collect_table_candidates, utc_now
+import translation_providers
 
 
 MAX_AI_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -58,7 +59,7 @@ def _uses_chat_template(service: str, profile: Optional[Dict[str, str]] = None) 
 def status(service: str = "chat") -> Dict[str, Any]:
     name = str(service or "").strip().lower()
     config = _config(name)
-    enabled = bool(config["base_url"] and config["api_key"] and config["model"])
+    enabled = translation_providers.configured(config)
     return {
         "service": name,
         "enabled": enabled,
@@ -66,10 +67,15 @@ def status(service: str = "chat") -> Dict[str, Any]:
             "base_url": bool(config["base_url"]),
             "model": bool(config["model"]),
             "api_key": bool(config["api_key"]),
+            **({"access_key_id": bool(config.get("access_key_id")), "secret_access_key": bool(config.get("secret_access_key"))} if name == "translation" else {}),
         },
-        "model": config["model"] or None,
+        "model": (config["model"] or None) if config.get("provider", "openai-compatible") == "openai-compatible" else None,
         "profile_id": config["profile_id"],
-        "note": "服务由开发者固定配置。" if enabled else "开发者尚未完整配置此服务。",
+        **({"provider": config.get("provider", "openai-compatible"),
+            "source_language": config.get("source_language", "auto"),
+            "target_language": config.get("target_language", "zh"),
+        } if name == "translation" else {}),
+        "note": "服务已配置。" if enabled else "尚未完整配置此服务。",
     }
 
 
@@ -77,8 +83,13 @@ def services() -> Dict[str, Dict[str, Any]]:
     return {service: status(service) for service in AI_SERVICES}
 
 
-def translation_profile_id() -> str:
-    return _config("translation")["profile_id"]
+def translation_profile_id(profile: Optional[Dict[str, str]] = None) -> str:
+    return (profile if profile is not None else _config("translation"))["profile_id"]
+
+
+def translation_target_language(profile: Optional[Dict[str, str]] = None) -> str:
+    code = (profile if profile is not None else _config("translation")).get("target_language", "zh")
+    return "中文" if code == "zh" else code
 
 
 def _endpoint(base_url: str) -> str:
@@ -198,9 +209,10 @@ def _complete(
     model: Optional[str] = None,
     extra_body: Optional[dict] = None,
     timeout_seconds: Optional[int] = None,
+    profile: Optional[Dict[str, str]] = None,
 ) -> str:
     """Call the configured OpenAI-compatible gateway and return message text."""
-    config = _config(service)
+    config = profile if profile is not None else _config(service)
     selected_model = (model or config["model"]).strip()
     if not (config["base_url"] and selected_model):
         raise RuntimeError(f"未配置 {service} 服务的 Base URL 或模型。")
@@ -294,9 +306,10 @@ def _complete_stream(
     temperature: Optional[float] = 0.2,
     extra_body: Optional[dict] = None,
     max_tokens: Optional[int] = None,
+    profile: Optional[Dict[str, str]] = None,
 ) -> Iterator[str]:
     """Stream content deltas from the configured OpenAI-compatible gateway."""
-    config = _config(service)
+    config = profile if profile is not None else _config(service)
     model = config["model"].strip()
     if not (config["base_url"] and model):
         raise RuntimeError(f"未配置 {service} 服务的 Base URL 或模型。")
@@ -384,9 +397,9 @@ def _target_language_name(target_language: str) -> str:
     return value or "Chinese"
 
 
-def _translation_options(target_language: str, terms: Optional[List[str]] = None) -> Dict[str, Any]:
+def _translation_options(target_language: str, terms: Optional[List[str]] = None, profile: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     options: Dict[str, Any] = {
-        "source_lang": "auto",
+        "source_lang": (profile if profile is not None else _config("translation")).get("source_language", "auto"),
         "target_lang": _target_language_name(target_language),
     }
     protected = list(dict.fromkeys(str(item) for item in (terms or []) if str(item)))
@@ -501,7 +514,9 @@ def test_connection(service: str = "chat") -> Dict[str, Any]:
     profile = _config(name)
     started = time.monotonic()
     probe_timeout = max(1, min(30, int(os.environ.get("MY_SCHOLAR_AI_PROBE_TIMEOUT", "12"))))
-    if name == "translation":
+    if name == "translation" and profile.get("provider", "openai-compatible") != "openai-compatible":
+        text = translation_providers.translate("Connection test.", profile, timeout=probe_timeout)
+    elif name == "translation":
         mode = _translation_mode(profile)
         terms: List[str] = []
         text = _complete(
@@ -509,8 +524,9 @@ def test_connection(service: str = "chat") -> Dict[str, Any]:
             service=name,
             temperature=0 if mode == "chat" else None,
             max_tokens=PROBE_MAX_TOKENS if mode == "chat" else None,
-            extra_body=None if mode == "chat" else {"translation_options": _translation_options("Chinese")},
+            extra_body=None if mode == "chat" else {"translation_options": _translation_options("Chinese", profile=profile)},
             timeout_seconds=probe_timeout,
+            profile=profile,
         )
     else:
         text = _complete(
@@ -522,12 +538,14 @@ def test_connection(service: str = "chat") -> Dict[str, Any]:
             temperature=0,
             max_tokens=PROBE_MAX_TOKENS,
             timeout_seconds=probe_timeout,
+            profile=profile,
         )
     return {
         "ok": True,
         "service": name,
-        "model": profile["model"] or None,
+        "model": (profile["model"] or None) if profile.get("provider", "openai-compatible") == "openai-compatible" else None,
         "profile_id": profile["profile_id"],
+        **({"provider": profile.get("provider", "openai-compatible")} if name == "translation" else {}),
         "response_preview": text[:80],
         "elapsed_ms": round((time.monotonic() - started) * 1000),
     }
@@ -582,12 +600,18 @@ def _protected_translation_terms(text: str, formulas: Optional[List[dict]]) -> L
 
 
 # Public reading-assistance operations. None may overwrite deterministic HTML.
-def translate_text(text: str, *, target_language: str = "中文", context: str = "", formulas: Optional[List[dict]] = None) -> Dict[str, Any]:
+def translate_text(text: str, *, target_language: str = "", context: str = "", formulas: Optional[List[dict]] = None, profile: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     text = text.strip()
     if not text:
         raise ValueError("没有可翻译的文本。")
     protected_terms = _protected_translation_terms(text, formulas)
-    profile = _config("translation")
+    profile = profile if profile is not None else _config("translation")
+    target_language = target_language or profile.get("target_language", "zh")
+    if profile.get("provider", "openai-compatible") != "openai-compatible":
+        translated = translation_providers.translate(text, profile, target_language=target_language)
+        if not translated.strip():
+            raise TranslationQualityError("机器翻译返回了空译文。")
+        return {"text": translated, "provider": profile["provider"], "model": None, "profile_id": profile["profile_id"], "formulas": formulas or []}
     mode = _translation_mode(profile)
     # A long paragraph carries dozens of placeholders, and a single one dropped
     # by the model used to discard the whole translation. Retry before giving
@@ -599,7 +623,8 @@ def translate_text(text: str, *, target_language: str = "中文", context: str =
             service="translation",
             temperature=0 if mode == "chat" else None,
             max_tokens=TRANSLATION_MAX_TOKENS if mode == "chat" else None,
-            extra_body=None if mode == "chat" else {"translation_options": _translation_options(target_language, protected_terms)},
+            extra_body=None if mode == "chat" else {"translation_options": _translation_options(target_language, protected_terms, profile)},
+            profile=profile,
         )
         quality_error = _translation_quality_error(text, translated, protected_terms)
         if not quality_error:
@@ -612,20 +637,25 @@ def translate_text(text: str, *, target_language: str = "中文", context: str =
     raise TranslationQualityError(quality_error)
 
 
-def translate_text_stream(text: str, *, target_language: str = "中文", context: str = "", formulas: Optional[List[dict]] = None) -> Iterator[str]:
+def translate_text_stream(text: str, *, target_language: str = "", context: str = "", formulas: Optional[List[dict]] = None, profile: Optional[Dict[str, str]] = None) -> Iterator[str]:
     """Yield translation deltas with the same protections as translate_text()."""
     text = text.strip()
     if not text:
         raise ValueError("没有可翻译的文本。")
     protected_terms = _protected_translation_terms(text, formulas)
-    profile = _config("translation")
+    profile = profile if profile is not None else _config("translation")
+    target_language = target_language or profile.get("target_language", "zh")
+    if profile.get("provider", "openai-compatible") != "openai-compatible":
+        yield translate_text(text, target_language=target_language, context=context, formulas=formulas, profile=profile)["text"]
+        return
     mode = _translation_mode(profile)
     stream = _complete_stream(
         _translation_messages(text, target_language, protected_terms, mode),
         service="translation",
         temperature=0 if mode == "chat" else None,
         max_tokens=TRANSLATION_MAX_TOKENS if mode == "chat" else None,
-        extra_body=None if mode == "chat" else {"translation_options": _translation_options(target_language, protected_terms)},
+        extra_body=None if mode == "chat" else {"translation_options": _translation_options(target_language, protected_terms, profile)},
+        profile=profile,
     )
     cleaned = _strip_stream_thinking(stream) if mode == "chat" else stream
     yield from _validated_translation_stream(cleaned, text, protected_terms)

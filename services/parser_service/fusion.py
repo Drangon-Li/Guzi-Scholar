@@ -15,6 +15,7 @@ from pathlib import Path
 from bs4 import BeautifulSoup
 from PIL import Image
 
+from .bibliography import aggregate_reference_duplicates
 from .native_pdf import NativePDF
 from .currency import normalize_currency_dollars
 from .math_evidence import TexAtoms, assess_formula, math_candidates, math_canonical, math_spans, readable_candidate, reconcile_equation_number, selectable_script_segments, native_atoms, ordered_atoms
@@ -453,30 +454,6 @@ def table_script_audit(content, page, region):
                 previous = c
         offset += len(text) + 1
     return {'status': 'unresolved' if issues or evidence['alignment_coverage'] < .75 else 'confirmed', 'lost_native_scripts': issues, 'alignment_coverage': evidence['alignment_coverage']}
-
-
-def aggregate_reference_duplicates(blocks):
-    from difflib import SequenceMatcher
-    proposals = []
-    for i, aggregate in enumerate(blocks):
-        if aggregate.get('label') != 'reference':
-            continue
-        parent = bbox(aggregate, True)
-        candidates = [(j, b) for j, b in enumerate(blocks) if j != i and b.get('label') in {'text', 'reference'} and area(bbox(b, True)) < area(parent) * .6 and intersection(parent, bbox(b, True)) / max(area(bbox(b, True)), 1e-12) >= .9]
-        if len(candidates) < 3:
-            continue
-        original = norm(aggregate.get('content', ''))
-        children = norm(''.join(b.get('content', '') for _, b in candidates))
-        if not original or not children:
-            continue
-        anchors = lambda text: re.findall(r'\[\d+\]', text)
-        if anchors(original) != anchors(children) or len(anchors(original)) < 3:
-            continue
-        matching = sum(m.size for m in SequenceMatcher(None, original, children, autojunk=False).get_matching_blocks())
-        coverage = min(matching / len(original), matching / len(children))
-        if coverage >= .97:
-            proposals.append({'aggregate_index': i, 'retained_indices': [j for j, _ in candidates], 'content_coverage': coverage, 'reason': 'same_page_reference_aggregate_duplicates_finer_blocks'})
-    return proposals
 
 
 def norm(text):

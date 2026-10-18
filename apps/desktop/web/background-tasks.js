@@ -1,14 +1,4 @@
-// Bottom-right tray for work that outlives the reader view: full-document
-// translations and AI reflows keep going while another document, the library
-// or the settings are on screen.
-//
-// The active document's own progress panels are static markup inside the tray
-// and are painted by app.js, so their ids and aria state stay exactly what the
-// reader always exposed. This module renders the cards for every other
-// document's run, keeps the collapse toggle and its summary in step with what
-// is visible, and lifts the toast above the tray by publishing the tray height
-// as a CSS variable. Attaches to window like core.js so the page keeps loading
-// plain classic scripts with no build step.
+// Shared progress strip for translations and reflows that continue across document switches.
 (function attachBackgroundTasks(root) {
   const KIND_LABELS = { translation: '全文翻译', reflow: 'AI 重排' };
 
@@ -101,9 +91,9 @@
     }
 
     if (typeof ResizeObserver === 'function') {
-      const observer = new ResizeObserver((entries) => {
-        const height = Math.round(entries[0]?.contentRect?.height || 0);
-        document.documentElement.style.setProperty('--background-tasks-offset', height ? `${height + 10}px` : '0px');
+      const observer = new ResizeObserver(() => {
+        document.documentElement.style.setProperty('--background-tasks-offset', '0px');
+        document.documentElement.style.setProperty('--background-tasks-height', `${Math.round(container.getBoundingClientRect().height)}px`);
       });
       observer.observe(container);
     }

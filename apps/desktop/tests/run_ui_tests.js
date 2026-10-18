@@ -18,6 +18,14 @@ const tests = [
   ['document', 'web_smoke.js', { ci: true }],
   ['features', 'feature_smoke.js', { ci: true }],
   ['translation', 'translation_smoke.js', { ci: true }],
+  ['math-typography', 'math_typography_smoke.js', { ci: true }],
+  ['reader-experience', 'reader_experience_smoke.js', { ci: true }],
+  ['reader-transition', 'reader_transition_smoke.js', { ci: true }],
+  ['reader-keepalive', 'reader_keepalive_smoke.js', { ci: true }],
+  ['reader-memory', 'reader_memory_smoke.js', { ci: true }],
+  ['reader-switch-performance', 'reader_switch_performance_smoke.js', { ci: true }],
+  ['navigation-performance', 'navigation_performance_smoke.js', { ci: true }],
+  ['citations', 'citation_anchor_smoke.js', { ci: true }],
   ['library', 'library_smoke.js', { ci: true }],
   ['library-v3', 'library_v3_smoke.js', { ci: true }],
   ['interactions', 'interaction_regression.js', { ci: true }],
@@ -29,7 +37,9 @@ const tests = [
 
 const ciOnly = args.includes('--ci')
   || ['1', 'true', 'yes'].includes(String(process.env.MY_SCHOLAR_UI_CI || '').toLowerCase());
-const selected = ciOnly ? tests.filter(([, , meta]) => meta.ci) : tests;
+const only = args.find((arg) => arg.startsWith('--only='))?.slice('--only='.length) || '';
+if (only && !tests.some(([name]) => name === only)) throw new Error(`Unknown UI suite: ${only}`);
+const selected = tests.filter(([name, , meta]) => (!ciOnly || meta.ci) && (!only || name === only));
 
 const desktopRoot = path.join(__dirname, '..');
 const python = process.env.MY_SCHOLAR_PYTHON || 'python3';

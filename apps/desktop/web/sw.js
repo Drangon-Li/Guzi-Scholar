@@ -4,6 +4,7 @@ const SHELL_CACHE = 'guzi-shell-v10';
 const SHELL_ASSETS = [
   '/library',
   '/web/styles.css',
+  '/web/reader-math.css',
   '/web/vendor/cytoscape.min.js',
   '/web/graph-model.js',
   '/web/graph-view.js',

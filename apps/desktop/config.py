@@ -32,6 +32,8 @@ AI_GATEWAY_MODELS = {
 AI_SERVICES = ("translation", "chat")
 AI_TRANSLATION_MODES = ("qwen-mt", "chat")
 DEFAULT_TRANSLATION_MODE = "qwen-mt"
+TRANSLATION_PROVIDERS = ("openai-compatible", "volcengine", "deepl")
+MACHINE_TRANSLATION_FORMAT_VERSION = "local-format-v1"
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -82,13 +84,36 @@ def _normalize_profile(value: Any, *, service: str = "chat") -> dict[str, str]:
     if service == "translation":
         candidate = str(value.get("mode", DEFAULT_TRANSLATION_MODE) or "").strip().lower()
         mode = candidate if candidate in AI_TRANSLATION_MODES else DEFAULT_TRANSLATION_MODE
-    return {
+    result = {
         "base_url": base_url,
         "api_key": api_key,
         "model": model,
         **({"mode": mode} if service == "translation" else {}),
         "profile_id": _profile_id(base_url, model, mode),
     }
+    if service == "translation":
+        provider = str(value.get("provider") or "openai-compatible").strip().lower()
+        result.update({
+            "provider": provider,
+            "source_language": str(value.get("source_language") or "auto").strip(),
+            "target_language": str(value.get("target_language") or "zh").strip(),
+            "deepl_tier": str(value.get("deepl_tier") or "free").strip().lower(),
+            "access_key_id": str(value.get("access_key_id") or "").strip(),
+            "secret_access_key": str(value.get("secret_access_key") or "").strip(),
+        })
+        if provider != "openai-compatible" or result["source_language"] != "auto" or result["target_language"] != "zh":
+            # Credentials rotate without invalidating translations; provider,
+            # endpoint tier and language direction change the actual result.
+            identity = [provider, result["source_language"], result["target_language"]]
+            if provider == "openai-compatible":
+                identity.extend([base_url, model, mode])
+            elif provider == "deepl":
+                identity.append(result["deepl_tier"])
+            if provider in ("volcengine", "deepl"):
+                # Old machine translations could drop styling placeholders.
+                identity.append(MACHINE_TRANSLATION_FORMAT_VERSION)
+            result["profile_id"] = hashlib.sha256(json.dumps(identity).encode("utf-8")).hexdigest()
+    return result
 
 
 def _user_profile(name: str, environ: Mapping[str, Any]) -> Optional[dict[str, str]]:

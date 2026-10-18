@@ -27,6 +27,8 @@ let browserSession;
   const expectedHTTPErrorPaths = [];
   let selectionTranslationRequestCount = 0;
   let translationRequestCount = 0;
+  let previewCaptionBlockId = '';
+  let previewTranslationPayload = null;
   const chatRequestContents = [];
   const chatRequestPayloads = [];
   let chatResponseMode = 'normal';
@@ -50,10 +52,12 @@ let browserSession;
     translationRequestCount += 1;
     const isSelection = payload.block_id == null || payload.block_id === '';
     if (isSelection) selectionTranslationRequestCount += 1;
+    const isPreviewCaption = payload.block_id === previewCaptionBlockId;
+    if (isPreviewCaption) previewTranslationPayload = payload;
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ result: { text: isSelection ? '这是功能回归测试的选区译文。' : String(payload.text || '这是功能回归测试译文。'), cached: false, profile_id: 'translation-smoke-profile' } }),
+      body: JSON.stringify({ result: { text: isSelection ? '这是功能回归测试的选区译文。' : `${isPreviewCaption ? '预览缓存译文 ' : ''}${String(payload.text || '这是功能回归测试译文。')}`, cached: false, profile_id: 'translation-smoke-profile' } }),
     });
   });
   await page.route('**/api/jobs/*/chat', async (route) => {
@@ -677,23 +681,26 @@ let browserSession;
       tone.dataset.textTone = 'orange';
       tone.textContent = ' Layer Feature Matching (LFM)';
       caption.append(' ', math, ' ', marker, tone);
-      let translation = document.querySelector(`.my-scholar-translation[data-for="${CSS.escape(blockId)}"]`);
-      if (!translation) {
-        translation = document.createElement('div');
-        translation.className = 'my-scholar-translation';
-        translation.dataset.for = blockId;
-        caption.insertAdjacentElement('afterend', translation);
-      }
-      let body = translation.querySelector('.translation-text');
-      if (!body) {
-        body = document.createElement('div');
-        body.className = 'translation-text';
-        translation.append(body);
-      }
-      body.replaceChildren('预览缓存译文 ', marker.cloneNode(true), ' ', tone.cloneNode(true));
-      return { targetId: target.id, blockId, generatedImage: Boolean(image) };
+      const trigger = document.querySelector('p[data-block-id] .paragraph-translate-trigger');
+      if (!trigger) throw new Error('Caption preview fixture needs an installed paragraph translation control');
+      const triggerBlockId = trigger.dataset.translateBlockId;
+      trigger.dataset.translateBlockId = blockId;
+      caption.append(trigger);
+      document.querySelector(`.my-scholar-translation[data-for="${CSS.escape(blockId)}"]`)?.remove();
+      return { targetId: target.id, blockId, triggerBlockId, generatedImage: Boolean(image) };
     }, generatedPreviewAsset);
     if (!previewFixture) throw new Error('Figure/table caption preview fixture was unavailable');
+    previewCaptionBlockId = previewFixture.blockId;
+    await frame.locator(`figcaption[data-translate-block-id="${previewFixture.blockId}"] .paragraph-translate-trigger`).click();
+    const captionTranslation = frame.locator(`.my-scholar-translation[data-for="${previewFixture.blockId}"]:not(.is-pending):not(.is-error)`);
+    await captionTranslation.waitFor();
+    if (!previewTranslationPayload?.source_hash || await captionTranslation.getAttribute('data-source-hash') !== previewTranslationPayload.source_hash) throw new Error('Caption preview translation did not use the source identity from its actual translation request');
+    await captionTranslation.evaluate((translation, fixture) => {
+      const doc = translation.ownerDocument;
+      const trigger = doc.querySelector(`figcaption[data-translate-block-id="${CSS.escape(fixture.blockId)}"] .paragraph-translate-trigger`);
+      trigger.dataset.translateBlockId = fixture.triggerBlockId;
+      doc.querySelector(`p[data-block-id="${CSS.escape(fixture.triggerBlockId)}"]`).append(trigger);
+    }, previewFixture);
     const translationRequestsBeforePreview = translationRequestCount;
     await mediaCrossReference.scrollIntoViewIfNeeded();
     const scrollBeforePreview = await frame.locator('html').evaluate((root) => root.scrollTop);
@@ -965,9 +972,11 @@ let browserSession;
     const after = typographyAfterScale[surface];
     if (after.fontSize < before.fontSize * 1.16 || after.lineHeight < before.lineHeight * 1.10) throw new Error(`Reader typography did not scale ${surface} (${JSON.stringify({ before, after })})`);
   }
-  for (const surface of ['readingHighlight', 'articleNote']) {
-    const after = typographyAfterScale[surface];
-    if (Math.abs(after.fontSize - typographyAfterScale.reader.fontSize) > 0.2 || Math.abs(after.lineHeight - typographyAfterScale.reader.lineHeight) > 0.2) throw new Error(`Reader content typography diverged for ${surface} (${JSON.stringify(typographyAfterScale)})`);
+  for (const typography of [typographyBeforeScale, typographyAfterScale]) {
+    for (const surface of ['readingHighlight', 'articleNote']) {
+      const measured = typography[surface];
+      if (Math.abs(measured.fontSize - typography.chatBubble.fontSize) > 0.2 || Math.abs(measured.lineHeight - typography.chatBubble.lineHeight) > 0.2) throw new Error(`Sidebar body typography diverged from AI chat for ${surface} (${JSON.stringify(typography)})`);
+    }
   }
   if (Math.abs(typographyAfterScale.chatBubble.fontSize - typographyAfterScale.chatInput.fontSize) > 0.2 || Math.abs(typographyAfterScale.chatBubble.lineHeight - typographyAfterScale.chatInput.lineHeight) > 0.2) throw new Error(`AI answer typography did not align with the chat composer (${JSON.stringify(typographyAfterScale)})`);
   for (const surface of ['manualHighlight', 'translation']) {
