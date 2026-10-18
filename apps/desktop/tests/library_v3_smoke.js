@@ -333,17 +333,20 @@ let browserSession;
   await page.reload({ waitUntil: 'networkidle' });
   await page.locator('#recent-list .library-row').first().waitFor();
 
-  await page.locator('[data-view="settings-view"]').click();
-  await page.locator('#settings-view.active-view').waitFor();
-  const settingsViewMotion = await page.locator('#settings-view').evaluate((view) => {
+  const settingsViewMotion = await page.locator('[data-view="settings-view"]').evaluate((button) => {
+    button.click();
+    const view = document.querySelector('#settings-view');
     const style = getComputedStyle(view);
+    const animations = view.getAnimations();
     return {
+      active: view.classList.contains('active-view'),
       animationName: style.animationName,
       durationMs: style.animationDuration.split(',').reduce((maximum, value) => Math.max(maximum, parseFloat(value) * (value.trim().endsWith('ms') ? 1 : 1000)), 0),
-      activeAnimations: view.getAnimations().length,
+      activeAnimations: animations.length,
+      opacityOnly: animations.every((animation) => animation.effect.getKeyframes().every((frame) => frame.opacity !== undefined && (!frame.transform || frame.transform === 'none'))),
     };
   });
-  if (settingsViewMotion.animationName === 'none' || settingsViewMotion.durationMs < 140 || settingsViewMotion.activeAnimations < 1) throw new Error(`Primary view change has no visible motion (${JSON.stringify(settingsViewMotion)})`);
+  if (!settingsViewMotion.active || settingsViewMotion.animationName === 'none' || settingsViewMotion.durationMs < 80 || settingsViewMotion.durationMs > 140 || settingsViewMotion.activeAnimations < 1 || !settingsViewMotion.opacityOnly) throw new Error(`Primary view change must use a short opacity fade (${JSON.stringify(settingsViewMotion)})`);
   if (await page.locator('#setting-metadata-auto').count() !== 1 || await page.locator('#setting-metadata-online').count() !== 1) throw new Error('Metadata settings are not exposed in the settings view');
   if (await page.locator('#setting-app-font').count() !== 1 || await page.locator('#setting-reader-font').count() !== 1 || await page.locator('input[name="setting-accent"]').count() !== 6 || await page.locator('#setting-highlight-color').count() !== 0 || await page.locator('#shortcut-highlight-note').count() !== 1 || await page.locator('#shortcut-underline-note').count() !== 1) throw new Error('Appearance presets or annotation shortcuts are missing from settings');
   await page.locator('[data-view="library-view"]').click();
