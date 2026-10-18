@@ -1,0 +1,16 @@
+:root {
+  --reader-math-font: "STIX Two Math", "Cambria Math", "Latin Modern Math", math, serif;
+}
+
+body math {
+  font-family: var(--reader-math-font);
+  font-size: 1em;
+}
+
+/* Native MathML supplies its own baseline and script metrics. */
+body math:not([display="block"]),
+body .translation-text math.translation-math:not([display="block"]) {
+  display: inline math;
+  margin: 0;
+  vertical-align: baseline;
+}

@@ -844,7 +844,7 @@ let browserSession;
   await page.locator('#typography-button').click();
   await page.locator('#typography-popover:not([hidden]):not(.is-closing)').waitFor();
   const selectionActions = await page.locator('.selection-actions > button').allTextContents();
-  const expectedSelectionActions = ['高亮', '高亮笔记', '划线', '划线随笔', '加入 Chat'];
+  const expectedSelectionActions = ['高亮', '高亮笔记', '划线', '划线随笔', '复制', '加入 Chat'];
   if (JSON.stringify(selectionActions) !== JSON.stringify(expectedSelectionActions)) throw new Error(`Selection menu actions or order were incorrect (${JSON.stringify(selectionActions)})`);
   const readerHeading = await page.locator('.reader-heading').innerText();
   if (/\.pdf\b/i.test(readerHeading)) throw new Error('Reader assistant header leaked the document filename');

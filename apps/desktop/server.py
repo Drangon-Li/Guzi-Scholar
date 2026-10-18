@@ -52,7 +52,10 @@ except ImportError:  # pragma: no cover - present only on Windows
 import runtime
 from ai import TranslationQualityError, auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, is_metadata_block, list_models as ai_list_models, reference_quick_read, review_tables, services as ai_services, status as ai_status, test_connections as ai_test_connections, translate_text, translate_text_stream, translation_profile_id
 from bibliography import is_fragmented_metadata_text, retrieve_bibliographic_metadata, retrieve_reference_evidence
-from config import AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE
+from config import AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE, TRANSLATION_PROVIDERS, resolve_ai_profile
+from ai import test_connection as ai_test_connection, translation_target_language
+from ai import _safe_connection_error
+from translation_providers import language_code
 from content_store import MAX_NOTE_ASSET_BYTES, _active_conversion_root, _atomic_temp_path, _ensure_content_layout, _normalize_media_layout_items, _note_image_type, _read_media_layout, _store_note_asset, _sync_content_file, _translation_key, _translation_records, _translation_records_need_persist, _write_media_layout, _write_translation_records
 # Re-exported for the tests, which reach these through the server module.
 from content_store import MAX_MEDIA_LAYOUT_ITEMS, _write_content_manifest, _write_english_snapshot  # noqa: F401
@@ -593,6 +596,54 @@ def _annotation_colors(value: Any, fallback: str) -> Dict[str, str]:
     return {kind: _setting_color(stored.get(kind), fallback) for kind in ANNOTATION_COLOR_KINDS}
 
 
+BUILTIN_ANNOTATION_ACTIONS = ("highlight", "highlight_note", "underline", "underline_note", "copy", "chat")
+
+
+def _annotation_actions(value: Any, *, strict: bool = False) -> Dict[str, Any]:
+    stored = value if isinstance(value, dict) else {}
+    hidden = stored.get("hidden_builtin", [])
+    custom = stored.get("custom", [])
+    if not isinstance(hidden, list) or not isinstance(custom, list):
+        if strict:
+            raise PipelineError("选区工具栏的按钮配置必须是列表。")
+        return {"hidden_builtin": [], "custom": []}
+    if strict and len(custom) > 32:
+        raise PipelineError("最多可配置 32 个自定义标记。")
+    actions = []
+    seen = set()
+    for item in custom[:32]:
+        if not isinstance(item, dict):
+            if strict:
+                raise PipelineError("自定义标记格式无效。")
+            continue
+        action_id = str(item.get("id") or "").strip()
+        label = str(item.get("label") or "").strip()
+        kind = str(item.get("kind") or "highlight")
+        color = str(item.get("color") or "#f59e0b")
+        valid = (re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", action_id)
+                 and action_id not in seen and 0 < len(label) <= 40
+                 and kind in ANNOTATION_COLOR_KINDS
+                 and re.fullmatch(r"#[0-9a-fA-F]{6}", color))
+        if not valid:
+            if strict:
+                raise PipelineError("自定义标记需要唯一 ID、1–40 字名称、有效颜色及高亮或划线类型。")
+            continue
+        seen.add(action_id)
+        actions.append({"id": action_id, "label": label, "kind": kind, "color": color,
+                        "enabled": _setting_bool(item.get("enabled"), True)})
+    return {"hidden_builtin": [name for name in BUILTIN_ANNOTATION_ACTIONS if name in hidden], "custom": actions}
+
+
+def _annotation_action_snapshot(value: Dict[str, Any]) -> Dict[str, str]:
+    action_id = str(value.get("action_id") or "").strip()
+    label = str(value.get("label") or "").strip()
+    if not action_id and not label:
+        return {}
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", action_id) or not 0 < len(label) <= 40:
+        raise PipelineError("自定义标记的 ID 或名称无效。")
+    return {"action_id": action_id, "label": label}
+
+
 APPEARANCE_DEFAULTS = {
     "app_font": "system",
     "reader_font": "academic",
@@ -640,6 +691,29 @@ def _normalize_ai_profile(value: Any, current: Any = None, *, service: str = "ch
         "api_key": str(existing.get("api_key", "") or "").strip(),
     }
     if service == "translation":
+        provider = str(incoming.get("provider", existing.get("provider", "openai-compatible")) or "openai-compatible").strip().lower()
+        if provider not in TRANSLATION_PROVIDERS:
+            raise PipelineError("翻译提供商无效。知网尚无可核实的官方公开翻译 API。")
+        result["provider"] = provider
+        if provider != existing.get("provider", "openai-compatible"):
+            # OpenAI and DeepL both call their token api_key, but those tokens
+            # belong to different services and must not travel across providers.
+            result["api_key"] = ""
+        try:
+            result["source_language"] = language_code(str(incoming.get("source_language", existing.get("source_language", "auto")) or "auto"), source=True)
+            result["target_language"] = language_code(str(incoming.get("target_language", existing.get("target_language", "zh")) or "zh"))
+        except ValueError as exc:
+            raise PipelineError(str(exc)) from exc
+        tier = str(incoming.get("deepl_tier", existing.get("deepl_tier", "free")) or "free").strip().lower()
+        if tier not in {"free", "pro"}:
+            raise PipelineError("DeepL 套餐必须为 free 或 pro。")
+        result["deepl_tier"] = tier
+        for field in ("access_key_id", "secret_access_key"):
+            result[field] = str(incoming.get(field) or existing.get(field) or "").strip()
+            if _setting_bool(incoming.get("clear_" + field), False):
+                result[field] = ""
+            if len(result[field]) > 4096:
+                raise PipelineError("翻译凭据配置过长。")
         candidate_mode = str(incoming.get("mode", existing.get("mode", DEFAULT_TRANSLATION_MODE)) or "").strip().lower()
         if candidate_mode not in AI_TRANSLATION_MODES:
             raise PipelineError("翻译协议模式无效。")
@@ -676,7 +750,13 @@ def _public_ai_settings(value: Any) -> Dict[str, Dict[str, Any]]:
             "base_url": profile["base_url"],
             "model": profile["model"],
             "api_key_configured": bool(profile["api_key"]),
-            **({"mode": profile["mode"]} if service == "translation" else {}),
+            **({
+                "mode": profile["mode"], "provider": profile["provider"],
+                "source_language": profile["source_language"], "target_language": profile["target_language"],
+                "deepl_tier": profile["deepl_tier"],
+                "access_key_id_configured": bool(profile["access_key_id"]),
+                "secret_access_key_configured": bool(profile["secret_access_key"]),
+            } if service == "translation" else {}),
         }
         for service, profile in profiles.items()
     }
@@ -711,6 +791,8 @@ def _copy_ai_profile(source: str, target: str) -> Dict[str, Any]:
         current = _stored_settings()
         profiles = _normalize_ai_settings(current.get("ai"), current.get("ai"))
         source_profile = profiles[source_name]
+        if source_name == "translation" and source_profile.get("provider") != "openai-compatible":
+            raise PipelineError("专用机器翻译配置不能与文章助手复用；请分别配置。")
         if not source_profile["base_url"] or not source_profile["model"]:
             raise PipelineError("源 AI 服务至少需要填写 Base URL 和模型。")
         # Copy only the credentials shared by both service contracts. A
@@ -723,6 +805,7 @@ def _copy_ai_profile(source: str, target: str) -> Dict[str, Any]:
             "api_key": source_profile["api_key"],
         }
         if target_name == "translation":
+            copied["provider"] = "openai-compatible"
             copied["mode"] = (
                 source_profile.get("mode")
                 if source_name == "translation"
@@ -766,6 +849,7 @@ def _public_settings() -> Dict[str, Any]:
         "annotation_colors": _annotation_colors(
             data.get("annotation_colors"), _setting_color(data.get("highlight_color"))
         ),
+        "annotation_actions": _annotation_actions(data.get("annotation_actions")),
         "appearance": _appearance_settings(data.get("appearance")),
         "metadata": {
             "auto_retrieve": _setting_bool(data.get("metadata", {}).get("auto_retrieve", True), True) if isinstance(data.get("metadata"), dict) else True,
@@ -785,7 +869,7 @@ def _write_settings(data: Dict[str, Any]) -> Dict[str, Any]:
         raise PipelineError(f"AI 服务配置只能在项目私有配置文件中修改：{', '.join(blocked)}")
     with SETTINGS_LOCK:
         current = _stored_settings()
-        for key in ("shortcuts", "metadata", "highlight_color", "annotation_colors", "appearance", "ai", "parsing"):
+        for key in ("shortcuts", "metadata", "highlight_color", "annotation_colors", "annotation_actions", "appearance", "ai", "parsing"):
             if key in data:
                 if key == "metadata" and isinstance(data[key], dict):
                     current[key] = {
@@ -799,6 +883,8 @@ def _write_settings(data: Dict[str, Any]) -> Dict[str, Any]:
                     current["annotation_colors"] = _annotation_colors(
                         data[key], _setting_color(current.get("highlight_color"))
                     )
+                elif key == "annotation_actions":
+                    current[key] = _annotation_actions(data[key], strict=True)
                 elif key == "shortcuts" and isinstance(data[key], dict):
                     defaults = _public_settings().get("shortcuts", {})
                     current["shortcuts"] = {
@@ -2056,9 +2142,9 @@ READONLY_BLOCKED_ARTIFACTS = frozenset({
 
 class ScholarHandler(BaseHTTPRequestHandler):
     server_version = "GuziScholar/0.1"
-    # Every non-SSE response carries an explicit Content-Length, so persistent
-    # connections are safe and save a TCP handshake plus a worker thread per
-    # asset when the reader loads a document with images.
+    # GET/HEAD connections stay reusable for document assets. Mutation handlers
+    # can respond before reading their body, so those responses close the socket
+    # to keep leftover JSON from becoming the next request's HTTP method.
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -2074,6 +2160,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            if getattr(self, "command", "GET") not in {"GET", "HEAD"}:
+                self.send_header("Connection", "close")
+                self.close_connection = True
             # Render generations are content-addressed (sha256 asset names and
             # a monotonically increasing generation), so they can be cached
             # forever; everything else stays uncacheable to avoid stale data.
@@ -2177,7 +2266,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._send_json({
                 "ok": True,
                 "service": "my-scholar",
-                "version": "0.3.0",
+                "version": "0.4.0",
                 "readonly": runtime.READONLY_MODE,
                 "shell": os.environ.get("MY_SCHOLAR_SHELL", "reference"),
                 "ai": ai,
@@ -2413,7 +2502,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         if path == "/api/parsing/providers/local-mineru/install/cancel":
             self._cancel_provider_install("local-mineru")
             return
-        ai_execution = path in {"/api/ai/test", "/api/ai/models"} or re.fullmatch(
+        ai_execution = path in {"/api/ai/test", "/api/ai/models", "/api/translation/test"} or re.fullmatch(
             r"/api/jobs/[a-f0-9]{12,40}/(?:translate|chat|auto-highlights|ai-review|reference-summary|reflow)",
             path,
         )
@@ -2449,6 +2538,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/ai/test":
             self._test_ai_connection()
+            return
+        if path == "/api/translation/test":
+            self._test_translation_connection()
             return
         if path == "/api/ai/models":
             self._list_ai_models()
@@ -2502,6 +2594,17 @@ class ScholarHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_error_json(f"AI 服务连接测试失败：{exc}", HTTPStatus.BAD_GATEWAY)
 
+    def _test_translation_connection(self) -> None:
+        started = time.monotonic()
+        try:
+            result = ai_test_connection("translation")
+        except (RuntimeError, ValueError, OSError) as exc:
+            safe = ai_status("translation")
+            result = {"ok": False, "service": "translation", "provider": safe.get("provider"),
+                      "model": safe.get("model"), "profile_id": safe.get("profile_id"),
+                      "elapsed_ms": round((time.monotonic() - started) * 1000), "error": _safe_connection_error(exc)}
+        self._send_json({"result": result})
+
     def _reuse_ai_profile(self) -> None:
         try:
             payload = self._read_json_body(max_bytes=16 * 1024)
@@ -2519,6 +2622,8 @@ class ScholarHandler(BaseHTTPRequestHandler):
             current = _stored_settings().get("ai", {})
             current_profile = current.get(service) if isinstance(current, dict) else None
             profile = _normalize_ai_profile(payload.get("profile"), current_profile, service=service)
+            if service == "translation" and profile.get("provider") != "openai-compatible":
+                raise PipelineError("专用机器翻译不使用模型列表。")
             if not profile["base_url"]:
                 raise PipelineError("请先填写 Base URL。")
             models = ai_list_models(profile["base_url"], profile["api_key"])
@@ -2968,6 +3073,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 kind = str(payload.get("kind", "highlight"))
                 block_id = payload.get("block_id")
                 source = "ai" if str(payload.get("source", "")).strip().lower() == "ai" else "manual"
+                action_snapshot = _annotation_action_snapshot(payload) if source == "manual" else {}
                 surface = payload.get("surface") if payload.get("surface") in {"paper", "translation"} else None
                 source_block_id = str(payload["source_block_id"]) if payload.get("source_block_id") else None
                 start = payload.get("start")
@@ -2990,6 +3096,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                         and existing.get("block_id") == block_id
                         and existing.get("quote") == quote[:10000]
                         and existing_source == source
+                        and (existing.get("action_id") or "") == action_snapshot.get("action_id", "")
                     )
                     if same_annotation and source == "manual" and has_precise_anchor:
                         same_annotation = (
@@ -3021,6 +3128,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     "quote_suffix": str(payload.get("quote_suffix") or "")[:48],
                     "render_generation": render_generation,
                     "created_at": utc_now(),
+                    **action_snapshot,
                 }
                 if surface:
                     item["surface"] = surface
@@ -3082,6 +3190,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     self._send_error_json("笔记标记不存在。", HTTPStatus.NOT_FOUND)
                     return
 
+                action_snapshot = _annotation_action_snapshot({**updated, **payload}) if (
+                    "action_id" in payload or "label" in payload
+                ) else None
                 next_kind = None
                 if "kind" in payload:
                     next_kind = str(payload.get("kind") or "").strip().lower()
@@ -3097,6 +3208,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                             and item.get("id") != annotation_id
                             and not _is_ai_annotation(item)
                             and item.get("kind") == next_kind
+                            and (item.get("action_id") or "") == (updated.get("action_id") or "")
                             and tuple(item.get(field) for field in anchor_fields) == anchor
                             for item in annotations
                         )
@@ -3120,6 +3232,10 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     updated["kind"] = next_kind
                 if suggestion_state is not None:
                     updated["suggestion_state"] = suggestion_state
+                if action_snapshot is not None:
+                    updated.pop("action_id", None)
+                    updated.pop("label", None)
+                    updated.update(action_snapshot)
                 (job_dir / "annotations.json").write_text(json.dumps(annotations, ensure_ascii=False, indent=2), encoding="utf-8")
                 _sync_content_file(job_dir, "annotations/annotations.json", annotations)
             self._send_json({"annotation": updated, "annotations": annotations})
@@ -3162,7 +3278,8 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 payload = self._read_json_body()
                 text = str(payload.get("text", "")).strip()
                 block_id = str(payload.get("block_id", "") or "").strip()
-                target_language = str(payload.get("target_language", "中文") or "中文").strip()
+                profile = resolve_ai_profile("translation")
+                target_language = str(payload.get("target_language") or translation_target_language(profile)).strip()
                 source_hash = str(payload.get("source_hash", "") or "").strip()
                 formulas = payload.get("formulas", [])
                 if not isinstance(formulas, list):
@@ -3172,7 +3289,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     for item in formulas
                     if isinstance(item, dict) and re.fullmatch(r"__MY_SCHOLAR_MATH_\d+__", str(item.get("token", "")))
                 ]
-                profile_id = translation_profile_id()
+                profile_id = translation_profile_id(profile)
                 cache_key = _translation_key(text, block_id, target_language, source_hash, profile_id)
                 # An explicit re-translation has to reach the model: the reader
                 # asks for one when the stored translation is the thing that
@@ -3194,6 +3311,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     formulas=formulas,
                     profile_id=profile_id,
                     cache_key=cache_key,
+                    profile=profile,
                 )
                 return
             if cached:
@@ -3204,6 +3322,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 target_language=target_language,
                 context=_job_context(job_dir, 5000),
                 formulas=formulas,
+                profile=profile,
             )
             record = {
                 **result,
@@ -3411,6 +3530,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         formulas: List[Dict[str, str]],
         profile_id: str,
         cache_key: str,
+        profile: Dict[str, str],
     ) -> None:
         try:
             self.send_response(HTTPStatus.OK)
@@ -3430,7 +3550,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         parts: List[str] = []
         try:
             try:
-                for delta in translate_text_stream(text, target_language=target_language, context=context, formulas=formulas):
+                for delta in translate_text_stream(text, target_language=target_language, context=context, formulas=formulas, profile=profile):
                     parts.append(delta)
                     if not self._send_sse_event({"delta": delta}):
                         return
@@ -3439,7 +3559,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     raise RuntimeError("模型返回为空。")
                 result = {
                     "text": translated,
-                    "model": ai_status("translation").get("model"),
+                    "model": (profile.get("model") or None) if profile.get("provider", "openai-compatible") == "openai-compatible" else None,
                     "profile_id": profile_id,
                     "formulas": formulas,
                 }
@@ -3454,7 +3574,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     self._send_sse_event({"error": f"翻译失败：{exc}"})
                     return
                 try:
-                    result = translate_text(text, target_language=target_language, context=context, formulas=formulas)
+                    result = translate_text(text, target_language=target_language, context=context, formulas=formulas, profile=profile)
                 except Exception:
                     self._send_sse_event({"error": f"翻译失败：{exc}"})
                     return

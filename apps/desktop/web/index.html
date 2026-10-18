@@ -14,6 +14,7 @@
   <meta name="apple-mobile-web-app-title" content="谷子学术">
   <link rel="apple-touch-icon" href="/web/assets/apple-touch-icon.png">
   <link rel="stylesheet" href="/web/styles.css">
+  <link id="reader-math-style" rel="stylesheet" href="/web/reader-math.css">
 </head>
 <body>
   <header class="app-header">
@@ -27,6 +28,39 @@
     <button id="install-app-button" class="nav-button" type="button" hidden>安装应用</button>
     <button class="nav-button nav-settings" data-view="settings-view" type="button">设置</button>
   </header>
+
+  <aside id="background-tasks" class="background-tasks" aria-label="后台任务">
+    <button id="background-tasks-toggle" class="background-tasks-toggle" type="button" aria-expanded="true" hidden><span id="background-tasks-summary"></span><span class="background-tasks-chevron" aria-hidden="true">⌄</span></button>
+    <div class="background-tasks-cards">
+      <div id="translation-progress" class="translation-progress" hidden>
+        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+        <div class="translation-progress-main">
+          <div class="translation-progress-head">
+            <span id="translation-progress-label">全文翻译准备中</span>
+            <span id="translation-progress-count" class="translation-progress-count"></span>
+            <span id="translation-progress-value">0%</span>
+          </div>
+          <div class="translation-progress-track" role="progressbar" aria-label="全文翻译进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="translation-progress-bar" class="translation-progress-bar"></div></div>
+          <div id="translation-progress-detail" class="translation-progress-detail" hidden></div>
+        </div>
+        <button id="view-translation-button" class="tiny-button" type="button">查看</button>
+        <button id="stop-translation-button" class="tiny-button" type="button">停止</button>
+      </div>
+      <div id="reflow-progress" class="translation-progress reflow-progress" role="status" aria-live="polite" hidden>
+        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+        <div class="translation-progress-main">
+          <div class="translation-progress-head">
+            <span id="reflow-progress-label">AI 重排准备中</span>
+            <span id="reflow-progress-stage" class="translation-progress-count"></span>
+            <span id="reflow-progress-value">0%</span>
+          </div>
+          <div id="reflow-progress-track" class="translation-progress-track" role="progressbar" aria-label="AI 重排进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="reflow-progress-bar" class="translation-progress-bar"></div></div>
+        </div>
+        <button id="cancel-reflow-button" class="tiny-button" type="button">取消</button>
+      </div>
+      <div id="background-tasks-list" class="background-tasks-list"></div>
+    </div>
+  </aside>
 
   <main class="app-shell">
     <section id="library-view" class="view active-view">
@@ -220,15 +254,17 @@
             <button id="reader-search-next" class="reader-search-button" type="button" title="下一个匹配" aria-label="下一个匹配">↓</button>
             <button id="reader-search-close" class="reader-search-button reader-search-close" type="button" title="关闭搜索" aria-label="关闭搜索">×</button>
           </div>
-          <iframe id="html-preview" title="论文阅读器" loading="eager"></iframe>
+          <div id="reader-documents"></div>
           <div id="selection-popover" class="selection-popover" hidden>
             <div class="selection-actions" role="toolbar" aria-label="选中文本操作">
-              <button id="selection-highlight" type="button">高亮</button>
-              <button id="selection-highlight-note" type="button">高亮笔记</button>
-              <button id="selection-underline" type="button">划线</button>
-              <button id="selection-underline-note" type="button">划线随笔</button>
-              <button id="selection-add-chat" type="button">加入 Chat</button>
+              <button data-builtin-action="highlight" id="selection-highlight" type="button">高亮</button>
+              <button data-builtin-action="highlight_note" id="selection-highlight-note" type="button">高亮笔记</button>
+              <button data-builtin-action="underline" id="selection-underline" type="button">划线</button>
+              <button data-builtin-action="underline_note" id="selection-underline-note" type="button">划线随笔</button>
+              <button data-builtin-action="copy" id="selection-copy" type="button">复制</button>
+              <button data-builtin-action="chat" id="selection-add-chat" type="button">加入 Chat</button>
             </div>
+            <div id="selection-custom-actions" class="selection-actions" role="toolbar" aria-label="语义标记" hidden></div>
             <div id="selection-translation-result" class="selection-translation-result" role="status" aria-live="polite" aria-atomic="true"></div>
           </div>
         </div>
@@ -260,6 +296,13 @@
             <div id="settings-appearance-preview" class="settings-appearance-preview" aria-label="外观设置预览">
               <div class="appearance-preview-chrome"><span class="appearance-preview-mark" aria-hidden="true">✦</span><strong>页面字体预览</strong><span class="appearance-preview-tab">当前页面</span></div>
               <div class="appearance-preview-content"><div class="appearance-preview-controls"><span class="appearance-preview-line"></span><span class="appearance-preview-line short"></span><label><input type="checkbox" checked disabled> 系统重点色</label><button type="button" tabindex="-1">重点按钮</button></div><article class="appearance-preview-paper"><strong>阅读器字体预览</strong><p>清晰的正文排版，让论文阅读更专注。</p><p lang="en">A focused reading surface for scholarly work.</p></article></div>
+            </div>
+            <div class="annotation-action-settings">
+              <h3>选区工具栏</h3>
+              <p class="settings-field-hint">选择正文后显示的动作；隐藏工具栏按钮不会停用快捷键。</p>
+              <div id="setting-annotation-builtins" class="annotation-builtin-options" role="group" aria-label="选区工具栏动作"></div>
+              <div class="settings-row annotation-custom-heading"><div><strong>自定义语义标记</strong><small>保存名称、样式和颜色，例如“原理段落”。</small></div><button id="add-annotation-action" class="secondary-button" type="button"><span aria-hidden="true">＋</span>添加标记</button></div>
+              <div id="setting-annotation-custom"></div>
             </div>
             <div class="settings-row"><div><strong>本地阅读数据</strong><small>原文、译文、笔记与标注按文献目录保存在当前 Mac。</small></div><span class="settings-value">仅本机</span></div>
             <div id="onboarding-settings-row" class="settings-row" hidden><div><strong>新手引导</strong><small>重新了解文献库、阅读工具、关系图谱与 AI 配置。</small></div><button id="replay-onboarding" class="secondary-button" type="button">重新查看</button></div>
@@ -319,23 +362,37 @@
             </div>
           </section>
           <section id="settings-ai" class="settings-section" hidden>
-            <div class="settings-section-heading"><div><h2>AI 服务</h2><p>填写你自己的 OpenAI-compatible 服务地址、密钥和模型；配置只保存在当前设备。</p></div><span class="settings-badge">本机配置</span></div>
+            <div class="settings-section-heading"><div><h2>AI 服务</h2><p>为翻译和文章助手分别配置服务；密钥只保存在当前设备。</p></div><span class="settings-badge">本机配置</span></div>
             <div class="ai-credentials-grid">
               <article class="ai-credential-card" data-ai-config="translation">
                 <div class="ai-credential-heading"><span class="ai-service-icon" aria-hidden="true">译</span><div><h3>翻译服务</h3><p>选区、段落与全文翻译</p></div></div>
+                <label class="settings-field">翻译提供商<select id="setting-translation-provider"><option value="openai-compatible">OpenAI-compatible</option><option value="volcengine">火山翻译（AK / SK）</option><option value="deepl">DeepL API</option></select></label>
+                <div data-translation-provider-fields="openai-compatible">
                 <label class="settings-field">Base URL<input id="setting-translation-base-url" type="url" inputmode="url" autocomplete="url" placeholder="例如：https://api.example.com/v1"></label>
-                <div class="settings-field settings-field-with-action">
+                </div>
+                <div class="settings-field settings-field-with-action" data-translation-provider-fields="openai-compatible deepl">
                   <label for="setting-translation-api-key">API Key</label>
                   <div class="settings-input-action">
                     <input id="setting-translation-api-key" type="password" autocomplete="off" placeholder="留空保持已保存的密钥">
                     <button id="setting-translation-clear-key" class="secondary-button compact-button danger-button settings-clear-key" data-ai-clear-key="translation" type="button" aria-label="清除已保存的翻译服务 API Key" title="清除已保存的翻译服务 API Key">清除</button>
                   </div>
                 </div>
+                <div data-translation-provider-fields="openai-compatible">
                 <label class="settings-field">模型<input id="setting-translation-model" type="text" autocomplete="off" placeholder="例如：qwen-mt-plus"></label>
                 <label class="settings-field">翻译协议<select id="setting-translation-mode" class="settings-protocol-select"><option value="qwen-mt">专用翻译接口（qwen-mt）</option><option value="chat">通用 Chat 模型</option></select></label>
                 <p class="settings-field-hint">专用模型使用 translation_options；通用模型使用严格的 Chat 翻译提示词。</p>
                 <div class="ai-credential-actions"><button class="secondary-button compact-button" data-ai-models="translation" type="button">查询模型</button><button class="secondary-button compact-button" data-ai-reuse-source="translation" data-ai-reuse-target="chat" type="button">复用到文章助手</button></div>
                 <div class="ai-model-picker" id="setting-translation-model-picker" hidden><label class="settings-field">筛选模型<input id="setting-translation-model-filter" type="search" autocomplete="off" placeholder="输入关键词筛选"></label><select id="setting-translation-model-list" size="5" aria-label="翻译服务模型列表"></select><small id="setting-translation-model-status" role="status"></small></div>
+                </div>
+                <div data-translation-provider-fields="volcengine" hidden>
+                  <label class="settings-field">Access Key ID<div class="settings-input-action"><input id="setting-translation-access-key-id" type="password" autocomplete="off" placeholder="输入 AK"><button type="button" class="secondary-button compact-button" data-translation-clear-secret="access_key_id">清除</button></div></label>
+                  <label class="settings-field">Secret Access Key<div class="settings-input-action"><input id="setting-translation-secret-access-key" type="password" autocomplete="off" placeholder="输入 SK"><button type="button" class="secondary-button compact-button" data-translation-clear-secret="secret_access_key">清除</button></div></label>
+                  <p class="settings-field-hint">使用火山引擎官方机器翻译接口和签名认证，密钥仅保存在本机。</p>
+                </div>
+                <label class="settings-field" data-translation-provider-fields="deepl" hidden>DeepL 套餐<select id="setting-translation-deepl-tier"><option value="free">API Free</option><option value="pro">API Pro</option></select></label>
+                <div class="translation-language-fields"><label class="settings-field">原文语言<input id="setting-translation-source-language" type="text" placeholder="auto" aria-label="原文语言"></label><label class="settings-field">译文语言<input id="setting-translation-target-language" type="text" placeholder="zh" aria-label="译文语言"></label></div>
+                <p class="settings-field-hint">语言代码示例：auto（自动检测原文）、zh、en、ja。知网翻译尚无可核实的官方公开 API。</p>
+                <div class="ai-credential-actions"><button id="test-translation-button" class="secondary-button compact-button" type="button">检测翻译服务</button><span id="translation-provider-test-result" role="status"></span></div>
               </article>
               <article class="ai-credential-card" data-ai-config="chat">
                 <div class="ai-credential-heading"><span class="ai-service-icon" aria-hidden="true">AI</span><div><h3>文章助手</h3><p>Chat、阅读重点与内容分析</p></div></div>
@@ -400,37 +457,6 @@
     </section>
   </main>
 
-  <aside id="background-tasks" class="background-tasks" aria-label="后台任务">
-    <button id="background-tasks-toggle" class="background-tasks-toggle" type="button" aria-expanded="true" hidden><span id="background-tasks-summary"></span><span class="background-tasks-chevron" aria-hidden="true">⌄</span></button>
-    <div class="background-tasks-cards">
-      <div id="translation-progress" class="translation-progress" hidden>
-        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
-        <div class="translation-progress-main">
-          <div class="translation-progress-head">
-            <span id="translation-progress-label">全文翻译准备中</span>
-            <span id="translation-progress-count" class="translation-progress-count"></span>
-            <span id="translation-progress-value">0%</span>
-          </div>
-          <div class="translation-progress-track" role="progressbar" aria-label="全文翻译进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="translation-progress-bar" class="translation-progress-bar"></div></div>
-          <div id="translation-progress-detail" class="translation-progress-detail" hidden></div>
-        </div>
-        <button id="stop-translation-button" class="tiny-button" type="button">停止</button>
-      </div>
-      <div id="reflow-progress" class="translation-progress reflow-progress" role="status" aria-live="polite" hidden>
-        <span class="translation-progress-dots" aria-hidden="true"><span></span><span></span><span></span></span>
-        <div class="translation-progress-main">
-          <div class="translation-progress-head">
-            <span id="reflow-progress-label">AI 重排准备中</span>
-            <span id="reflow-progress-stage" class="translation-progress-count"></span>
-            <span id="reflow-progress-value">0%</span>
-          </div>
-          <div id="reflow-progress-track" class="translation-progress-track" role="progressbar" aria-label="AI 重排进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="reflow-progress-bar" class="translation-progress-bar"></div></div>
-        </div>
-        <button id="cancel-reflow-button" class="tiny-button" type="button">取消</button>
-      </div>
-      <div id="background-tasks-list" class="background-tasks-list"></div>
-    </div>
-  </aside>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
   <dialog id="onboarding-dialog" class="onboarding-dialog" aria-labelledby="onboarding-title-1" aria-describedby="onboarding-description-1">

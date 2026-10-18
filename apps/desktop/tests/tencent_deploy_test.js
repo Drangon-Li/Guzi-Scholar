@@ -5,9 +5,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const repoRoot = path.resolve(__dirname, '..', '..');
+const desktopRoot = path.resolve(__dirname, '..');
+const repoRoot = path.resolve(desktopRoot, '..', '..');
 const deployRoot = path.join(repoRoot, 'deploy', 'tencent');
-const accountService = fs.readFileSync(path.join(repoRoot, 'macos', 'user_service.py'), 'utf8');
+const accountService = fs.readFileSync(path.join(desktopRoot, 'user_service.py'), 'utf8');
 const scripts = [
   'deploy.sh',
   'preflight.sh',
@@ -37,9 +38,8 @@ const accountUnit = fs.readFileSync(path.join(deployRoot, 'systemd', 'guzi-schol
 const backupUnit = fs.readFileSync(path.join(deployRoot, 'systemd', 'guzi-scholar-account-backup.service'), 'utf8');
 const accountEnv = fs.readFileSync(path.join(deployRoot, 'account.env.example'), 'utf8');
 const deployReadme = fs.readFileSync(path.join(deployRoot, 'README.md'), 'utf8');
-const privacy = fs.readFileSync(path.join(repoRoot, 'macos', 'web', 'legal', 'privacy.html'), 'utf8');
-const betaTerms = fs.readFileSync(path.join(repoRoot, 'macos', 'web', 'legal', 'beta-terms.html'), 'utf8');
-const updateManifest = JSON.parse(fs.readFileSync(path.join(deployRoot, 'updates', 'macos', 'arm64', 'beta.json'), 'utf8'));
+const privacy = fs.readFileSync(path.join(desktopRoot, 'web', 'legal', 'privacy.html'), 'utf8');
+const betaTerms = fs.readFileSync(path.join(desktopRoot, 'web', 'legal', 'beta-terms.html'), 'utf8');
 
 assert.match(deploy, /SOURCE_DB=\nSOURCE_DB_EXPLICIT=0/u, 'deploy must resolve canonical DB before legacy DB');
 assert.match(deploy, /if "\$SCRIPT_DIR\/verify\.sh"; then[\s\S]*VERIFY_STATUS=\$\?/u, 'verify failure status must survive rollback');
@@ -79,13 +79,6 @@ assert.match(install, /\$UPDATE_DMG_NAME" "\$RELEASE_ROOT\/\$RELEASE_ID\/updates
 assert.match(verify, /https:\/\/\$REMOTE_HOST\/updates\/macos\/arm64\/beta\.json/u, 'deployment verification must fetch the public update manifest');
 assert.match(verify, /--head --max-time 15 "\$UPDATE_DOWNLOAD_URL"/u, 'deployment verification must probe the public DMG download URL');
 assert.match(verify, /-checkend 432000/u, 'post-deploy verification must preserve the five-day certificate runway');
-assert.deepStrictEqual(
-  { schema: updateManifest.schema, platform: updateManifest.platform, arch: updateManifest.arch, channel: updateManifest.channel, version: updateManifest.version },
-  { schema: 1, platform: 'darwin', arch: 'arm64', channel: 'beta', version: '0.1.0' },
-  'the checked-in beta manifest must match the current macOS release',
-);
-assert.equal(updateManifest.download_url, 'https://82.156.152.27/updates/macos/arm64/Guzi-Scholar-0.1.0-arm64.dmg', 'the beta manifest must expose the public DMG');
-assert.match(updateManifest.sha256, /^[0-9a-f]{64}$/u, 'the beta manifest must publish the DMG SHA-256');
 assert.match(dbVerify, /versions != \{1, 2, 3, 4, 5, 6\}/u, 'database verification must require the current schema');
 assert.match(dbVerify, /"input_units"/u, 'database verification must require persistent AI input accounting');
 assert.match(dbVerify, /"email_challenges"/u, 'database verification must require email challenges');
@@ -129,4 +122,12 @@ assert.match(backupUnit, /CapabilityBoundingSet=\s*$/mu, 'the backup service mus
 assert.match(backupScript, /\/run\/guzi-scholar-account-backup\/backup\.lock/u, 'backup locking must stay inside the systemd runtime directory');
 assert.doesNotMatch(backupUnit, /ConditionPathIsRegular/u, 'backup unit must use a systemd-supported path condition');
 
-console.log('Tencent beta deployment script checks passed.');
+console.log('Tencent beta deployment script checks passed; checking release manifest.');
+const updateManifest = JSON.parse(fs.readFileSync(path.join(deployRoot, 'updates', 'macos', 'arm64', 'beta.json'), 'utf8'));
+assert.deepStrictEqual(
+  { schema: updateManifest.schema, platform: updateManifest.platform, arch: updateManifest.arch, channel: updateManifest.channel, version: updateManifest.version },
+  { schema: 1, platform: 'darwin', arch: 'arm64', channel: 'beta', version: '0.1.0' },
+  'the checked-in beta manifest must match the current macOS release',
+);
+assert.equal(updateManifest.download_url, 'https://82.156.152.27/updates/macos/arm64/Guzi-Scholar-0.1.0-arm64.dmg', 'the beta manifest must expose the public DMG');
+assert.match(updateManifest.sha256, /^[0-9a-f]{64}$/u, 'the beta manifest must publish the DMG SHA-256');

@@ -1114,7 +1114,7 @@ class TranslateStreamTest(unittest.TestCase):
             handler = self._stream_handler(job_dir, payload)
             with (
                 patch("server.translation_profile_id", return_value="profile-current"),
-                patch("server.ai_status", return_value={"model": "test-model"}),
+                patch("server.resolve_ai_profile", return_value={"model": "test-model"}),
                 patch("server.translate_text_stream", return_value=iter(["你", "好"])) as stream,
                 patch("server.translate_text") as plain,
             ):
@@ -1869,7 +1869,9 @@ class SettingsBoundaryTest(unittest.TestCase):
             for forbidden in ("base_url", "model", "api_key", "api_key_configured", "server_preset", "translation", "chat"):
                 self.assertNotIn(forbidden, public)
             self.assertEqual(public["ai"], {
-                "translation": {"base_url": "", "model": "", "api_key_configured": False, "mode": "qwen-mt"},
+                "translation": {"base_url": "", "model": "", "api_key_configured": False, "mode": "qwen-mt",
+                                "provider": "openai-compatible", "source_language": "auto", "target_language": "zh",
+                                "deepl_tier": "free", "access_key_id_configured": False, "secret_access_key_configured": False},
                 "chat": {"base_url": "", "model": "", "api_key_configured": False},
             })
 

@@ -65,6 +65,7 @@
     jobs: [], activeJob: null, selection: null, chatSelection: null, annotations: [], aiHighlights: [], chat: [], chatSessions: new Map(),
     openDocuments: [], translationCache: [], translationCaches: new Map(), translationRun: null, translationRuns: new Map(),
     hiddenTranslationJobs: new Set(),
+    annotationActions: { hidden_builtin: [], custom: [] },
     mediaLayouts: new Map(),
     health: null, library: null, activeFolderId: 'system-all', activeViewId: 'view-all', librarySort: 'updated_at-desc', libraryStatusFilter: '', libraryMode: 'list', primaryView: 'library-view',
     selectedLibraryJobId: null, selectedLibraryJobIds: new Set(), activeGroupValue: null, groupingMenuOpen: false,
@@ -160,6 +161,12 @@
   }
   let readerMountSequence = 0;
   let readerMount = null;
+  const readerMounts = new Map();
+  const readerDocumentStates = new WeakMap();
+  function readerDocumentState(doc) {
+    if (!readerDocumentStates.has(doc)) readerDocumentStates.set(doc, {});
+    return readerDocumentStates.get(doc);
+  }
   let readerSections = [];
   const readerSearchState = {
     open: false,
@@ -175,6 +182,9 @@
     usingCustomHighlight: false,
     pointerFrame: 0,
     pendingPoint: null,
+    hoverTimer: null,
+    closeTimer: null,
+    pendingTranslations: new Map(),
   };
 
   function persistReadingLocations() {
@@ -316,7 +326,11 @@
     const doc = frameDocument();
     clearReaderSentenceHover(doc);
     readerSentenceState.pairs = [];
-    doc?.querySelectorAll('.my-scholar-translation').forEach((node) => node.remove());
+    readerMounts.forEach((mount) => {
+      const mountedDoc = mount.frame.contentDocument;
+      mountedDoc?.querySelectorAll('.my-scholar-translation').forEach((node) => node.remove());
+      if (mountedDoc) delete readerDocumentState(mountedDoc).annotationsKey;
+    });
     rebuildReaderSentencePairs(doc);
     refreshReaderSearch();
   }
@@ -324,8 +338,7 @@
   function translationCacheFor(jobId = state.activeJob?.job_id) {
     const key = String(jobId || '');
     if (!key || key === state.activeJob?.job_id) return state.translationCache;
-    if (!state.translationCaches.has(key)) state.translationCaches.set(key, []);
-    return state.translationCaches.get(key);
+    return state.translationCaches.get(key) || [];
   }
 
   function setTranslationCacheFor(jobId, records) {
@@ -333,7 +346,7 @@
     // Keep records for previous profiles so switching back can reuse them;
     // render/lookups still scope reads to the active profile.
     const value = Array.isArray(records) ? records : [];
-    if (key) state.translationCaches.set(key, value);
+    if (key && (state.openDocuments.some((job) => job.job_id === key) || state.translationRuns.get(key)?.running)) state.translationCaches.set(key, value);
     if (!key || key === state.activeJob?.job_id) state.translationCache = value;
     return value;
   }
@@ -344,7 +357,7 @@
     if (event?.type === 'selectstart' && eventElement) return eventElement;
     if (eventElement?.closest?.('input, textarea, [contenteditable="true"]')) return eventElement;
     const selection = rootDocument?.getSelection?.();
-    const node = selection?.anchorNode || event?.target || rootDocument?.activeElement;
+    const node = (!selection?.isCollapsed && selection?.anchorNode) || event?.target || rootDocument?.activeElement;
     if (!node) return null;
     return node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
   }
@@ -374,6 +387,16 @@
   // the incoming one; the new view is active synchronously, so callers and
   // tests that look for `.active-view` right away still find it.
   function retireView(view) {
+    if (view.id === 'reader-view' && readerMounts.size) {
+      // display:none collapses iframe viewports and can reset their live scroll.
+      const { width, height } = view.getBoundingClientRect();
+      view.style.setProperty('--parked-reader-width', `${width}px`);
+      view.style.setProperty('--parked-reader-height', `${height}px`);
+      view.classList.add('is-reader-parked');
+      view.inert = true;
+      view.setAttribute('aria-hidden', 'true');
+      return;
+    }
     if (reducedMotionQuery.matches) {
       view.hidden = true;
       return;
@@ -414,10 +437,13 @@
       const active = view.id === viewId;
       if (active) {
         view.classList.remove('is-leaving');
+        view.classList.remove('is-reader-parked');
+        view.inert = false;
+        view.removeAttribute('aria-hidden');
         view.hidden = false;
       } else if (view.classList.contains('active-view')) {
         retireView(view);
-      } else if (!view.classList.contains('is-leaving')) {
+      } else if (!view.classList.contains('is-leaving') && !view.classList.contains('is-reader-parked')) {
         view.hidden = true;
       }
       view.classList.toggle('active-view', active);
@@ -438,7 +464,7 @@
         state.assistantInitialized = true;
       }
     }
-    if (viewId === 'library-view') renderLibrary();
+    if (viewId === 'library-view') renderLibrary(state.jobs, { reuse: true });
     if (viewId === 'views-view') renderViews();
     if (viewId === 'settings-view') {
       loadSettings();
@@ -477,6 +503,7 @@
       section.classList.toggle('is-active', active);
     });
     setActiveSettingsNavigation(target.id);
+    if (target.id === 'settings-parsing') void loadParsingProviders();
     if (updateHash && location.hash !== `#${target.id}`) history.replaceState(null, '', `#${target.id}`);
     if (scroll) window.scrollTo({ top: 0, behavior: reducedMotionQuery.matches ? 'auto' : 'smooth' });
   }
@@ -627,6 +654,7 @@
     if (!state.openDocuments.length) {
       container.hidden = true;
       container.innerHTML = '';
+      delete container.dataset.structureKey;
       container.closest('.app-header')?.classList.remove('has-document-tabs');
       return;
     }
@@ -634,20 +662,32 @@
     container.closest('.app-header')?.classList.add('has-document-tabs');
     const readerIsActive = Boolean($('#reader-view')?.classList.contains('active-view'));
     const rovingJobId = (readerIsActive ? state.activeJob?.job_id : null) || state.activeJob?.job_id || state.openDocuments[0]?.job_id;
-    container.innerHTML = state.openDocuments.map((job) => {
+    const tabsModel = state.openDocuments.map((job) => ({ job, title: itemTitle({ job, item: state.library?.items?.[job.job_id] || {} }) }));
+    const structureKey = JSON.stringify(tabsModel.map(({ job, title }) => [job.job_id, title]));
+    const busyDocuments = busyDocumentIds();
+    if (container.dataset.structureKey === structureKey) {
+      container.querySelectorAll('.document-tab').forEach((tab) => {
+        const active = readerIsActive && state.activeJob?.job_id === tab.dataset.jobId;
+        tab.classList.toggle('active', active);
+        tab.setAttribute('aria-selected', String(active));
+        tab.tabIndex = tab.dataset.jobId === rovingJobId ? 0 : -1;
+        tab.classList.toggle('is-busy', busyDocuments.has(tab.dataset.jobId));
+      });
+      return;
+    }
+    container.dataset.structureKey = structureKey;
+    container.innerHTML = tabsModel.map(({ job, title }) => {
       const active = readerIsActive && state.activeJob?.job_id === job.job_id ? ' active' : '';
       const entering = enteringJobId === job.job_id ? ' is-entering' : '';
-      const title = itemTitle({ job, item: state.library?.items?.[job.job_id] || {} });
       return `<div class="document-tab${active}${entering}" data-job-id="${escapeHTML(job.job_id)}" role="tab" aria-selected="${active ? 'true' : 'false'}" tabindex="${job.job_id === rovingJobId ? '0' : '-1'}"><span class="document-tab-label" title="${escapeHTML(title)}">${escapeHTML(title)}</span><button class="document-tab-close" data-close-job-id="${escapeHTML(job.job_id)}" type="button" tabindex="-1" aria-label="关闭 ${escapeHTML(title)}">×</button></div>`;
     }).join('');
-    const busyDocuments = busyDocumentIds();
     container.querySelectorAll('.document-tab').forEach((tab) => tab.classList.toggle('is-busy', busyDocuments.has(tab.dataset.jobId)));
     container.querySelectorAll('.document-tab').forEach((tab) => tab.addEventListener('click', (event) => {
       if (event.target.closest('[data-close-job-id]')) return;
       const job = state.openDocuments.find((item) => item.job_id === tab.dataset.jobId) || state.jobs.find((item) => item.job_id === tab.dataset.jobId);
       // Clicking the already-mounted tab must not tear down and rebuild the
       // whole reader; only genuinely different documents remount the iframe.
-      if (job && !(readerIsActive && state.activeJob?.job_id === job.job_id)) openReader(job, { addTab: false });
+      if (job && !($('#reader-view')?.classList.contains('active-view') && state.activeJob?.job_id === job.job_id)) openReader(job, { addTab: false });
     }));
     container.querySelectorAll('.document-tab').forEach((tab) => tab.addEventListener('keydown', (event) => {
       const tabs = [...container.querySelectorAll('.document-tab:not(.is-closing)')];
@@ -707,7 +747,9 @@
     if (index < 0) return;
     const wasActive = state.activeJob?.job_id === jobId;
     if (wasActive) flushPendingArticleNotes(jobId);
+    disposeReaderMount(jobId);
     state.openDocuments.splice(index, 1);
+    releaseClosedDocumentCaches(jobId);
     persistOpenDocuments();
     if (!wasActive) {
       renderDocumentTabs();
@@ -716,7 +758,42 @@
     }
     const next = state.openDocuments[index] || state.openDocuments[index - 1];
     if (next) openReader(next, { addTab: false });
-    else { state.activeJob = null; switchView('library-view'); }
+    else {
+      state.activeJob = null;
+      activeJobId = null;
+      state.translationCache = [];
+      state.translationRun = null;
+      state.chat = [];
+      state.annotations = [];
+      state.aiHighlights = [];
+      state.chatSelection = null;
+      prepareArticleNotes(null);
+      resetNoteHistory();
+      $('#notes-editor')?.setAttribute('aria-busy', 'false');
+      renderChat();
+      renderAnnotations();
+      renderSelectedContext();
+      $('#outline-list')?.replaceChildren();
+      $('#reader-chapter-list')?.replaceChildren();
+      switchView('library-view');
+    }
+  }
+
+  function releaseClosedDocumentCaches(jobId) {
+    if (state.openDocuments.some((job) => job.job_id === jobId)) return;
+    if (!state.translationRuns.get(jobId)?.running) {
+      state.translationCaches.delete(jobId);
+      state.translationRuns.delete(jobId);
+    }
+    if (!mediaLayoutSaveQueues.has(jobId)) state.mediaLayouts.delete(jobId);
+    const chat = state.chatSessions.get(jobId);
+    if (chat && !chat.sessions.some((session) => session.messages.some((message) => message.streaming))) {
+      persistChatSession(jobId);
+      state.chatSessions.delete(jobId);
+    }
+    for (const key of readerSentenceState.pendingTranslations.keys()) {
+      if (JSON.parse(key)[0] === jobId) readerSentenceState.pendingTranslations.delete(key);
+    }
   }
 
   // PDF import queue. Uploads are bounded independently from conversion so the
@@ -1868,13 +1945,14 @@
   }
   const columnResize = { id: null, pointerId: null, startX: 0, startWidth: 0, min: 0, active: false, handle: null, previousWidth: null, hadPreviousWidth: false };
   function syncColumnResizerARIA() {
-    $$('#library-columns [data-column-resizer]').forEach((handle) => {
+    const measurements = $$('#library-columns [data-column-resizer]').map((handle) => {
       const column = visibleLibraryColumns().find((item) => item.id === handle.dataset.columnResizer);
       const header = handle.closest('[data-column-id]');
-      if (!column || !header) return;
+      if (!column || !header) return null;
       const measured = Math.round(header.getBoundingClientRect().width);
-      handle.setAttribute('aria-valuenow', String(measured || libraryColumnWidth(column) || libraryColumnMinWidth(column)));
+      return [handle, measured || libraryColumnWidth(column) || libraryColumnMinWidth(column)];
     });
+    measurements.filter(Boolean).forEach(([handle, width]) => handle.setAttribute('aria-valuenow', String(width)));
   }
   function applyLibraryGridTemplate() {
     const template = libraryGridTemplate(visibleLibraryColumns());
@@ -1975,9 +2053,18 @@
     select.classList.toggle('is-filtering', Boolean(state.libraryStatusFilter));
   }
   let renderedLibraryMode = null;
-  function renderLibrary(jobs = state.jobs) {
+  let renderedLibraryKey = null;
+  function renderLibrary(jobs = state.jobs, { reuse = false } = {}) {
     const library = libraryState();
     const graphMode = state.libraryMode === 'graph';
+    const query = ($('#library-search')?.value || '').trim().toLowerCase();
+    const renderKey = JSON.stringify([library, jobs, state.activeFolderId, state.activeFolderId ? null : state.activeViewId,
+      state.libraryMode, state.activeGroupValue, state.librarySort, state.libraryStatusFilter, query, [...state.selectedLibraryJobIds]]);
+    if (reuse && !graphMode && renderedLibraryKey === renderKey) {
+      syncLibrarySelection();
+      return;
+    }
+    renderedLibraryKey = graphMode ? null : renderKey;
     document.body.classList.toggle('library-graph-mode', graphMode);
     syncLibrarySelection();
     $('#library-list-actions').hidden = graphMode;
@@ -2004,7 +2091,6 @@
     }
     teardownLibraryGraph();
     renderGroupingSidebar();
-    const query = ($('#library-search')?.value || '').trim().toLowerCase();
     let entries = libraryItemEntries();
     entries = state.activeFolderId ? entries.filter((entry) => itemMatchesFolder(entry, state.activeFolderId)) : applyActiveView(entries);
     if (!entries.length && jobs.length) {
@@ -2029,15 +2115,15 @@
       header.style.setProperty('--library-grid-template', template);
       header.style.setProperty('--library-table-min-width', libraryTableMinWidth(columns));
       header.innerHTML = `${columns.map((column) => `<span class="library-column-header" data-column-id="${escapeHTML(column.id)}" role="columnheader"><span class="library-column-label">${escapeHTML(libraryColumnLabel(column))}</span><button class="column-resizer" data-column-resizer="${escapeHTML(column.id)}" type="button" role="separator" aria-orientation="vertical" aria-valuemin="${libraryColumnMinWidth(column)}" aria-valuemax="520" aria-valuenow="${libraryColumnWidth(column) || libraryColumnMinWidth(column)}" aria-label="调整${escapeHTML(libraryColumnLabel(column))}列宽"></button></span>`).join('')}<span class="library-actions-header" aria-hidden="true"></span>`;
-      syncColumnResizerARIA();
     }
-    if (!entries.length) { clearLibrarySelection(); $('#recent-list').innerHTML = `<div class="empty-state">${state.activeFolderId === 'system-trash' ? '回收站为空。' : '没有匹配的文献。拖入一份 PDF 开始。'}</div>`; return; }
+    if (!entries.length) { clearLibrarySelection(); $('#recent-list').innerHTML = `<div class="empty-state">${state.activeFolderId === 'system-trash' ? '回收站为空。' : '没有匹配的文献。拖入一份 PDF 开始。'}</div>`; syncColumnResizerARIA(); return; }
     $('#recent-list').style.setProperty('--library-grid-template', template);
     $('#recent-list').style.setProperty('--library-table-min-width', libraryTableMinWidth(columns));
     $('#recent-list').innerHTML = renderLibraryContent(entries);
     syncLibrarySelection();
     renderLibraryDetails();
     resyncLibraryCellEditor();
+    syncColumnResizerARIA();
   }
   async function loadLibrary() {
     try {
@@ -2787,7 +2873,7 @@
 
   async function refreshLibraryFrom(payload) {
     if (payload?.library) state.library = payload.library;
-    else await loadLibrary();
+    else return loadLibrary();
     renderLibrary(); renderViews();
   }
   async function updateLibraryItem(jobId, body) {
@@ -3024,6 +3110,7 @@
     state.jobs = state.jobs.filter((job) => job.job_id !== jobId);
     state.mediaLayouts.delete(jobId);
     state.chatSessions.delete(jobId);
+    disposeReaderMount(jobId);
     if (readingLocationsState.locations[jobId]) {
       delete readingLocationsState.locations[jobId];
       readingLocationsState.lru = readingLocationsState.lru.filter((candidate) => candidate !== jobId);
@@ -3037,12 +3124,6 @@
         activeJobId = null;
         state.translationCache = [];
         state.translationRun = null;
-        if (readerMount?.saveTimer) window.clearTimeout(readerMount.saveTimer);
-        if (readerMount?.saveMaxTimer) window.clearTimeout(readerMount.saveMaxTimer);
-        if (readerMount?.lateRestoreTimer) window.clearTimeout(readerMount.lateRestoreTimer);
-        readerMount = null;
-        readerSections = [];
-        $('#html-preview')?.setAttribute('src', 'about:blank');
         switchView('library-view');
       } else {
         renderDocumentTabs();
@@ -3071,12 +3152,6 @@
     activeJobId = null;
     state.translationCache = [];
     state.translationRun = null;
-    if (readerMount?.saveTimer) window.clearTimeout(readerMount.saveTimer);
-    if (readerMount?.saveMaxTimer) window.clearTimeout(readerMount.saveMaxTimer);
-    if (readerMount?.lateRestoreTimer) window.clearTimeout(readerMount.lateRestoreTimer);
-    readerMount = null;
-    readerSections = [];
-    $('#html-preview')?.setAttribute('src', 'about:blank');
     switchView('library-view');
   }
 
@@ -3336,7 +3411,7 @@
   });
 
   // Reader iframe, text selection and persisted annotations.
-  function frameDocument() { return $('#html-preview').contentDocument; }
+  function frameDocument() { return $('#html-preview')?.contentDocument || null; }
 
   const readerSearchHighlightName = 'my-scholar-reader-search';
   const readerSearchCurrentHighlightName = 'my-scholar-reader-search-current';
@@ -3628,14 +3703,15 @@
 
   function clearReaderSentenceHover(doc = frameDocument()) {
     if (readerSentenceState.pointerFrame) {
-      const view = readerSentenceState.doc?.defaultView || doc?.defaultView;
-      view?.cancelAnimationFrame?.(readerSentenceState.pointerFrame);
+      (readerSentenceState.doc?.defaultView || doc?.defaultView)?.cancelAnimationFrame?.(readerSentenceState.pointerFrame);
       readerSentenceState.pointerFrame = 0;
     }
+    window.clearTimeout(readerSentenceState.hoverTimer);
+    window.clearTimeout(readerSentenceState.closeTimer);
     readerSentenceState.pendingPoint = null;
-    const registry = readerHighlightRegistry(doc);
-    registry?.delete(readerSentenceHighlightName);
+    readerHighlightRegistry(doc)?.delete(readerSentenceHighlightName);
     doc?.querySelectorAll('.reader-sentence-hover-fallback').forEach((node) => node.classList.remove('reader-sentence-hover-fallback'));
+    doc?.querySelector('.reader-sentence-tooltip')?.remove();
     readerSentenceState.activePairId = '';
     readerSentenceState.usingCustomHighlight = false;
   }
@@ -3646,33 +3722,23 @@
     readerSentenceState.pairs = [];
     if (!doc) return;
     const sources = [...doc.querySelectorAll('.reader-content [data-block-id], .reader-content [data-translate-block-id]')]
-      .filter((block) => !block.classList.contains('my-scholar-translation') && !block.closest('.annotation-note-popover'));
+      .filter((block) => !block.classList.contains('my-scholar-translation') && !block.closest('.my-scholar-translation,.annotation-note-popover') && translatableParagraph(block));
     sources.forEach((source) => {
       const blockId = String(source.dataset.blockId || source.dataset.translateBlockId || '');
-      if (!blockId) return;
-      const translation = source.nextElementSibling?.matches?.(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`)
-        ? source.nextElementSibling
-        : null;
-      if (!translation || translation.classList.contains('is-pending') || translation.classList.contains('is-error')) return;
       const sourceSegments = readerSentenceSegments(canonicalBlockText(source, doc));
-      const translationSegments = readerSentenceSegments(canonicalBlockText(translation, doc));
       const sourceRanges = sentenceRanges(source, sourceSegments, doc);
-      const translationRanges = sentenceRanges(translation, translationSegments, doc);
-      if (!sourceRanges.length || !translationRanges.length) return;
       sourceRanges.forEach((sourceRange, sourceIndex) => {
-        const targetStart = Math.floor(sourceIndex * translationRanges.length / sourceRanges.length);
-        const targetEnd = Math.max(targetStart + 1, Math.floor((sourceIndex + 1) * translationRanges.length / sourceRanges.length));
-        const targets = translationRanges.slice(targetStart, Math.min(translationRanges.length, targetEnd));
-        if (!targets.length) targets.push(translationRanges.at(-1));
-        readerSentenceState.pairs.push({
-          id: `${blockId}:${sourceIndex}`,
-          source,
-          translation,
-          sourceRange,
-          translationRanges: targets,
-        });
+        readerSentenceState.pairs.push({ id: `${blockId}:${sourceIndex}`, blockId, source, sourceRange, sourceIndex, sourceCount: sourceRanges.length });
       });
     });
+    readerDocumentState(doc).sentences = readerSentenceState.pairs;
+  }
+
+  function activateReaderSentencePairs(doc) {
+    const pairs = readerDocumentState(doc).sentences;
+    if (!pairs) { rebuildReaderSentencePairs(doc); return; }
+    readerSentenceState.doc = doc;
+    readerSentenceState.pairs = pairs;
   }
 
   function readerSentencePairAtPoint(doc, x, y) {
@@ -3682,74 +3748,126 @@
       point = doc.caretRangeFromPoint?.(x, y) || null;
       if (!point && doc.caretPositionFromPoint) {
         const caret = doc.caretPositionFromPoint(x, y);
-        if (caret?.offsetNode) {
-          point = doc.createRange();
-          point.setStart(caret.offsetNode, caret.offset);
-          point.collapse(true);
-        }
+        if (caret?.offsetNode) { point = doc.createRange(); point.setStart(caret.offsetNode, caret.offset); point.collapse(true); }
       }
     } catch (_) { point = null; }
-    if (!point) return null;
     const RangeConstructor = doc.defaultView?.Range;
-    if (!RangeConstructor) return null;
-    for (const pair of readerSentenceState.pairs) {
-      const ranges = [pair.sourceRange, ...pair.translationRanges];
-      if (ranges.some((range) => {
-        try {
-          return range.compareBoundaryPoints(RangeConstructor.START_TO_START, point) <= 0
-            && range.compareBoundaryPoints(RangeConstructor.END_TO_END, point) >= 0;
-        } catch (_) { return false; }
-      })) return pair;
+    if (!point || !RangeConstructor) return null;
+    return readerSentenceState.pairs.find((pair) => {
+      try {
+        return pair.sourceRange.compareBoundaryPoints(RangeConstructor.START_TO_START, point) <= 0
+          && pair.sourceRange.compareBoundaryPoints(RangeConstructor.END_TO_END, point) >= 0
+          && [...pair.sourceRange.getClientRects()].some((rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom);
+      } catch (_) { return false; }
+    }) || null;
+  }
+
+  function paintReaderSentenceTooltip(pair, text, { status = '', formulas = [], markers = [], emphasis = [] } = {}) {
+    const doc = readerSentenceState.doc;
+    if (!doc || doc !== frameDocument() || readerSentenceState.activePairId !== pair.id) return;
+    const registry = readerHighlightRegistry(doc);
+    const highlight = readerHighlightForRanges(doc, [pair.sourceRange]);
+    if (registry && highlight) {
+      registry.set(readerSentenceHighlightName, highlight);
+      readerSentenceState.usingCustomHighlight = true;
     }
-    return null;
+    let tooltip = doc.querySelector('.reader-sentence-tooltip');
+    if (!tooltip) {
+      tooltip = doc.createElement('div');
+      tooltip.className = 'reader-sentence-tooltip';
+      tooltip.setAttribute('role', 'tooltip');
+      tooltip.innerHTML = '<strong class="reader-sentence-tooltip-label"></strong><div class="reader-sentence-tooltip-text"></div>';
+      tooltip.addEventListener('pointerenter', () => window.clearTimeout(readerSentenceState.closeTimer));
+      tooltip.addEventListener('pointerleave', () => clearReaderSentenceHover(doc));
+      doc.body.append(tooltip);
+    }
+    tooltip.querySelector('.reader-sentence-tooltip-label').textContent = status || '当前句译文';
+    tooltip.querySelector('.reader-sentence-tooltip-text').replaceChildren(status
+      ? doc.createTextNode(text || '')
+      : renderTranslationText(text, formulas, doc, markers, emphasis));
+    const point = readerSentenceState.hoverPoint;
+    const viewportWidth = doc.documentElement.clientWidth;
+    const viewportHeight = doc.documentElement.clientHeight;
+    tooltip.style.maxHeight = `${Math.max(80, viewportHeight - 24)}px`;
+    const rect = tooltip.getBoundingClientRect();
+    const left = Math.max(12, Math.min((point?.x || 12) + 10, viewportWidth - rect.width - 12));
+    let top = (point?.y || 12) + 18;
+    if (top + rect.height > viewportHeight - 12) top = Math.max(12, (point?.y || 12) - rect.height - 12);
+    tooltip.style.left = `${Math.round(left)}px`;
+    tooltip.style.top = `${Math.round(top)}px`;
   }
 
   function setReaderSentenceHover(pair) {
     const doc = readerSentenceState.doc || frameDocument();
     if (!doc) return;
     if (!pair) {
-      clearReaderSentenceHover(doc);
+      window.clearTimeout(readerSentenceState.closeTimer);
+      readerSentenceState.closeTimer = window.setTimeout(() => clearReaderSentenceHover(doc), 180);
       return;
     }
+    window.clearTimeout(readerSentenceState.closeTimer);
     if (readerSentenceState.activePairId === pair.id) return;
     clearReaderSentenceHover(doc);
-    const ranges = [pair.sourceRange, ...pair.translationRanges].filter(Boolean);
-    const registry = readerHighlightRegistry(doc);
-    const highlight = readerHighlightForRanges(doc, ranges);
-    if (registry && highlight) {
-      registry.set(readerSentenceHighlightName, highlight);
-      readerSentenceState.usingCustomHighlight = true;
-    } else {
-      pair.source.classList.add('reader-sentence-hover-fallback');
-      pair.translation.classList.add('reader-sentence-hover-fallback');
-      readerSentenceState.usingCustomHighlight = false;
-    }
     readerSentenceState.activePairId = pair.id;
+    const jobId = state.activeJob?.job_id;
+    const profileId = translationProfileId();
+    const hoverMount = readerMount;
+    readerSentenceState.hoverTimer = window.setTimeout(async () => {
+      if (!readerMountMatches(hoverMount, doc)) return;
+      const fragment = doc.createElement('div');
+      fragment.append(pair.sourceRange.cloneContents());
+      fragment.querySelectorAll('.paragraph-translate-trigger,.annotation-note-trigger').forEach((node) => node.remove());
+      const source = paragraphSource(fragment);
+      if (!source.text.trim()) return;
+      const cached = cachedTranslationForSource(null, source);
+      if (!cached?.text && !aiServiceEnabled('translation')) {
+        paintReaderSentenceTooltip(pair, '请在设置 → AI 服务中配置翻译提供商。', { status: '尚未配置翻译服务' });
+        return;
+      }
+      const key = JSON.stringify([jobId, profileId, translationTargetLanguage(), translationSourceIdentity(source)]);
+      let pending = readerSentenceState.pendingTranslations.get(key);
+      if (!pending || cached?.text) {
+        pending = requestTranslation(source.text, null, source.formulas, { jobId, markers: source.markers, emphasis: source.emphasis })
+          .catch((error) => ({ error: error.message }));
+        readerSentenceState.pendingTranslations.set(key, pending);
+        if (readerSentenceState.pendingTranslations.size > 256) readerSentenceState.pendingTranslations.delete(readerSentenceState.pendingTranslations.keys().next().value);
+      }
+      if (!cached?.text) paintReaderSentenceTooltip(pair, '', { status: '正在翻译当前句…' });
+      const result = await pending;
+      if (result.error) readerSentenceState.pendingTranslations.delete(key);
+      if (!readerMountMatches(hoverMount, doc) || state.activeJob?.job_id !== jobId || translationProfileId() !== profileId) return;
+      paintReaderSentenceTooltip(pair, result.text || result.error, {
+        formulas: result.formulas, markers: result.markers, emphasis: result.emphasis,
+        status: result.error ? '此句翻译失败 · 点击段落“译”可翻译整段' : '',
+      });
+    }, 500);
   }
 
   function installReaderSentenceHover(doc = frameDocument()) {
     if (!doc || doc.documentElement.dataset.sentenceHoverReady === 'true') return;
     doc.documentElement.dataset.sentenceHoverReady = 'true';
     const schedule = (event) => {
-      if (event.target?.closest?.('.annotation-note-popover,button,input,textarea,select,summary')) {
-        setReaderSentenceHover(null);
+      if (doc !== frameDocument()) return;
+      if (event.target?.closest?.('.reader-sentence-tooltip')) return;
+      if (event.target?.closest?.('.annotation-note-popover,[data-annotation-id],button,input,textarea,select,summary') || doc.getSelection()?.toString().trim()) {
+        clearReaderSentenceHover(doc);
         return;
       }
-      readerSentenceState.pendingPoint = { x: event.clientX, y: event.clientY };
+      readerSentenceState.hoverPoint = { x: event.clientX, y: event.clientY };
+      readerSentenceState.pendingPoint = readerSentenceState.hoverPoint;
       if (readerSentenceState.pointerFrame) return;
-      const requestFrame = doc.defaultView?.requestAnimationFrame;
-      if (typeof requestFrame !== 'function') return;
-      readerSentenceState.pointerFrame = requestFrame.call(doc.defaultView, () => {
+      readerSentenceState.pointerFrame = doc.defaultView.requestAnimationFrame(() => {
         readerSentenceState.pointerFrame = 0;
         const point = readerSentenceState.pendingPoint;
         readerSentenceState.pendingPoint = null;
-        const pair = point ? readerSentencePairAtPoint(doc, point.x, point.y) : null;
-        setReaderSentenceHover(pair);
+        setReaderSentenceHover(point ? readerSentencePairAtPoint(doc, point.x, point.y) : null);
       });
     };
     doc.addEventListener('pointermove', schedule, { passive: true });
-    doc.addEventListener('mouseleave', () => setReaderSentenceHover(null), { passive: true });
-    doc.defaultView?.addEventListener('blur', () => setReaderSentenceHover(null), { passive: true });
+    doc.addEventListener('mouseleave', () => { if (doc === frameDocument()) setReaderSentenceHover(null); }, { passive: true });
+    doc.addEventListener('scroll', (event) => { if (doc === frameDocument() && !event.target?.closest?.('.reader-sentence-tooltip')) clearReaderSentenceHover(doc); }, { passive: true, capture: true });
+    doc.addEventListener('keydown', (event) => { if (doc === frameDocument() && event.key === 'Escape') clearReaderSentenceHover(doc); });
+    doc.defaultView?.addEventListener('blur', () => { if (doc === frameDocument()) clearReaderSentenceHover(doc); }, { passive: true });
   }
   function readerURLIdentity(value) {
     try {
@@ -3766,8 +3884,55 @@
   }
 
   function readerMountMatches(mount = readerMount, doc = frameDocument()) {
-    if (!mount || mount !== readerMount || !doc || state.activeJob?.job_id !== mount.jobId || activeJobId !== mount.jobId) return false;
+    if (!readerMountIsCurrent(mount) || mount !== readerMount || !doc || state.activeJob?.job_id !== mount.jobId || activeJobId !== mount.jobId) return false;
     return readerURLIdentity(doc.URL) === mount.urlIdentity && $('#html-preview')?.contentDocument === doc;
+  }
+
+  function readerMountIsCurrent(mount) {
+    return Boolean(mount && readerMounts.get(mount.jobId) === mount);
+  }
+
+  function deactivateReaderMount() {
+    clearChatReferenceHighlight();
+    closeQuickPreview();
+    if (mediaResize.active && mediaResize.doc === frameDocument()) finishMediaResize(null, true);
+    closeReaderSearch({ reset: true });
+    clearReaderSentenceHover(frameDocument());
+    clearSelectionPopover({ clearState: true, immediate: true });
+    closeInlineAnnotation(frameDocument());
+    readerSentenceState.doc = null;
+    readerSentenceState.pairs = [];
+    if (!readerMount) return;
+    window.clearTimeout(readerMount.saveTimer);
+    window.clearTimeout(readerMount.saveMaxTimer);
+    readerMount.activation += 1;
+    readerMount.transition?.cancel();
+    readerMount.frame.removeAttribute('id');
+    readerMount.frame.setAttribute('aria-hidden', 'true');
+    readerMount.frame.inert = true;
+  }
+
+  function disposeReaderMount(jobId) {
+    const mount = readerMounts.get(jobId);
+    if (!mount) return;
+    if (readerMount === mount) {
+      deactivateReaderMount();
+      readerMount = null;
+      readerSections = [];
+    }
+    window.clearTimeout(mount.saveTimer);
+    window.clearTimeout(mount.saveMaxTimer);
+    mount.frame.contentWindow?.cancelAnimationFrame(mount.viewportRAF);
+    mount.transition?.cancel();
+    mount.transition = null;
+    mount.wiredDocument = null;
+    const run = state.translationRuns.get(jobId);
+    if (run?.mount === mount) {
+      run.mount = null;
+      run.document = null;
+    }
+    readerMounts.delete(jobId);
+    mount.frame.remove();
   }
 
   function resetReaderProgress() {
@@ -3778,40 +3943,69 @@
   }
 
   function beginReaderMount(jobId, source) {
-    const frame = $('#html-preview');
     const url = readerDocumentURL(source);
-    closeReaderSearch({ reset: true });
-    clearReaderSentenceHover(frameDocument());
-    readerSentenceState.doc = null;
-    readerSentenceState.pairs = [];
-    const restoreLocation = normalizedReadingLocation(readingLocationsState.locations[jobId]);
-    if (readerMount?.saveTimer) window.clearTimeout(readerMount.saveTimer);
-    if (readerMount?.saveMaxTimer) window.clearTimeout(readerMount.saveMaxTimer);
-    if (readerMount?.lateRestoreTimer) window.clearTimeout(readerMount.lateRestoreTimer);
-    readerMount = {
+    const identity = readerURLIdentity(url);
+    deactivateReaderMount();
+    let mount = readerMounts.get(jobId);
+    if (mount && (mount.urlIdentity !== identity || mount.generation !== readerGeneration())) {
+      disposeReaderMount(jobId);
+      mount = null;
+    }
+    if (!mount) {
+      const frame = document.createElement('iframe');
+      frame.className = 'reader-document-frame';
+      frame.title = '论文阅读器';
+      frame.loading = 'eager';
+      frame.dataset.jobId = jobId;
+      mount = {
       token: ++readerMountSequence,
       jobId,
-      urlIdentity: readerURLIdentity(url),
+      frame,
+      activation: 0,
+      loaded: false,
+      wiredDocument: null,
+      annotations: [],
+      aiHighlights: [],
+      urlIdentity: identity,
       generation: readerGeneration(),
-      restoreLocation,
-      restorePending: Boolean(restoreLocation),
+      restoreLocation: normalizedReadingLocation(readingLocationsState.locations[jobId]),
+      restorePending: true,
+      ready: false,
+      layoutReady: Promise.resolve(),
       userInteracted: false,
       restoring: false,
       viewportRAF: 0,
       saveTimer: null,
       saveMaxTimer: null,
-      lateRestoreTimer: null,
       activeSectionIndex: -1,
-    };
+      };
+      readerMounts.set(jobId, mount);
+      frame.addEventListener('load', () => {
+        if (!readerMountIsCurrent(mount) || readerURLIdentity(frame.contentDocument?.URL) !== mount.urlIdentity) return;
+        if (mount.wiredDocument !== frame.contentDocument) {
+          mount.ready = false;
+          mount.preparingActivation = null;
+        }
+        mount.loaded = true;
+        if (readerMount === mount) void prepareMountedReader(mount);
+      });
+      frame.src = url;
+      $('#reader-documents').append(frame);
+    }
+    readerMount = mount;
+    mount.activation += 1;
+    mount.frame.id = 'html-preview';
+    mount.frame.removeAttribute('aria-hidden');
+    mount.frame.inert = false;
+    $('#reader-view')?.classList.toggle('is-document-loading', !mount.ready);
     readerSections = [];
     resetReaderProgress();
     const rail = $('#reader-chapter-rail');
     if (rail) rail.hidden = true;
     $('#reader-chapter-list')?.replaceChildren();
     setChapterRailOpen(false);
-    frame.src = url;
-    primeReaderAppearance(readerMount);
-    return readerMount;
+    if (!mount.ready) primeReaderAppearance(mount);
+    return mount;
   }
 
   // wireFrame() pushes the reader's accent and fonts into the document, but it
@@ -3820,11 +4014,11 @@
   // paper visibly opens in the wrong accent and font and then snaps. Push once
   // as soon as the new document exists; wireFrame() re-applies at load.
   function primeReaderAppearance(mount) {
-    const frame = $('#html-preview');
+    const frame = mount?.frame;
     if (!frame || !mount) return;
     const deadline = performance.now() + 10000;
     const attempt = () => {
-      if (readerMount !== mount) return;
+      if (!readerMountIsCurrent(mount)) return;
       const doc = frame.contentDocument;
       if (doc?.documentElement && readerURLIdentity(doc.URL) === mount.urlIdentity) {
         setAppearanceVariables(doc.documentElement, state.appearance, { readerDocument: true, important: true });
@@ -3875,7 +4069,7 @@
     const doc = frameDocument();
     const frame = $('#html-preview');
     if (!$('#reader-view')?.classList.contains('active-view') || !frame || frame.clientWidth < 1 || frame.clientHeight < 1
-      || !readerMountMatches(mount, doc) || !readerJobIdPattern.test(mount.jobId)) return false;
+      || !readerMountMatches(mount, doc) || !mount.ready || !readerJobIdPattern.test(mount.jobId)) return false;
     const metrics = readerScrollMetrics(doc);
     const anchor = metrics && readerAnchorAtViewport(doc, metrics);
     const blockId = String(anchor?.dataset?.blockId || '');
@@ -4133,7 +4327,10 @@
       }
     });
     mediaLayoutSaveQueues.set(jobId, task);
-    task.finally(() => { if (mediaLayoutSaveQueues.get(jobId) === task) mediaLayoutSaveQueues.delete(jobId); });
+    task.finally(() => {
+      if (mediaLayoutSaveQueues.get(jobId) === task) mediaLayoutSaveQueues.delete(jobId);
+      releaseClosedDocumentCaches(jobId);
+    });
     return task;
   }
 
@@ -4156,6 +4353,9 @@
     doc?.documentElement.classList.remove('is-resizing-media');
     mediaResize.active = false;
     mediaResize.pointerId = null;
+    mediaResize.block = null;
+    mediaResize.doc = null;
+    mediaResize.handle = null;
     if (cancelled) {
       setMediaWidth(block, jobId, key, startPercent);
       return;
@@ -4257,10 +4457,11 @@
     });
   }
 
-  async function loadMediaLayout(jobId) {
+  async function loadMediaLayout(jobId, mount = readerMounts.get(jobId)) {
     const payload = await api(`/api/jobs/${jobId}/media-layout`);
+    if (!readerMountIsCurrent(mount)) return;
     state.mediaLayouts.set(jobId, normalizeMediaLayout(payload.media_layout));
-    if (isActiveReaderJob(jobId)) prepareReaderMedia(frameDocument(), jobId);
+    if (isActiveReaderJob(jobId) && mount.wiredDocument === frameDocument()) prepareReaderMedia(frameDocument(), jobId);
     return state.mediaLayouts.get(jobId);
   }
 
@@ -4474,7 +4675,7 @@
   function guardFrameSelection(event) {
     const doc = event.currentTarget;
     const element = selectionElement(doc, event);
-    if (element?.closest?.('input, textarea, [contenteditable="true"]')) return;
+    if (element?.closest?.('input, textarea, [contenteditable="true"], .reader-sentence-tooltip')) return;
     if (!isPaperSelectionSurface(element)) { event.preventDefault(); return; }
     if (event.type === 'copy' && event.clipboardData) {
       const selection = doc.getSelection();
@@ -4592,7 +4793,7 @@
     const quote = String(selection.quote || '').replace(/\s+/g, ' ').trim();
     // The debounce exists to avoid firing gateway requests while the user is
     // still adjusting the selection; a locally cached quote costs nothing.
-    const cachedHit = cachedTranslation(null, hashText(quote), '中文', jobId);
+    const cachedHit = cachedTranslation(null, hashText(quote), translationTargetLanguage(), jobId);
     const stale = () => token !== selectionTranslationToken || key !== selectionTranslationKey || key !== selectionRequestKey(state.selection) || $('#selection-popover')?.hidden;
     selectionTranslationTimer = window.setTimeout(async () => {
       selectionTranslationTimer = null;
@@ -4606,8 +4807,7 @@
         renderSelectionTranslation('ready', { text: translated.text, formulas: translated.formulas });
       } catch (error) {
         if (stale()) return;
-        const detail = String(error.message || '未知错误');
-        renderSelectionTranslation('error', { message: /^翻译失败[：:]/u.test(detail) ? detail : `翻译失败：${detail}` });
+        renderSelectionTranslation('error', { message: translationErrorMessage(error) });
       } finally {
         if (selectionTranslationAbortController === abortController) selectionTranslationAbortController = null;
       }
@@ -4704,7 +4904,7 @@
     if (state.health?.readonly) return;
     const doc = frameDocument();
     if (!doc) return;
-    if (isAnnotationInteraction(event?.target)) {
+    if (isAnnotationInteraction(event?.target) || event?.target?.closest?.('.reader-sentence-tooltip')) {
       clearSelectionPopover({ clearState: true, immediate: true });
       return;
     }
@@ -4753,6 +4953,8 @@
     state.selection = nextSelection;
     renderSelectedContext();
     const popover = $('#selection-popover');
+    clearReaderSentenceHover(doc);
+    renderSelectionActions();
     openTransient(popover);
     if (selectionChanged) beginSelectionTranslation(nextSelection);
     positionSelectionPopover();
@@ -4814,6 +5016,7 @@
     const tab = $('#quick-preview-tab');
     if (currentSidebarPanelId() === 'quick-preview-panel') switchSidebar(previousSidebarPanelId || 'chat-panel');
     if (tab) tab.hidden = true;
+    $('#quick-preview-content')?.replaceChildren();
     state.quickPreview = null;
   }
 
@@ -4834,9 +5037,6 @@
   const INLINE_MARKER_SHAPES = new Set(['circle', 'square']);
   const INLINE_MARKER_TONES = new Set(['gray', 'blue', 'orange', 'green', 'red', 'purple', 'pink']);
   const PDF_TEXT_TONES = new Set(['blue', 'orange', 'green', 'red', 'purple', 'pink']);
-  // Emphasis runs a paragraph may carry into a translation request. Each one
-  // becomes a start/end placeholder pair the model must return untouched.
-  const MAX_TRANSLATION_EMPHASIS = 10;
 
   function inlineLegendMarkerSpec(node) {
     if (!node?.classList?.contains('inline-legend-marker')) return null;
@@ -4940,21 +5140,21 @@
   function previewCaptionTranslation(caption) {
     const blockId = caption?.dataset?.translateBlockId || caption?.dataset?.blockId || '';
     if (!blockId) return null;
+    const source = paragraphSource(caption);
     const rendered = caption.ownerDocument?.querySelector(`.my-scholar-translation[data-for="${cssEscape(blockId)}"] .translation-text`);
     const node = document.createElement('div');
     node.className = 'quick-preview-translation';
     node.lang = 'zh-CN';
-    if (rendered) {
+    const renderedHash = rendered?.closest('.my-scholar-translation')?.dataset.sourceHash;
+    if (rendered && (renderedHash === translationSourceHash(source) || (!renderedHash && !source.formulas.length && !source.markers.length && !source.emphasis.length))) {
       const clone = previewStructuredClone(rendered);
       if (!clone) return null;
       node.append(...clone.childNodes);
       return node;
     }
-    const source = paragraphSource(caption);
-    const record = cachedTranslation(blockId, hashText(source.text));
+    const record = cachedTranslationForSource(blockId, source);
     if (!record?.text) return null;
-    const stored = record.formulas?.length ? record.formulas : source.formulas;
-    const formulas = stored.map((formula) => (formula.markup ? formula : { ...formula, markup: source.formulas.find((item) => item.token === formula.token)?.markup }));
+    const formulas = source.formulas;
     const tokenPayload = protectSpecialTokens(source.text);
     const repaired = repairFormulaTokens(record.text, formulas);
     const translated = restoreSpecialTokens(restoreInlineMarkers(restoreInlineMath(repaired, formulas), source.markers), tokenPayload.tokens);
@@ -5035,13 +5235,29 @@
   }
 
   function citationDetails(link, doc = frameDocument()) {
+    const cleanText = (node) => {
+      const clone = node?.cloneNode(true);
+      clone?.querySelectorAll('button,.annotation-note-trigger,.annotation-note-popover,.my-scholar-translation').forEach((element) => element.remove());
+      return clone?.textContent || '';
+    };
     const number = String(link?.dataset?.ref || '').trim();
     const reference = number ? doc?.getElementById(`ref-${number}`) : null;
     const contextBlock = link?.closest?.('[data-block-id]');
+    let referenceText = cleanText(reference);
+    if (reference && !referenceText.trim()) {
+      const container = reference.closest('[data-block-id]') || reference.parentElement;
+      const anchors = Array.from(container.querySelectorAll('[id^="ref-"]'));
+      const next = anchors[anchors.indexOf(reference) + 1];
+      const range = doc.createRange();
+      range.selectNodeContents(container);
+      range.setStartAfter(reference);
+      if (next) range.setEndBefore(next);
+      referenceText = cleanText(range.cloneContents());
+    }
     return {
       number,
-      text: String(reference?.textContent || '').replace(/^\s*\[?\d+\]?\s*/u, '').replace(/\s+/g, ' ').trim(),
-      context: String(contextBlock?.textContent || '').replace(/\s+/g, ' ').trim(),
+      text: String(referenceText).replace(/^\s*(?:\[\d+\]|\d+[.)]?)\s*/u, '').replace(/\s+/g, ' ').trim(),
+      context: cleanText(contextBlock).replace(/\s+/g, ' ').trim(),
     };
   }
 
@@ -5099,6 +5315,12 @@
     reference.textContent = details.text;
     const actions = document.createElement('div');
     actions.className = 'quick-preview-actions';
+    const jump = document.createElement('button');
+    jump.type = 'button';
+    jump.className = 'secondary-button';
+    jump.textContent = '跳转到参考文献';
+    jump.addEventListener('click', () => frameDocument()?.getElementById(`ref-${details.number}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    actions.append(jump);
     const quickRead = document.createElement('button');
     quickRead.type = 'button';
     quickRead.className = 'primary-button';
@@ -5203,18 +5425,16 @@
     if (!expanded && restoreFocus && assistantOverlayQuery.matches && toggle) toggle.focus({ preventScroll: true });
   }
 
-  function cancelLateReaderRestore(mount = readerMount) {
+  function cancelReadingLocationRestore(mount = readerMount) {
     if (!mount) return;
     mount.userInteracted = true;
     mount.restorePending = false;
-    window.clearTimeout(mount.lateRestoreTimer);
-    mount.lateRestoreTimer = null;
   }
 
   function markReaderUserInteraction(mount, event) {
     if (!readerMountMatches(mount)) return;
     if (event?.type === 'keydown' && !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar'].includes(event.key)) return;
-    cancelLateReaderRestore(mount);
+    cancelReadingLocationRestore(mount);
   }
 
   function updateActiveReaderSection(mount = readerMount) {
@@ -5257,7 +5477,7 @@
     const section = readerSectionTarget(index);
     const mount = readerMount;
     if (!section || !readerMountMatches(mount)) return;
-    cancelLateReaderRestore(mount);
+    cancelReadingLocationRestore(mount);
     section.node.scrollIntoView({ behavior: reducedMotionQuery.matches ? 'auto' : 'smooth', block: 'start' });
     mount.activeSectionIndex = -1;
     updateActiveReaderSection(mount);
@@ -5320,7 +5540,8 @@
     const doc = frameDocument();
     if (!doc) return [];
     const seen = new Set();
-    readerSections = [...doc.querySelectorAll('h1, h2, h3, h4')].map((heading) => {
+    const documentState = readerDocumentState(doc);
+    readerSections = documentState.sections || [...doc.querySelectorAll('h1, h2, h3, h4')].map((heading) => {
       const node = heading.matches('[data-block-id]') ? heading : heading.closest('[data-block-id]');
       const blockId = String(node?.dataset?.blockId || '');
       const title = String(heading.textContent || '').replace(/\s+/g, ' ').trim();
@@ -5330,6 +5551,7 @@
       seen.add(blockId);
       return { blockId, level, title, node };
     }).filter(Boolean);
+    documentState.sections = readerSections;
     if (readerMountMatches(readerMount, doc)) readerMount.activeSectionIndex = -1;
     const outline = $('#outline-list');
     const rail = $('#reader-chapter-rail');
@@ -5385,7 +5607,7 @@
     });
   }
 
-  function restoreReadingLocation(mount, { late = false } = {}) {
+  function restoreReadingLocation(mount) {
     const doc = frameDocument();
     if (!readerMountMatches(mount, doc) || mount.userInteracted) return false;
     const location = mount.restoreLocation;
@@ -5411,7 +5633,8 @@
       top = location.progress * metrics.maximum;
     }
     mount.restoring = true;
-    metrics.view.scrollTo({ top: Math.max(0, top), left: 0, behavior: 'auto' });
+    // 'auto' inherits the paper's smooth-scroll CSS, exposing the trip from the top.
+    metrics.view.scrollTo({ top: Math.max(0, top), left: 0, behavior: 'instant' });
     metrics.view.requestAnimationFrame(() => {
       if (!readerMountMatches(mount, doc)) return;
       mount.restoring = false;
@@ -5421,24 +5644,14 @@
     return true;
   }
 
-  function scheduleLateReadingLocationRestore(jobId) {
-    const mount = readerMount;
-    if (!mount || mount.jobId !== jobId || mount.userInteracted) return;
-    window.clearTimeout(mount.lateRestoreTimer);
-    mount.lateRestoreTimer = window.setTimeout(async () => {
-      mount.lateRestoreTimer = null;
-      const doc = frameDocument();
-      if (!readerMountMatches(mount, doc) || mount.userInteracted) return;
-      await readerFrames(doc, 2);
-      restoreReadingLocation(mount, { late: true });
-      mount.restorePending = false;
-      scheduleReadingLocationSave(mount);
-    }, 900);
-  }
-
-  async function restoreReadingLocationAfterLoad(mount) {
+  async function restoreReadingLocationAfterLoad(mount, activation = mount.activation) {
     const doc = frameDocument();
-    if (!readerMountMatches(mount, doc)) return;
+    const current = () => readerMountMatches(mount, doc) && mount.activation === activation;
+    if (!current()) return false;
+    // Cached paragraphs and saved figure widths change the anchor's position.
+    // Settle those before the first visible frame, independently of notes/AI.
+    await mount.layoutReady;
+    if (!current()) return false;
     if (doc.fonts?.ready) {
       await Promise.race([
         doc.fonts.ready.catch(() => {}),
@@ -5446,13 +5659,16 @@
       ]);
     }
     await readerFrames(doc, 2);
-    if (!readerMountMatches(mount, doc)) return;
-    if (!mount.restoreLocation) mount.restorePending = false;
+    if (!current()) return false;
     restoreReadingLocation(mount);
-    scheduleLateReadingLocationRestore(mount.jobId);
+    await readerFrames(doc, 1);
+    if (!current()) return false;
+    mount.restorePending = false;
+    scheduleReadingLocationSave(mount);
+    return true;
   }
 
-  function renderCachedTranslations() {
+  function renderCachedTranslations({ reconcile = true } = {}) {
     const doc = frameDocument();
     if (!doc || !state.translationCache.length) return;
     let inserted = 0;
@@ -5464,21 +5680,15 @@
       const block = translationTarget(blockId);
       if (!block || !translatableParagraph(block)) continue;
       const source = paragraphSource(block);
-      const sourceMatches = !record.source_hash
-        || hashText(source.text) === record.source_hash
-        || String(record.source_text || '') === source.text;
-      if (!sourceMatches) continue;
+      if (!translationSourceMatches(record, source, true)) continue;
       if (block.dataset.continuationPages && !record.source_hash && String(record.source_text || '') !== source.text) continue;
       const role = block.matches('h1.paper-title, h1[data-translate-block-id]') ? 'title' : '';
       const tokenPayload = protectSpecialTokens(source.text);
-      // Persisted records only carry {token, tex}; graft the live MathML
-      // markup back from the source block so math still renders after reload.
-      const stored = record.formulas?.length ? record.formulas : source.formulas;
-      const formulas = stored.map((formula) => (formula.markup ? formula : { ...formula, markup: source.formulas.find((item) => item.token === formula.token)?.markup }));
+      const formulas = source.formulas;
       const repaired = repairFormulaTokens(translated, formulas);
       const node = insertTranslation(blockId, restoreSpecialTokens(restoreInlineMarkers(restoreInlineMath(repaired, formulas), source.markers), tokenPayload.tokens), {
         cached: true,
-        sourceHash: record.source_hash || '',
+        sourceHash: translationSourceHash(source),
         role,
         formulas,
         markers: source.markers,
@@ -5489,16 +5699,30 @@
     }
     // One rebuild after the whole replay instead of one per inserted node.
     if (inserted) {
-      if (state.annotations.length) renderFrameAnnotations();
-      rebuildReaderSentencePairs(doc);
+      if (reconcile) {
+        if (state.annotations.length) renderFrameAnnotations();
+        else rebuildReaderSentencePairs(doc);
+      }
       refreshReaderSearch();
       applyTranslationVisibility(doc);
     }
   }
 
-  async function loadTranslationCache(jobId) {
-    try { return setTranslationCacheFor(jobId, (await api(`/api/jobs/${jobId}/translations`)).translations || []); }
-    catch (_) { return setTranslationCacheFor(jobId, []); }
+  async function loadTranslationCache(jobId, mount = readerMounts.get(jobId)) {
+    const before = [...translationCacheFor(jobId)];
+    try {
+      const payload = await api(`/api/jobs/${jobId}/translations`);
+      if (!readerMountIsCurrent(mount)) return;
+      // In-flight translations can finish after this GET started.
+      const added = translationCacheFor(jobId).filter((record) => !before.includes(record));
+      const records = Array.isArray(payload.translations) ? [...payload.translations] : [];
+      for (const record of added) {
+        const index = records.findIndex((item) => item.block_id === record.block_id && item.source_hash === record.source_hash
+          && item.target_language === record.target_language && item.profile_id === record.profile_id);
+        if (index < 0) records.push(record); else records[index] = record;
+      }
+      return setTranslationCacheFor(jobId, records);
+    } catch (_) { return readerMountIsCurrent(mount) ? translationCacheFor(jobId) : []; }
   }
 
   function libraryEntry(jobId) {
@@ -5603,6 +5827,10 @@
           node.innerHTML = original;
         }
       });
+      if (readerDocumentStates.has(doc)) {
+        delete readerDocumentState(doc).sentences;
+        if (doc === frameDocument()) rebuildReaderSentencePairs(doc);
+      }
     };
     if (doc.defaultView?.katex) {
       renderAll();
@@ -5725,8 +5953,18 @@
 
   function wireFrame(mount = readerMount) {
     const doc = frameDocument(); if (!readerMountMatches(mount, doc)) return;
+    readerDocumentStates.delete(doc);
+    doc.documentElement.classList.add('my-scholar-reader-restoring');
     joinReaderContinuations(doc);
     doc.body.classList.add('reader-embedded');
+    const mathRules = document.getElementById('reader-math-style')?.sheet?.cssRules;
+    if (mathRules && !doc.getElementById('my-scholar-math-style')) {
+      // Exported readers allow inline styles but intentionally block assets.
+      const mathStyle = doc.createElement('style');
+      mathStyle.id = 'my-scholar-math-style';
+      mathStyle.textContent = Array.from(mathRules, (rule) => rule.cssText).join('\n');
+      doc.head.append(mathStyle);
+    }
     let runtimeStyle = doc.querySelector('#my-scholar-annotation-runtime-style');
     if (!runtimeStyle) {
       runtimeStyle = doc.createElement('style');
@@ -5739,6 +5977,23 @@
         }
         @media (prefers-color-scheme:dark) {
           body.reader-embedded { --reader-ui-paper:#1e2124; --reader-ui-ink:#dcdcde; --reader-ui-muted:#b6afa6; }
+          /* Older reader styles force their original link color. */
+          body.reader-embedded .reader-content a:is(.citation,.cross-reference,[href^="#ref-"]) {
+            color:#b8c8d8!important;
+            text-decoration-line:underline;
+            text-decoration-color:currentColor;
+            text-decoration-thickness:1px;
+            text-underline-offset:.15em;
+          }
+          body.reader-embedded .reader-content a:is(.citation,.cross-reference,[href^="#ref-"]):is(:hover,:focus-visible) {
+            color:#e2ebf3!important;
+            text-decoration-thickness:2px;
+          }
+          body.reader-embedded .reader-content a:is(.citation,.cross-reference,[href^="#ref-"]):focus-visible {
+            outline:2px solid currentColor;
+            outline-offset:3px;
+            border-radius:2px;
+          }
         }
         .annotation-note-popover,.annotation-note-popover *,
         .paragraph-translate-trigger,.annotation-note-trigger,.reference-hover-card {
@@ -5786,14 +6041,6 @@
           background:color-mix(in srgb,var(--accent,#d97706) 24%,transparent);
           color:inherit;
         }
-        ::highlight(${readerSentenceHighlightName}) {
-          background:color-mix(in srgb,var(--accent,#d97706) 10%,transparent);
-          color:inherit;
-          text-decoration:underline;
-          text-decoration-color:color-mix(in srgb,var(--accent,#d97706) 28%,transparent);
-          text-decoration-thickness:1px;
-          text-underline-offset:.12em;
-        }
         mark.reader-search-match {
           border-radius:.16em;
           background:color-mix(in srgb,var(--accent,#d97706) 12%,transparent);
@@ -5802,10 +6049,12 @@
         mark.reader-search-match.is-current {
           background:color-mix(in srgb,var(--accent,#d97706) 24%,transparent);
         }
-        .reader-sentence-hover-fallback {
-          border-radius:.16em;
-          background:color-mix(in srgb,var(--accent,#d97706) 8%,transparent);
+        ::highlight(${readerSentenceHighlightName}) {
+          background-color:color-mix(in srgb,var(--accent,#d97706) 12%,transparent);
         }
+        .reader-sentence-tooltip { position:fixed; z-index:1100; width:min(460px,calc(100vw - 24px)); box-sizing:border-box; padding:12px 14px; overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; border:1px solid var(--line,#d5d9df); border-radius:10px; background:var(--paper,var(--reader-ui-paper,#fff)); color:var(--ink,var(--reader-ui-ink,#222)); box-shadow:0 8px 30px #0002; font:14px/1.65 system-ui,sans-serif; text-align:left; white-space:normal; overflow-wrap:anywhere; user-select:text; }
+        .reader-sentence-tooltip-label { display:block; margin-bottom:6px; color:var(--muted,var(--reader-ui-muted,#666)); font-size:11px; font-weight:600; }
+        .reader-sentence-tooltip-text { white-space:pre-wrap; }
         .annotation-note-editor[contenteditable="true"],
         .annotation-note-editor[contenteditable="true"] * {
           -webkit-user-select:text!important;
@@ -6120,6 +6369,7 @@
           margin-right:auto!important;
           transition:width 140ms ease;
         }
+        html.my-scholar-reader-restoring .my-scholar-media-resizable { transition:none; }
         .reader-content .my-scholar-media-visual {
           min-width:0;
         }
@@ -6289,8 +6539,11 @@
     }
     doc.addEventListener('selectstart', guardFrameSelection);
     doc.addEventListener('copy', guardFrameSelection);
-    doc.addEventListener('mouseup', (event) => window.setTimeout(() => showSelection(event), 20));
-    doc.addEventListener('keyup', (event) => window.setTimeout(() => showSelection(event), 20));
+    const delayedSelection = (event) => window.setTimeout(() => {
+      if (readerMountMatches(mount, doc)) showSelection(event);
+    }, 20);
+    doc.addEventListener('mouseup', delayedSelection);
+    doc.addEventListener('keyup', delayedSelection);
     const closeHostTypographyPopover = () => {
       if (readerMountMatches(mount, doc) && typographyPopoverOpen) setTypographyPopover(false);
     };
@@ -6298,6 +6551,7 @@
     doc.addEventListener('click', closeHostTypographyPopover, { passive: true, capture: true });
     ['wheel', 'touchstart', 'pointerdown'].forEach((eventName) => doc.defaultView?.addEventListener(eventName, (event) => markReaderUserInteraction(mount, event), { passive: true, capture: true }));
     doc.defaultView?.addEventListener('scroll', () => {
+      if (!readerMountMatches(mount, doc)) return;
       clearReaderSentenceHover(doc);
       closeImageContextMenu();
       if (doc.getSelection()?.toString().trim()) showSelection();
@@ -6310,6 +6564,7 @@
       scheduleReaderViewportUpdate(mount);
     }, { passive: true });
     doc.addEventListener('contextmenu', (event) => {
+      if (!readerMountMatches(mount, doc)) return;
       const image = readerImageTarget(event.target);
       if (image) {
         event.preventDefault();
@@ -6329,6 +6584,7 @@
       }
     });
     doc.addEventListener('click', (event) => {
+      if (!readerMountMatches(mount, doc)) return;
       closeImageContextMenu();
       if (assistantOverlayQuery.matches) setChapterRailOpen(false);
       const readerImage = readerImageTarget(event.target);
@@ -6369,6 +6625,7 @@
           target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         } else if (link.classList.contains('citation')) {
           openReferenceQuickPreview(link);
+          target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         } else if (!openMediaQuickPreview(target, link)) {
           target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
@@ -6377,6 +6634,7 @@
       if (!event.target.closest?.('.annotation-note-popover')) closeInlineAnnotation(doc);
     });
     doc.addEventListener('keydown', (event) => {
+      if (!readerMountMatches(mount, doc)) return;
       if (handleReaderSearchShortcut(event)) return;
       markReaderUserInteraction(mount, event);
       if (event.key === 'Escape' && $('#reader-chapter-rail')?.classList.contains('is-open')) {
@@ -6407,7 +6665,7 @@
     applyTranslationVisibility(doc);
     syncTranslationVisibilityButton();
     installParagraphTranslationControls();
-    renderCachedTranslations();
+    renderCachedTranslations({ reconcile: false });
     buildReaderIndexes();
     renderFrameAnnotations();
     installReaderSentenceHover(doc);
@@ -6419,22 +6677,44 @@
     scheduleReaderIdle(() => {
       if (!readerMountMatches(mount)) return;
       installCitationHoverPreviews(doc);
-      rebuildReaderSentencePairs(doc);
+      activateReaderSentencePairs(doc);
       ensureTitleTranslation();
     });
   }
-  $('#html-preview').addEventListener('load', () => {
-    const mount = readerMount;
-    if (!readerMountMatches(mount)) return;
+  async function prepareMountedReader(mount) {
+    if (!mount.loaded || !readerMountMatches(mount)) return;
+    const activation = mount.activation;
+    const doc = frameDocument();
+    const current = () => readerMountMatches(mount, doc) && mount.activation === activation;
+    if (mount.preparingActivation === activation) return;
+    mount.preparingActivation = activation;
     try {
-      wireFrame(mount);
-      void restoreReadingLocationAfterLoad(mount);
+      if (mount.wiredDocument !== doc) {
+        wireFrame(mount);
+        mount.wiredDocument = doc;
+      } else {
+        applyAppearance();
+        applyHighlightColor();
+        applyTranslationVisibility(doc);
+        renderCachedTranslations({ reconcile: false });
+        buildReaderIndexes();
+        renderFrameAnnotations();
+        installCitationHoverPreviews(doc);
+        activateReaderSentencePairs(doc);
+        updateReaderProgress(doc);
+      }
+      if (!mount.ready && !await restoreReadingLocationAfterLoad(mount, activation)) return;
+    } catch (error) {
+      if (current()) setPanelStatus(`阅读位置恢复失败：${error.message}`, true);
     } finally {
-      window.requestAnimationFrame(() => {
-        if (readerMountMatches(mount)) $('#reader-view')?.classList.remove('is-document-loading');
-      });
+      if (current()) {
+        mount.ready = true;
+        mount.restorePending = false;
+        doc.documentElement.classList.remove('my-scholar-reader-restoring');
+        $('#reader-view')?.classList.remove('is-document-loading');
+      }
     }
-  });
+  }
   window.addEventListener('resize', () => {
     if (!assistantOverlayQuery.matches) applyAssistantWidth();
     if (frameDocument()?.getSelection()?.toString().trim()) showSelection();
@@ -6656,7 +6936,7 @@
         trigger.type = 'button';
         trigger.className = 'annotation-note-trigger';
         trigger.dataset.annotationId = annotation.id;
-        trigger.title = annotation.note ? '查看句内笔记' : '添加或查看句内笔记';
+        trigger.title = `${annotation.label ? `${annotation.label} · ` : ''}${annotation.note ? '查看句内笔记' : '添加或查看句内笔记'}`;
         trigger.setAttribute('aria-label', trigger.title);
         trigger.textContent = annotation.note ? '✎' : '＋';
         trigger.addEventListener('pointerenter', (event) => {
@@ -6781,6 +7061,8 @@
   async function adoptAISuggestion(annotation, { withNote = false } = {}) {
     if (!state.activeJob || !annotation || isIgnoredAISuggestion(annotation)) return null;
     const jobId = state.activeJob.job_id;
+    const mount = readerMount;
+    if (!readerMountMatches(mount)) return;
     let manual = manualAnnotationForSuggestion(annotation);
     try {
       if (!manual) {
@@ -6795,7 +7077,8 @@
           source: 'manual',
           ...location,
         }));
-        if (state.activeJob?.job_id !== jobId) return null;
+        if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
+        if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return null;
         state.annotations = payload.annotations || state.annotations;
         manual = state.annotations.find((item) => item.id === payload.annotation?.id) || manualAnnotationForSuggestion(annotation);
       }
@@ -6811,6 +7094,7 @@
       showToast(withNote ? '已创建个人高亮，可以直接写笔记。' : '已转为我的高亮。');
       return manual;
     } catch (error) {
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
       showToast(error.message, true);
       return null;
     }
@@ -6819,15 +7103,19 @@
   async function setAISuggestionState(annotation, suggestionState) {
     if (!state.activeJob || !isAIAnnotation(annotation)) return;
     const jobId = state.activeJob.job_id;
+    const mount = readerMount;
+    if (!readerMountMatches(mount)) return;
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations/${annotation.id}`, jsonOptions({ suggestion_state: suggestionState }, 'PATCH'));
-      if (state.activeJob?.job_id !== jobId) return false;
+      if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return false;
       state.annotations = payload.annotations || state.annotations;
       renderAnnotations();
       renderFrameAnnotations();
       showToast(suggestionState === 'ignored' ? '已忽略这条 AI 建议，可在阅读重点中恢复。' : 'AI 建议已恢复。');
       return true;
     } catch (error) {
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
       showToast(error.message, true);
       return false;
     }
@@ -6916,13 +7204,13 @@
     popover.className = 'annotation-note-popover';
     popover.dataset.annotationId = annotation.id;
     popover.setAttribute('role', 'dialog');
-    popover.setAttribute('aria-label', annotation.kind === 'underline' ? '划线笔记' : '重点笔记');
+    popover.setAttribute('aria-label', annotation.label || (annotation.kind === 'underline' ? '划线笔记' : '重点笔记'));
     applyAnnotationTheme(popover, annotation);
     const conversionLabel = annotation.kind === 'underline' ? '转为高亮' : '转为划线';
     popover.addEventListener('pointerenter', cancelNoteHoverClose);
     popover.addEventListener('pointerleave', (event) => { if (event.pointerType === 'mouse') scheduleNoteHoverClose(); });
     popover.addEventListener('click', () => { notePopoverHover.pinned = true; });
-    popover.innerHTML = `<div class="annotation-note-popover-head"><strong>${annotation.kind === 'underline' ? '划线笔记' : '重点笔记'}</strong><span>第 ${escapeHTML(annotation.page || '—')} 页</span></div>${annotationPaletteHTML(annotation)}<div class="annotation-note-popover-quote">${escapeHTML(annotation.quote)}</div><div class="annotation-note-popover-body">${annotation.note ? renderMarkdown(annotation.note) : '<span class="annotation-note-empty">还没有笔记，点击“添加笔记”。</span>'}</div><div class="annotation-note-popover-actions"><button type="button" data-action="convert">${conversionLabel}</button><button type="button" data-action="edit">${annotation.note ? '编辑笔记' : '添加笔记'}</button><button type="button" data-action="sidebar">打开高亮笔记</button><button type="button" data-action="delete">删除</button><button type="button" data-action="close">关闭</button></div>`;
+    popover.innerHTML = `<div class="annotation-note-popover-head"><strong>${escapeHTML(annotation.label || (annotation.kind === 'underline' ? '划线笔记' : '重点笔记'))}</strong><span>第 ${escapeHTML(annotation.page || '—')} 页</span></div>${annotationPaletteHTML(annotation)}<div class="annotation-note-popover-quote">${escapeHTML(annotation.quote)}</div><div class="annotation-note-popover-body">${annotation.note ? renderMarkdown(annotation.note) : '<span class="annotation-note-empty">还没有笔记，点击“添加笔记”。</span>'}</div><div class="annotation-note-popover-actions"><button type="button" data-action="convert">${conversionLabel}</button><button type="button" data-action="edit">${annotation.note ? '编辑笔记' : '添加笔记'}</button><button type="button" data-action="sidebar">打开高亮笔记</button><button type="button" data-action="delete">删除</button><button type="button" data-action="close">关闭</button></div>`;
     popover.addEventListener('click', (event) => event.stopPropagation());
     popover.addEventListener('mouseup', (event) => event.stopPropagation());
     doc.body.appendChild(popover);
@@ -6938,11 +7226,14 @@
   async function updateAnnotationKind(annotation, kind, popover) {
     if (!state.activeJob || isAIAnnotation(annotation) || !['highlight', 'underline'].includes(kind)) return;
     const jobId = state.activeJob.job_id;
+    const mount = readerMount;
+    if (!readerMountMatches(mount)) return;
     const button = popover?.querySelector('[data-action="convert"]');
     if (button) button.disabled = true;
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations/${annotation.id}`, jsonOptions({ kind }, 'PATCH'));
-      if (state.activeJob?.job_id !== jobId) return;
+      if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
       state.annotations = payload.annotations || state.annotations;
       const updated = state.annotations.find((item) => item.id === annotation.id) || payload.annotation;
       Object.assign(annotation, updated || { kind });
@@ -6952,6 +7243,7 @@
       if (trigger) showInlineAnnotation(annotation, trigger);
       showToast(kind === 'underline' ? '已转为划线，颜色和笔记保持不变。' : '已转为高亮，颜色和笔记保持不变。');
     } catch (error) {
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
       showToast(error.message, true);
       if (button) button.disabled = false;
     }
@@ -6960,12 +7252,15 @@
   async function updateAnnotationColor(annotation, color, popover) {
     if (!state.activeJob || isAIAnnotation(annotation)) return;
     const jobId = state.activeJob.job_id;
+    const mount = readerMount;
+    if (!readerMountMatches(mount)) return;
     const nextColor = normalizeAnnotationColor(color);
     const buttons = [...(popover?.querySelectorAll('[data-annotation-color]') || [])];
     buttons.forEach((button) => { button.disabled = true; });
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations/${annotation.id}`, jsonOptions({ color: nextColor }, 'PATCH'));
-      if (state.activeJob?.job_id !== jobId) return;
+      if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
       state.annotations = payload.annotations || state.annotations;
       const updated = state.annotations.find((item) => item.id === annotation.id) || { ...annotation, color: nextColor };
       Object.assign(annotation, updated);
@@ -6977,14 +7272,22 @@
       rememberAnnotationColor(annotation.kind, nextColor);
       renderAnnotations();
     } catch (error) {
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
       setPanelStatus(error.message, true);
     } finally {
-      buttons.forEach((button) => { button.disabled = false; });
+      if (readerMountMatches(mount)) buttons.forEach((button) => { button.disabled = false; });
     }
   }
 
   function renderFrameAnnotations() {
-    const doc = frameDocument(); if (!doc) return;
+    const doc = frameDocument(); if (!doc?.querySelector('.reader-content')) return;
+    const documentState = readerDocumentState(doc);
+    const annotationsKey = JSON.stringify([state.annotations, state.aiHighlights, state.highlightColor]);
+    if (documentState.annotationsKey === annotationsKey) {
+      updateAnnotationAnchorStatus(documentState.unresolvedAnnotations);
+      activateReaderSentencePairs(doc);
+      return;
+    }
     closeInlineAnnotation(doc, { immediate: true });
     doc.querySelectorAll('.annotation-note-trigger, mark[data-annotation-id]').forEach((node) => {
       if (node.classList.contains('annotation-note-trigger')) node.remove();
@@ -7002,24 +7305,30 @@
       const end = Number(annotation.end);
       const preciseAnchor = !isAIAnnotation(annotation) && Number.isFinite(start) && Number.isFinite(end) && end > start;
       const key = preciseAnchor
-        ? `${target}\u0000${annotation.surface || ''}\u0000${annotation.source_block_id || ''}\u0000${annotation.page ?? ''}\u0000${start}\u0000${end}`
-        : `${isAIAnnotation(annotation) ? 'ai' : 'manual'}\u0000${target}`;
+        ? `${target}\u0000${annotation.surface || ''}\u0000${annotation.source_block_id || ''}\u0000${annotation.page ?? ''}\u0000${start}\u0000${end}\u0000${annotation.kind || ''}\u0000${annotation.action_id || ''}`
+        : `${isAIAnnotation(annotation) ? 'ai' : 'manual'}\u0000${target}\u0000${annotation.kind || ''}\u0000${annotation.action_id || ''}`;
       visualAnnotations.set(key, annotation);
     });
     let unresolved = 0;
     visualAnnotations.forEach((annotation) => {
       if (!applyMark(annotation) && !isAIAnnotation(annotation)) unresolved += 1;
     });
+    documentState.annotationsKey = annotationsKey;
+    documentState.unresolvedAnnotations = unresolved;
+    updateAnnotationAnchorStatus(unresolved);
+    rebuildReaderSentencePairs(doc);
+    if (readerSearchState.open && doc === frameDocument()) refreshReaderSearch();
+  }
+
+  function updateAnnotationAnchorStatus(unresolved) {
     const annotationStatus = $('#annotation-anchor-status');
     if (annotationStatus) {
       annotationStatus.hidden = unresolved === 0;
       annotationStatus.textContent = unresolved ? `${unresolved} 条标注在当前排版中无法唯一定位，原文与笔记均已保留。` : '';
     }
-    rebuildReaderSentencePairs(doc);
-    if (readerSearchState.open && doc === frameDocument()) refreshReaderSearch();
   }
 
-  async function saveAnnotation(kind, { withNote = false } = {}) {
+  async function saveAnnotation(kind, { withNote = false, action = null } = {}) {
     if (!state.activeJob || !state.selection) return;
     const selection = { ...state.selection };
     if (!selection.block_id || !Number.isFinite(selection.start) || !Number.isFinite(selection.end)) {
@@ -7036,10 +7345,13 @@
       return;
     }
     const jobId = state.activeJob.job_id;
+    const mount = readerMount;
+    if (!readerMountMatches(mount)) return;
     let note = '';
     try {
-      const payload = await api(`/api/jobs/${jobId}/annotations`, jsonOptions({ ...selection, kind, note, category: 'method', color: annotationColorFor(kind), source: 'manual' }));
-      if (state.activeJob?.job_id !== jobId) return;
+      const payload = await api(`/api/jobs/${jobId}/annotations`, jsonOptions({ ...selection, kind, note, category: 'method', color: action?.color || annotationColorFor(kind), source: 'manual', ...(action ? { action_id: action.id, label: action.label } : {}) }));
+      if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
       state.annotations = payload.annotations || [];
       renderFrameAnnotations();
       renderAnnotations();
@@ -7058,8 +7370,77 @@
           if (popover) beginAnnotationEdit(annotation, trigger, popover);
         }
       }
-    } catch (error) { setPanelStatus(error.message, true); }
+    } catch (error) {
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
+      setPanelStatus(error.message, true);
+    }
   }
+  const builtinAnnotationActions = { highlight: '高亮', highlight_note: '高亮笔记', underline: '划线', underline_note: '划线随笔', copy: '复制', chat: '加入 Chat' };
+  function normalizeAnnotationActions(value) {
+    return {
+      hidden_builtin: Array.isArray(value?.hidden_builtin) ? value.hidden_builtin.filter((key) => key in builtinAnnotationActions) : [],
+      custom: Array.isArray(value?.custom) ? value.custom.map((item) => ({ id: String(item.id || ''), label: String(item.label || '').slice(0, 40), kind: item.kind === 'underline' ? 'underline' : 'highlight', color: normalizeAnnotationColor(item.color), enabled: item.enabled !== false })).filter((item) => item.id && item.label) : [],
+    };
+  }
+  function renderSelectionActions() {
+    $$('[data-builtin-action]').forEach((button) => { button.hidden = state.annotationActions.hidden_builtin.includes(button.dataset.builtinAction); });
+    const container = $('#selection-custom-actions');
+    if (!container) return;
+    const actions = state.annotationActions.custom.filter((item) => item.enabled && item.label);
+    container.hidden = !actions.length;
+    container.innerHTML = actions.map((item) => `<button type="button" data-semantic-action="${escapeHTML(item.id)}" style="--semantic-color:${normalizeAnnotationColor(item.color)}"><span class="semantic-action-swatch" aria-hidden="true"></span>${escapeHTML(item.label)}</button>`).join('');
+  }
+  function renderAnnotationActionSettings() {
+    $('#setting-annotation-builtins').innerHTML = Object.entries(builtinAnnotationActions).map(([key, label]) => `<label class="settings-toggle"><span>${label}</span><input type="checkbox" data-annotation-builtin="${key}"${state.annotationActions.hidden_builtin.includes(key) ? '' : ' checked'}></label>`).join('');
+    $('#setting-annotation-custom').innerHTML = state.annotationActions.custom.map((item) => `
+      <div class="annotation-action-row" data-annotation-action-id="${escapeHTML(item.id)}">
+        <input class="annotation-action-name" type="text" data-action-field="label" maxlength="40" value="${escapeHTML(item.label)}" placeholder="标记名称，例如原理段落" aria-label="语义名称">
+        <div class="annotation-action-style"><select data-action-field="kind" aria-label="标记样式"><option value="highlight"${item.kind === 'highlight' ? ' selected' : ''}>高亮</option><option value="underline"${item.kind === 'underline' ? ' selected' : ''}>划线</option></select></div>
+        <input type="color" data-action-field="color" value="${normalizeAnnotationColor(item.color)}" aria-label="标记颜色" title="标记颜色">
+        <label class="settings-toggle annotation-action-enabled"><span>显示</span><input type="checkbox" data-action-field="enabled"${item.enabled ? ' checked' : ''} aria-label="显示语义标记"></label>
+        <button type="button" class="toolbar-icon-button annotation-action-remove" data-remove-annotation-action aria-label="删除语义标记" title="删除标记"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v5M14 11v5"></path></svg></button>
+      </div>`).join('');
+  }
+  $('#add-annotation-action')?.addEventListener('click', () => {
+    if (state.annotationActions.custom.length >= 32) { showToast('最多添加 32 个语义标记。', true); return; }
+    state.annotationActions.custom.push({ id: `action-${crypto.randomUUID()}`, label: '新标记', kind: 'highlight', color: '#f59e0b', enabled: true });
+    renderAnnotationActionSettings();
+    renderSelectionActions();
+    queueSettingsSave(true);
+    $('#setting-annotation-custom .annotation-action-row:last-child [data-action-field="label"]')?.focus();
+  });
+  $('#setting-annotation-builtins')?.addEventListener('change', (event) => {
+    const key = event.target.dataset.annotationBuiltin;
+    if (!key) return;
+    state.annotationActions.hidden_builtin = Object.keys(builtinAnnotationActions).filter((name) => !$(`[data-annotation-builtin="${name}"]`).checked);
+    renderSelectionActions();
+  });
+  $('#setting-annotation-custom')?.addEventListener('input', (event) => {
+    const row = event.target.closest('[data-annotation-action-id]');
+    const action = state.annotationActions.custom.find((item) => item.id === row?.dataset.annotationActionId);
+    const field = event.target.dataset.actionField;
+    if (!action || !field) return;
+    action[field] = field === 'enabled' ? event.target.checked : event.target.value;
+    renderSelectionActions();
+  });
+  $('#setting-annotation-custom')?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-remove-annotation-action]');
+    if (!button) return;
+    const id = button.closest('[data-annotation-action-id]').dataset.annotationActionId;
+    state.annotationActions.custom = state.annotationActions.custom.filter((item) => item.id !== id);
+    renderAnnotationActionSettings();
+    renderSelectionActions();
+    queueSettingsSave(true);
+  });
+  $('#selection-custom-actions')?.addEventListener('click', (event) => {
+    const action = state.annotationActions.custom.find((item) => item.id === event.target.closest('[data-semantic-action]')?.dataset.semanticAction);
+    if (action) void saveAnnotation(action.kind, { action });
+  });
+  $('#selection-copy')?.addEventListener('click', async () => {
+    if (!state.selection?.quote) return;
+    try { await navigator.clipboard.writeText(state.selection.quote); showToast('已复制选区。'); }
+    catch (error) { showToast(`复制失败：${error.message}`, true); }
+  });
   $('#selection-highlight').addEventListener('click', () => saveAnnotation('highlight'));
   $('#selection-highlight-note').addEventListener('click', () => saveAnnotation('highlight', { withNote: true }));
   $('#selection-underline').addEventListener('click', () => saveAnnotation('underline'));
@@ -7225,6 +7606,8 @@
 
   function beginAnnotationEdit(annotation, trigger, popover) {
     const doc = frameDocument();
+    const mount = readerMount;
+    const jobId = state.activeJob?.job_id;
     if (!doc || !popover || !state.activeJob) return;
     const body = popover.querySelector('.annotation-note-popover-body');
     const actions = popover.querySelector('.annotation-note-popover-actions');
@@ -7282,12 +7665,13 @@
       return nextRange;
     };
     const insertImage = async (file, range = savedRange) => {
-      if (!file) return;
+      if (!file || !readerMountMatches(mount) || !editor.isConnected || !popover.contains(editor)) return;
       const imageButton = toolbar.querySelector('.annotation-note-insert-image');
       imageButton.disabled = true;
       imageButton.textContent = '上传中…';
       try {
-        const asset = await uploadNoteAsset(file);
+        const asset = await uploadNoteAsset(file, jobId);
+        if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId || !editor.isConnected || !popover.contains(editor)) return;
         const activeRange = restoreRange(range);
         activeRange.deleteContents();
         const image = doc.createElement('img');
@@ -7306,11 +7690,13 @@
         updateEmptyState();
         showToast('图片已插入笔记。');
       } catch (error) {
-        showToast(error.message, true);
+        if (readerMountMatches(mount)) showToast(error.message, true);
       } finally {
-        imageButton.disabled = false;
-        imageButton.textContent = '图片';
-        toolbar.querySelector('.annotation-note-image-input').value = '';
+        if (readerMountMatches(mount) && editor.isConnected) {
+          imageButton.disabled = false;
+          imageButton.textContent = '图片';
+          toolbar.querySelector('.annotation-note-image-input').value = '';
+        }
       }
     };
 
@@ -7383,33 +7769,48 @@
   async function editAnnotationNote(annotation, note, trigger) {
     if (!state.activeJob) return;
     const jobId = state.activeJob.job_id;
+    const mount = readerMount;
+    if (!readerMountMatches(mount)) return;
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations/${annotation.id}`, jsonOptions({ note }, 'PATCH'));
-      if (state.activeJob?.job_id !== jobId) return;
+      if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
       state.annotations = payload.annotations || state.annotations;
       renderAnnotations();
       renderFrameAnnotations();
       const refreshed = state.annotations.find((item) => item.id === annotation.id) || annotation;
       const refreshedTrigger = frameDocument()?.querySelector(`.annotation-note-trigger[data-annotation-id="${cssEscape(annotation.id)}"]`);
       if (refreshedTrigger) showInlineAnnotation(refreshed, refreshedTrigger);
-    } catch (error) { setPanelStatus(error.message, true); }
+    } catch (error) {
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
+      setPanelStatus(error.message, true);
+    }
   }
 
   async function deleteAnnotation(annotation) {
     if (!state.activeJob || !annotation?.id) return;
     const jobId = state.activeJob.job_id;
+    const mount = readerMount;
+    if (!readerMountMatches(mount)) return;
     try {
       await api(`/api/jobs/${jobId}/annotations/${annotation.id}`, { method: 'DELETE' });
-      if (state.activeJob?.job_id !== jobId) return;
-      removeMark(annotation.id);
+      if (readerMountIsCurrent(mount)) mount.annotations = (mount.annotations || []).filter((item) => item.id !== annotation.id);
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
       closeInlineAnnotation();
       state.annotations = state.annotations.filter((item) => item.id !== annotation.id);
+      renderFrameAnnotations();
       renderAnnotations();
-    } catch (error) { setPanelStatus(error.message, true); }
+    } catch (error) {
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
+      setPanelStatus(error.message, true);
+    }
   }
 
   async function clearManualAnnotations() {
     if (!state.activeJob) return;
+    const jobId = state.activeJob.job_id;
+    const mount = readerMount;
+    if (!readerMountMatches(mount)) return;
     const manualAnnotations = state.annotations.filter((item) => !isAIAnnotation(item));
     if (!manualAnnotations.length) return;
     const notedCount = manualAnnotations.filter(hasAnnotationNote).length;
@@ -7417,29 +7818,74 @@
       `确定删除当前文献的 ${manualAnnotations.length} 条个人标注吗？其中 ${notedCount} 条包含笔记；正文中未列出的纯高亮和划线也会一并删除。AI 阅读重点不会受到影响。`,
       '清空全部个人标注',
     );
-    if (!confirmed) return;
+    if (!confirmed || !readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
     const button = $('#clear-annotations-button');
     button.disabled = true;
-    const jobId = state.activeJob.job_id;
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations`, { method: 'DELETE' });
-      if (state.activeJob?.job_id !== jobId) return;
+      if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
       state.annotations = payload.annotations || [];
       closeInlineAnnotation();
       renderAnnotations();
       renderFrameAnnotations();
       showToast(`已删除 ${payload.deleted ?? manualAnnotations.length} 条个人标注。`);
     } catch (error) {
+      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
       button.disabled = false;
       setPanelStatus(error.message, true);
     }
   }
 
   // Translation extraction, math placeholders, cache lookup and rendering.
+  function translationErrorMessage(error) {
+    const detail = String(error?.message || '未知错误').trim().replace(/^(?:翻译失败[：:]\s*)+/u, '');
+    return `翻译失败：${detail || '未知错误'}`;
+  }
+
   function hashText(value) {
     let hash = 2166136261;
     for (const char of String(value || '')) { hash ^= char.codePointAt(0); hash = Math.imul(hash, 16777619); }
     return (`00000000${(hash >>> 0).toString(16)}`).slice(-8);
+  }
+
+  function translationSourceIdentity({ text = '', formulas = [], markers = [], emphasis = [] }) {
+    if (!formulas.length && !markers.length && !emphasis.length) return String(text);
+    return JSON.stringify([
+      String(text),
+      formulas.map(({ token, tex, markup }) => [token, tex, markup || '']),
+      markers.map(({ token, shape, tone }) => [token, shape, tone]),
+      emphasis.map(({ index, style, tone }) => [index, style, tone || '']),
+    ]);
+  }
+
+  function translationSourceHash(source) {
+    return hashText(translationSourceIdentity(source));
+  }
+
+  function translationSourceMatches(record, source, allowUnhashed = false) {
+    if (record.source_hash === translationSourceHash(source)) return true;
+    const formulas = source.formulas || [];
+    const stored = record.formulas || [];
+    const legacyHash = hashText(source.text);
+    if (record.source_hash && record.source_hash !== legacyHash && (formulas.length || source.markers?.length || source.emphasis?.length)) return false;
+    const sourceMatches = record.source_hash === legacyHash
+      || String(record.source_text || '') === source.text;
+    if (!sourceMatches && !(allowUnhashed && !record.source_hash && !formulas.length && !stored.length)) return false;
+    // Old hashes ignored formula contents. Only reuse their tokenized prose
+    // when every formula can be checked against the current source.
+    return stored.length === formulas.length && formulas.every((formula, index) => {
+      const previous = stored[index];
+      return previous.token === formula.token && previous.tex === formula.tex
+        && (formula.tex !== '[公式原图]' || Boolean(previous.markup && previous.markup === formula.markup));
+    });
+  }
+
+  function cachedTranslationForSource(blockId, source, targetLanguage = translationTargetLanguage(), jobId = state.activeJob?.job_id) {
+    const cached = cachedTranslation(blockId, translationSourceHash(source), targetLanguage, jobId);
+    if (cached) return cached;
+    const legacy = cachedTranslation(blockId, hashText(source.text), targetLanguage, jobId);
+    return legacy && translationSourceMatches(legacy, source) ? legacy : null;
   }
 
   function paragraphSource(block) {
@@ -7471,29 +7917,16 @@
       formulas.push({ token, tex: annotation?.textContent || math.getAttribute('alttext') || math.textContent || '', markup: math.outerHTML });
       math.replaceWith(` ${token} `);
     });
-    // Every emphasis run costs the model two placeholders it has to reproduce
-    // verbatim. A heavily emphasised paragraph carried so many that dropping
-    // one became likely, and the whole translation was discarded for it. Past
-    // the budget the styling is dropped so the text itself still translates.
-    const toneSpans = [...clone.querySelectorAll('.pdf-text-tone')];
-    const strongNodes = [...clone.querySelectorAll('strong')];
-    const keepEmphasis = (toneSpans.length + strongNodes.length) <= MAX_TRANSLATION_EMPHASIS;
-    toneSpans.reverse().forEach((span) => {
-      const spec = keepEmphasis ? pdfTextToneSpec(span) : null;
-      if (!spec) { span.replaceWith(...span.childNodes); return; }
+    // Reverse document order processes descendants before their parents, so
+    // replacing an outer style cannot detach an unprocessed inner style.
+    [...clone.querySelectorAll('.pdf-text-tone, strong')].reverse().forEach((node) => {
+      const spec = node.matches('strong') ? { style: 'bold' } : pdfTextToneSpec(node);
+      if (!spec) { node.replaceWith(...node.childNodes); return; }
       const index = emphasis.length;
       const start = `__MY_SCHOLAR_BOLD_START_${index}__`;
       const end = `__MY_SCHOLAR_BOLD_END_${index}__`;
-      emphasis.push({ index, style: 'color', tone: spec.tone });
-      span.replaceWith(`${start}${span.textContent || ''}${end}`);
-    });
-    strongNodes.reverse().forEach((strong) => {
-      if (!keepEmphasis) { strong.replaceWith(...strong.childNodes); return; }
-      const index = emphasis.length;
-      const start = `__MY_SCHOLAR_BOLD_START_${index}__`;
-      const end = `__MY_SCHOLAR_BOLD_END_${index}__`;
-      emphasis.push({ index, style: 'bold' });
-      strong.replaceWith(`${start}${strong.textContent || ''}${end}`);
+      emphasis.push(spec.style === 'bold' ? { index, style: 'bold' } : { index, style: 'color', tone: spec.tone });
+      node.replaceWith(`${start}${node.textContent || ''}${end}`);
     });
     return { text: String(clone.innerText || clone.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 12000), formulas, markers, emphasis };
   }
@@ -7690,10 +8123,13 @@
     return fragment;
   }
 
-  function cachedTranslation(blockId, sourceHash, targetLanguage = '中文', jobId = state.activeJob?.job_id) {
+  function translationTargetLanguage() { return String(healthAIService('translation')?.target_language || '中文'); }
+
+  function cachedTranslation(blockId, sourceHash, targetLanguage = translationTargetLanguage(), jobId = state.activeJob?.job_id) {
     const profileId = translationProfileId();
     if (!profileId) return null;
-    return translationCacheFor(jobId).find((item) => item.block_id === (blockId || '') && item.source_hash === sourceHash && item.target_language === targetLanguage && String(item.profile_id || '') === profileId);
+    const normalizedLanguage = (value) => ['zh', 'ZH', '中文', 'Chinese'].includes(String(value)) ? 'zh' : String(value).toLowerCase();
+    return translationCacheFor(jobId).find((item) => item.block_id === (blockId || '') && item.source_hash === sourceHash && normalizedLanguage(item.target_language) === normalizedLanguage(targetLanguage) && String(item.profile_id || '') === profileId);
   }
 
   async function streamApiRequest(url, body, onDelta, signal = null) {
@@ -7744,18 +8180,18 @@
 
   async function requestTranslation(text, blockId = null, suppliedFormulas = null, { jobId = state.activeJob?.job_id, onDelta = null, markers = [], emphasis = [], signal = null, refresh = false } = {}) {
     const originalText = String(text || '').trim();
-    const sourceHash = hashText(originalText);
     const profileId = translationProfileId();
     const mathPayload = Array.isArray(suppliedFormulas) ? { text: originalText, formulas: suppliedFormulas } : protectInlineMath(originalText);
+    const source = { text: originalText, formulas: mathPayload.formulas, markers, emphasis };
+    const sourceHash = translationSourceHash(source);
     const tokenPayload = protectSpecialTokens(mathPayload.text);
     const protectedPayload = { text: tokenPayload.text, formulas: mathPayload.formulas, tokens: tokenPayload.tokens };
-    const targetLanguage = '中文';
+    const targetLanguage = translationTargetLanguage();
     // A re-translation asks for a new answer, so the stored one is skipped
     // on both sides -- the server holds the same record.
-    const cached = refresh ? null : cachedTranslation(blockId, sourceHash, targetLanguage, jobId);
+    const cached = refresh ? null : cachedTranslationForSource(blockId, source, targetLanguage, jobId);
     if (cached?.text) {
-      const stored = cached.formulas?.length ? cached.formulas : protectedPayload.formulas;
-      const formulas = stored.map((formula) => (formula.markup ? formula : { ...formula, markup: protectedPayload.formulas.find((item) => item.token === formula.token)?.markup }));
+      const formulas = protectedPayload.formulas;
       const repaired = repairFormulaTokens(cached.text, formulas);
       return {
         text: restoreSpecialTokens(restoreInlineMarkers(restoreInlineMath(repaired, formulas), markers), protectedPayload.tokens),
@@ -7809,6 +8245,7 @@
   function insertTranslation(blockId, text, { pending = false, error = false, cached = false, sourceHash = '', role = '', formulas = [], markers = [], emphasis = [], doc = frameDocument(), batch = false } = {}) {
     const block = translationTarget(blockId, doc);
     if (!block) return null;
+    delete readerDocumentState(doc).annotationsKey;
     doc.querySelectorAll(`.my-scholar-translation[data-for="${cssEscape(blockId || '')}"]`).forEach((node) => node.remove());
     const node = doc.createElement('div');
     node.className = `my-scholar-translation${role ? ` ${role}-translation` : ''}${pending ? ' is-pending' : ''}${error ? ' is-error' : ''}${cached ? ' is-cached' : ''}`;
@@ -7833,10 +8270,10 @@
     }
     block.insertAdjacentElement('afterend', node);
     // Batch callers (cache replay) rebuild these indexes once after the loop.
-    if (!batch) {
-      if (state.annotations.length && doc === frameDocument()) renderFrameAnnotations();
+    if (!batch && doc === frameDocument()) {
+      if (state.annotations.length) renderFrameAnnotations();
       else rebuildReaderSentencePairs(doc);
-      if (doc === frameDocument()) refreshReaderSearch();
+      refreshReaderSearch();
     }
     return node;
   }
@@ -7848,6 +8285,8 @@
     const text = source.text;
     if (!text) return false;
     const profileId = translationProfileId();
+    const mount = readerMounts.get(jobId);
+    const ownsDocument = () => readerMountIsCurrent(mount) && mount.frame.contentDocument === doc;
     if (trigger) { trigger.disabled = true; trigger.textContent = '…'; }
     const isTitle = block?.matches('h1.paper-title, h1[data-translate-block-id]');
     insertTranslation(blockId, '正在翻译…', { pending: true, role: isTitle ? 'title' : '', doc });
@@ -7860,7 +8299,7 @@
       const translated = await requestTranslation(text, blockId, source.formulas, { jobId, markers: source.markers, emphasis: source.emphasis, signal, refresh });
       // A user can switch tabs while the gateway request is in flight. Never
       // insert an old document's response into the newly active iframe.
-      if (state.activeJob?.job_id !== jobId || frameDocument() !== doc || (profileId && translationProfileId() !== profileId)) {
+      if (!ownsDocument() || (profileId && translationProfileId() !== profileId)) {
         removePendingTranslation();
         return false;
       }
@@ -7873,16 +8312,16 @@
         emphasis: translated.emphasis,
         doc,
       });
-      if (!silent) setPanelStatus(translated.cached ? '已使用本地翻译缓存。' : '本段翻译已插入原文下方。');
+      if (!silent && readerMountMatches(mount, doc)) setPanelStatus(translated.cached ? '已使用本地翻译缓存。' : '本段翻译已插入原文下方。');
       return true;
     } catch (error) {
       if (error?.name === 'AbortError' || signal?.aborted) {
         removePendingTranslation();
         return false;
       }
-      if (state.activeJob?.job_id === jobId && frameDocument() === doc && (!profileId || translationProfileId() === profileId)) {
-        insertTranslation(blockId, `翻译失败：${error.message}`, { error: true, role: isTitle ? 'title' : '', doc });
-        if (!silent) setPanelStatus(error.message, true);
+      if (ownsDocument() && (!profileId || translationProfileId() === profileId)) {
+        insertTranslation(blockId, translationErrorMessage(error), { error: true, role: isTitle ? 'title' : '', doc });
+        if (!silent && readerMountMatches(mount, doc)) setPanelStatus(error.message, true);
       } else removePendingTranslation();
       return false;
     } finally {
@@ -7903,6 +8342,7 @@
       trigger.setAttribute('aria-label', '翻译本段');
       trigger.textContent = '译';
       trigger.addEventListener('click', (event) => {
+        if (doc !== frameDocument()) return;
         event.preventDefault();
         event.stopPropagation();
         // Pressing 译 on a paragraph that already shows a translation is a
@@ -7919,6 +8359,10 @@
 
   async function ensureTitleTranslation() {
     const doc = frameDocument();
+    const mount = readerMount;
+    if (!readerMountMatches(mount, doc)) return;
+    await mount.layoutReady;
+    if (!readerMountMatches(mount, doc)) return;
     const title = doc?.querySelector('h1.paper-title[data-block-id], h1[data-translate-block-id]');
     if (!title || !translatableParagraph(title) || !aiServiceEnabled('translation')) return;
     const blockId = title.dataset.blockId || title.dataset.translateBlockId;
@@ -7984,12 +8428,14 @@
     const blockId = block?.dataset.blockId || block?.dataset.translateBlockId || '';
     if (!blockId) return false;
     const source = paragraphSource(block);
-    const sourceHash = hashText(source.text);
+    const sourceHash = translationSourceHash(source);
     const rendered = frameDocument()?.querySelector(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`);
     if (rendered && !rendered.classList.contains('is-pending') && !rendered.classList.contains('is-error')) {
-      return !rendered.dataset.sourceHash || rendered.dataset.sourceHash === sourceHash;
+      if (rendered.dataset.sourceHash === sourceHash) return true;
+      if (!source.formulas.length && !source.markers.length && !source.emphasis.length && !rendered.dataset.sourceHash) return true;
+      return false;
     }
-    return Boolean(cachedTranslation(blockId, sourceHash, '中文')?.text);
+    return Boolean(cachedTranslationForSource(blockId, source)?.text);
   }
 
   const FULL_TRANSLATION_CONCURRENCY = 3;
@@ -8005,14 +8451,20 @@
     return count;
   }
   function acquireTranslationSlot(run) {
+    run.slotAcquired = false;
     if (translatingDocumentCount() < FULL_TRANSLATION_MAX_DOCUMENTS) {
+      run.slotAcquired = true;
       run.phase = 'running';
       return Promise.resolve();
     }
     run.phase = 'queued';
     updateTranslationProgress(run);
     return new Promise((resolve) => {
-      run.wake = () => { run.wake = null; run.phase = 'running'; resolve(); };
+      run.wake = () => {
+        run.wake = null;
+        if (!run.stop) { run.slotAcquired = true; run.phase = 'running'; }
+        resolve();
+      };
       translationSlotWaiters.push(run);
     });
   }
@@ -8027,16 +8479,20 @@
 
   // One paragraph of a run. The run works from its own snapshot of the source,
   // so the request goes out whether or not the document is still mounted; the
-  // result is painted into the reader only when this document is on screen and
-  // otherwise waits in the cache for the next mount to replay.
+  // result stays with its original live document, or in the cache after closing.
   async function translateSnapshot(snapshot, run, { refresh = false } = {}) {
     const { blockId, isTitle, source } = snapshot;
     if (!blockId || !source?.text) return false;
     const role = isTitle ? 'title' : '';
-    const mountedDoc = () => (state.activeJob?.job_id === run.jobId ? frameDocument() : null);
+    const mountedDoc = () => {
+      const { mount, document: originalDocument } = run;
+      return readerMountIsCurrent(mount) && mount.frame.contentDocument === originalDocument ? originalDocument : null;
+    };
     const profileId = translationProfileId();
-    let doc = mountedDoc();
-    if (doc) insertTranslation(blockId, '正在翻译…', { pending: true, role, doc });
+    {
+      const doc = mountedDoc();
+      if (doc) insertTranslation(blockId, '正在翻译…', { pending: true, role, doc });
+    }
     const removePendingTranslation = () => {
       const current = mountedDoc();
       if (!current) return;
@@ -8050,7 +8506,7 @@
         removePendingTranslation();
         return false;
       }
-      doc = mountedDoc();
+      const doc = mountedDoc();
       if (doc) insertTranslation(blockId, translated.text, { cached: translated.cached, sourceHash: translated.sourceHash, role, formulas: translated.formulas, markers: translated.markers, emphasis: translated.emphasis, doc });
       return true;
     } catch (error) {
@@ -8058,8 +8514,8 @@
         removePendingTranslation();
         return false;
       }
-      doc = mountedDoc();
-      if (doc) insertTranslation(blockId, `翻译失败：${error.message}`, { error: true, role, doc });
+      const doc = mountedDoc();
+      if (doc) insertTranslation(blockId, translationErrorMessage(error), { error: true, role, doc });
       return false;
     }
   }
@@ -8120,6 +8576,19 @@
     window.requestAnimationFrame(() => menu.querySelector('[aria-checked="true"]')?.focus({ preventScroll: true }));
   }
 
+  function fullTranslationSnapshot(doc, scope, refresh) {
+    const blocks = translatableBlocks(doc, scope);
+    const pendingBlocks = refresh ? blocks : blocks.filter((block) => !hasUsableTranslation(block));
+    return {
+      total: blocks.length,
+      snapshots: pendingBlocks.map((block) => ({
+        blockId: block.dataset.blockId || block.dataset.translateBlockId,
+        isTitle: block.matches('h1.paper-title, h1[data-translate-block-id]'),
+        source: paragraphSource(block),
+      })),
+    };
+  }
+
   async function runFullTranslation({ refresh = false, scope = translationScope() } = {}) {
     const jobId = state.activeJob?.job_id;
     if (!jobId) return;
@@ -8131,19 +8600,10 @@
       setPanelStatus(message, true);
       return;
     }
-    const doc = frameDocument();
-    if (!doc) return;
-    const blocks = translatableBlocks(doc, scope);
-    const pendingBlocks = refresh ? blocks : blocks.filter((block) => !hasUsableTranslation(block));
-    // A full-document run belongs to the document, not to the view or even to
-    // the mounted iframe: snapshotting every source paragraph up front lets it
-    // keep going while the reader shows something else.
-    const snapshots = pendingBlocks.map((block) => ({
-      blockId: block.dataset.blockId || block.dataset.translateBlockId,
-      isTitle: block.matches('h1.paper-title, h1[data-translate-block-id]'),
-      source: paragraphSource(block),
-    }));
-    const run = { jobId, title: documentTitleFor(jobId), running: true, stop: false, phase: 'pending', wake: null, done: blocks.length - pendingBlocks.length, total: blocks.length, failed: 0, detail: '', abortController: new AbortController() };
+    if (!frameDocument()) return;
+    // Keep DOM locals outside the async run so a queued task can release a closed paper.
+    const { total, snapshots } = fullTranslationSnapshot(frameDocument(), scope, refresh);
+    const run = { jobId, mount: readerMount, document: frameDocument(), title: documentTitleFor(jobId), running: true, stop: false, phase: 'pending', wake: null, done: total - snapshots.length, total, failed: 0, detail: '', abortController: new AbortController() };
     state.translationRuns.set(jobId, run);
     syncTranslationControls();
     let nextIndex = 0;
@@ -8172,17 +8632,23 @@
       } else if (run.failed) {
         showToast(`${prefix}${scopeLabel}翻译完成，但有 ${run.failed} 段失败；失败段落可稍后单独重试。`, true);
       } else {
-        showToast(blocks.length ? (snapshots.length ? `${prefix}${scopeLabel}翻译完成，译文已插入原文下方。` : `${scopeLabel}译文已存在，已直接复用本机缓存。按住 Option 点击可重新翻译${scopeLabel}。`) : '没有找到可翻译的正文段落。');
+        showToast(total ? (snapshots.length ? `${prefix}${scopeLabel}翻译完成，译文已插入原文下方。` : `${scopeLabel}译文已存在，已直接复用本机缓存。按住 Option 点击可重新翻译${scopeLabel}。`) : '没有找到可翻译的正文段落。');
       }
     } catch (error) {
-      showToast(`全文翻译失败：${error.message}`, true);
+      showToast(`全文${translationErrorMessage(error)}`, true);
       if (state.activeJob?.job_id === jobId) setPanelStatus(error.message, true);
     } finally {
       run.running = false;
-      releaseTranslationSlot();
+      run.mount = null;
+      run.document = null;
+      if (run.slotAcquired) {
+        run.slotAcquired = false;
+        releaseTranslationSlot();
+      }
       // A finished run leaves the reading surface unobstructed but keeps its
       // final figures, so the panel still reports them when asked.
       if (state.translationRuns.get(jobId) === run) updateTranslationProgress(run, { visible: false });
+      releaseClosedDocumentCaches(jobId);
       syncTranslationControls();
     }
   }
@@ -8203,6 +8669,8 @@
     const run = jobId ? state.translationRuns.get(jobId) : null;
     if (run?.running) cancelTranslationRun(run);
   }
+
+  $('#view-translation-button')?.addEventListener('click', () => { if (state.activeJob) void openReader(state.activeJob); });
 
   function syncTranslationControls() {
     const jobId = state.activeJob?.job_id;
@@ -8373,7 +8841,7 @@
     $('#annotation-count').textContent = `${notedAnnotations.length} 条笔记`;
     $('#clear-annotations-button').disabled = !manualAnnotations.length;
     if (!notedAnnotations.length) { $('#annotations-list').innerHTML = '<div class="chat-empty">还没有添加笔记。正文中的高亮和划线仍会保留。</div>'; }
-    else $('#annotations-list').innerHTML = notedAnnotations.slice().reverse().map((item) => `<div class="annotation-item ${item.kind === 'underline' ? 'underline' : ''}" data-annotation-id="${escapeHTML(item.id)}" style="--annotation-color:${normalizeAnnotationColor(item.color)}"><div class="annotation-quote">${escapeHTML(item.quote)}</div><div class="annotation-note">${renderMarkdown(item.note)}</div><div class="annotation-meta"><span>第 ${escapeHTML(item.page || '—')} 页</span><button type="button" class="delete-annotation">删除</button></div></div>`).join('');
+    else $('#annotations-list').innerHTML = notedAnnotations.slice().reverse().map((item) => `<div class="annotation-item ${item.kind === 'underline' ? 'underline' : ''}" data-annotation-id="${escapeHTML(item.id)}" style="--annotation-color:${normalizeAnnotationColor(item.color)}"><div class="annotation-quote">${escapeHTML(item.quote)}</div><div class="annotation-note">${renderMarkdown(item.note)}</div><div class="annotation-meta"><span>${item.label ? `${escapeHTML(item.label)} · ` : ''}第 ${escapeHTML(item.page || '—')} 页</span><button type="button" class="delete-annotation">删除</button></div></div>`).join('');
     renderHighlightCards();
     if (!notedAnnotations.length) return;
     $$('.annotation-item').forEach((node) => {
@@ -8923,7 +9391,11 @@
   function chatMathNode(tex, display, doc) {
     const key = `${display ? 'D' : 'I'}:${tex}`;
     const markup = chatMathCache.get(key);
-    if (markup === undefined) chatMathPending.add(key);
+    if (markup !== undefined) { chatMathCache.delete(key); chatMathCache.set(key, markup); }
+    if (markup === undefined) {
+      chatMathPending.add(key);
+      while (chatMathPending.size > 256) chatMathPending.delete(chatMathPending.values().next().value);
+    }
     return translationMathNode({ tex, ...(markup ? { markup } : {}) }, doc) || doc.createTextNode(tex);
   }
 
@@ -8945,6 +9417,7 @@
       batch.forEach((key, index) => {
         const markup = typeof results[index] === 'string' ? results[index] : '';
         chatMathCache.set(key, markup);
+        while (chatMathCache.size > 256) chatMathCache.delete(chatMathCache.keys().next().value);
         if (markup) upgraded = true;
       });
       if (upgraded) renderChat();
@@ -9321,6 +9794,7 @@
     const messages = state.chat;
     renderChatSessionControls();
     if (!messages.length) {
+      chatMathPending.clear();
       if (!container.querySelector(':scope > .chat-empty')) container.innerHTML = '<div class="chat-empty">可以问我：这篇文章的贡献是什么？表格中的指标如何比较？</div>';
       return;
     }
@@ -9470,6 +9944,7 @@
     touchChatThread(thread);
     persistChatSession(jobId);
     if (state.activeJob?.job_id === jobId && envelope.activeSessionId === sessionId) renderChat();
+    releaseClosedDocumentCaches(jobId);
   });
 
   function isActiveReaderJob(jobId) {
@@ -9477,6 +9952,8 @@
   }
 
   async function autoHighlights() {
+    const mount = readerMount;
+    if (!readerMountMatches(mount)) return;
     if (!state.activeJob) return;
     if (!aiServiceEnabled('chat')) {
       setPanelStatus('阅读重点服务当前不可用。', true);
@@ -9484,20 +9961,23 @@
     }
     const jobId = state.activeJob.job_id;
     const button = $('#auto-highlight-button');
+    const requestToken = {};
+    button.highlightRequestToken = requestToken;
     button.dataset.runningJobId = jobId;
     button.disabled = true; button.textContent = '生成中…';
     try {
       const payload = await api(`/api/jobs/${jobId}/auto-highlights`, jsonOptions({}));
-      if (!isActiveReaderJob(jobId)) return;
+      if (!readerMountMatches(mount) || !isActiveReaderJob(jobId)) return;
       await applyHighlightSuggestions(payload.result || {}, jobId);
-      if (!isActiveReaderJob(jobId)) return;
+      if (!readerMountMatches(mount) || !isActiveReaderJob(jobId)) return;
       switchSidebar('highlights-panel');
       setPanelStatus(payload.result?.status === 'local-fallback' ? '模型暂不可用，已显示本地规则候选。' : 'AI 阅读重点已更新。');
     } catch (error) {
-      if (isActiveReaderJob(jobId)) setPanelStatus(error.message, true);
+      if (readerMountMatches(mount) && isActiveReaderJob(jobId)) setPanelStatus(error.message, true);
     }
     finally {
-      if (button.dataset.runningJobId === jobId) {
+      if (readerMountMatches(mount) && button.highlightRequestToken === requestToken) {
+        delete button.highlightRequestToken;
         delete button.dataset.runningJobId;
         button.disabled = false;
         button.textContent = '✦ 重点高亮';
@@ -9507,7 +9987,8 @@
   $('#auto-highlight-button').addEventListener('click', autoHighlights);
 
   async function applyHighlightSuggestions(result, jobId = state.activeJob?.job_id) {
-    if (!isActiveReaderJob(jobId)) return 0;
+    const mount = readerMount;
+    if (!readerMountMatches(mount) || !isActiveReaderJob(jobId)) return 0;
     const suggestions = Array.isArray(result.highlights) ? result.highlights : [];
     state.aiHighlights = suggestions.map((suggestion) => ({
       block_id: String(suggestion.block_id || ''),
@@ -9526,7 +10007,7 @@
     }
     let added = 0;
     for (const suggestion of state.aiHighlights) {
-      if (!isActiveReaderJob(jobId)) break;
+      if (!readerMountMatches(mount) || !isActiveReaderJob(jobId)) break;
       const category = normalizeHighlightCategory(suggestion.category);
       const existing = state.annotations.find((item) => item.block_id === suggestion.block_id && item.quote === suggestion.quote && item.kind === 'highlight' && isAIAnnotation(item));
       if (existing) {
@@ -9535,16 +10016,21 @@
         continue;
       }
       const saved = await api(`/api/jobs/${jobId}/annotations`, jsonOptions({ kind: 'highlight', quote: suggestion.quote, block_id: suggestion.block_id, note: suggestion.reason || '', category, color: 'orange', source: 'ai' }));
-      if (!isActiveReaderJob(jobId)) break;
+      if (readerMountIsCurrent(mount) && saved.annotations) mount.annotations = saved.annotations;
+      if (!readerMountMatches(mount) || !isActiveReaderJob(jobId)) break;
       state.annotations = saved.annotations || state.annotations;
       added += 1;
     }
+    if (!readerMountMatches(mount) || !isActiveReaderJob(jobId)) return added;
+    mount.aiHighlights = state.aiHighlights;
     renderAnnotations();
     renderFrameAnnotations();
     return added;
   }
 
   async function loadAutoHighlights(jobId) {
+    const mount = readerMount;
+    if (!readerMountMatches(mount)) return;
     if (!aiServiceEnabled('chat')) {
       const status = $('#highlight-ai-status');
       if (status) status.textContent = 'AI 重点暂不可用';
@@ -9552,72 +10038,85 @@
     }
     try {
       let payload = await api(`/api/jobs/${jobId}/auto-highlights`);
-      if (!isActiveReaderJob(jobId)) return;
+      if (!readerMountMatches(mount) || !isActiveReaderJob(jobId)) return;
       if (payload.result?.status === 'not-run') payload = await api(`/api/jobs/${jobId}/auto-highlights`, jsonOptions({}));
-      if (!isActiveReaderJob(jobId)) return;
+      if (!readerMountMatches(mount) || !isActiveReaderJob(jobId)) return;
       await applyHighlightSuggestions(payload.result || {}, jobId);
-      if (!isActiveReaderJob(jobId)) return;
+      if (!readerMountMatches(mount) || !isActiveReaderJob(jobId)) return;
       renderFrameAnnotations();
       const status = $('#highlight-ai-status');
       if (status) status.textContent = payload.result?.status === 'local-fallback' ? '本地规则建议 · 点击可采纳或忽略' : 'AI 建议，仅供参考 · 点击可采纳或忽略';
     } catch (error) {
-      if (!isActiveReaderJob(jobId)) return;
+      if (!readerMountMatches(mount) || !isActiveReaderJob(jobId)) return;
       const status = $('#highlight-ai-status');
       if (status) status.textContent = 'AI 重点暂不可用';
     }
   }
 
-  async function loadReaderData(jobId, { notesReady = Promise.resolve(), notesSession = null } = {}) {
-    const mediaLayoutReady = loadMediaLayout(jobId).catch((error) => {
-      state.mediaLayouts.set(jobId, emptyMediaLayout());
-      if (!isActiveReaderJob(jobId)) return;
-      prepareReaderMedia(frameDocument(), jobId);
-      showToast(`媒体宽度加载失败：${error?.message || '未知错误'}`, true);
-    });
+  async function loadReaderData(jobId, { notesReady = Promise.resolve(), notesSession = null, mount = readerMount } = {}) {
+    const current = () => readerMountMatches(mount);
+    if (!mount.layoutStarted) {
+      mount.layoutStarted = true;
+      const mediaReady = loadMediaLayout(jobId, mount).catch((error) => {
+        if (!readerMountIsCurrent(mount)) return;
+        state.mediaLayouts.set(jobId, emptyMediaLayout());
+        if (!current()) return;
+        prepareReaderMedia(frameDocument(), jobId);
+        showToast(`媒体宽度加载失败：${error?.message || '未知错误'}`, true);
+      });
+      const translationsReady = loadTranslationCache(jobId, mount).then(() => {
+        if (!current() || mount.wiredDocument !== frameDocument()) return;
+        renderCachedTranslations({ reconcile: false });
+        renderAnnotations(); renderFrameAnnotations();
+      });
+      mount.layoutReady = Promise.allSettled([translationsReady, mediaReady]);
+    }
+    const annotationRequest = (mount.annotationRequest || 0) + 1;
+    mount.annotationRequest = annotationRequest;
+    const previousAnnotations = mount.annotations;
     const annotationsReady = api(`/api/jobs/${jobId}/annotations`).then((payload) => {
-      if (!isActiveReaderJob(jobId)) return;
-      state.annotations = payload.annotations || [];
+      if (!readerMountIsCurrent(mount) || mount.annotationRequest !== annotationRequest || mount.annotations !== previousAnnotations) return;
+      const annotations = payload.annotations || [];
+      if (JSON.stringify(mount.annotations) === JSON.stringify(annotations)) return;
+      mount.annotations = annotations;
+      if (!current()) return;
+      state.annotations = mount.annotations;
       renderAnnotations();
-      renderFrameAnnotations();
+      if (mount.wiredDocument === frameDocument()) renderFrameAnnotations();
     }).catch((error) => {
-      if (!isActiveReaderJob(jobId)) return;
-      state.annotations = [];
-      renderAnnotations();
-      renderFrameAnnotations();
+      if (!current() || mount.annotationRequest !== annotationRequest) return;
       const message = `高亮笔记加载失败：${error?.message || '未知错误'}`;
       setPanelStatus(message, true);
       showToast(message, true);
     });
-    // Notes and translations no longer wait on each other; both run in
-    // parallel with the media-layout and annotation fetches above.
+    // The shared notes editor keeps its own session and draft protection.
     const notesPromise = Promise.resolve(notesReady).catch(() => {}).then(() => api(`/api/jobs/${jobId}/notes`)).then((payload) => {
-      loadArticleNotes(jobId, payload.markdown || '', notesSession);
+      if (readerMountIsCurrent(mount)) loadArticleNotes(jobId, payload.markdown || '', notesSession);
     }).catch((error) => {
-      handleArticleNotesLoadError(jobId, error, notesSession);
+      if (readerMountIsCurrent(mount)) handleArticleNotesLoadError(jobId, error, notesSession);
     });
-    const translationsPromise = loadTranslationCache(jobId).then(() => {
-      if (!isActiveReaderJob(jobId)) return;
-      renderCachedTranslations();
-      renderAnnotations(); renderFrameAnnotations();
-    });
-    await Promise.all([notesPromise, translationsPromise]);
-    if (!isActiveReaderJob(jobId)) return;
+    await Promise.all([notesPromise, annotationsReady, mount.layoutReady]);
+    if (!current()) return;
     state.chat = chatSession(jobId); renderChat();
-    await annotationsReady;
-    if (!isActiveReaderJob(jobId)) return;
-    await mediaLayoutReady;
-    if (!isActiveReaderJob(jobId)) return;
-    scheduleLateReadingLocationRestore(jobId);
-    // Opening a document must not block on AI; run the suggestion pass once
-    // the reader has settled.
-    scheduleReaderIdle(() => {
-      if (isActiveReaderJob(jobId)) loadAutoHighlights(jobId).catch(() => {});
-    });
+    if (!mount.highlightsLoaded && !mount.highlightsPending) {
+      mount.highlightsPending = true;
+      scheduleReaderIdle(async () => {
+        try {
+          if (!current() || mount.highlightsLoaded) return;
+          await loadAutoHighlights(jobId).catch(() => {});
+          if (current()) { mount.highlightsLoaded = true; mount.aiHighlights = state.aiHighlights; }
+        } finally { mount.highlightsPending = false; }
+      });
+    }
   }
 
   function openReader(job, { addTab = true } = {}) {
     if (!job?.links?.html) return;
     captureCurrentReadingLocation();
+    if (readerMount) {
+      readerMount.annotations = state.annotations;
+      readerMount.aiHighlights = state.aiHighlights;
+    }
     closeChatSessionMenu();
     closeQuickPreview();
     closeImageContextMenu();
@@ -9645,8 +10144,10 @@
       highlightButton.disabled = false;
       highlightButton.textContent = '✦ 重点高亮';
     }
-    state.annotations = [];
-    state.aiHighlights = [];
+    const completedReflowURL = job.reflow?.status === 'completed' ? safeReflowDocumentURL(job.reflow.document_url, job.job_id, job.reflow.generation) : '';
+    const mount = beginReaderMount(job.job_id, completedReflowURL || job.links.html);
+    state.annotations = mount.annotations;
+    state.aiHighlights = mount.aiHighlights;
     state.chat = chatSession(job.job_id);
     setChatHistoryOpen(false, { focus: false });
     const notesSession = prepareArticleNotes(job.job_id);
@@ -9655,15 +10156,18 @@
     state.selection = null;
     state.chatSelection = null;
     renderSelectedContext();
-    $('#reader-view')?.classList.add('is-document-loading');
-    const completedReflowURL = job.reflow?.status === 'completed' ? safeReflowDocumentURL(job.reflow.document_url, job.job_id, job.reflow.generation) : '';
-    beginReaderMount(job.job_id, completedReflowURL || job.links.html);
     switchView('reader-view', { enteringDocumentId: isNewDocument ? job.job_id : null });
     syncTranslationControls();
     syncReflowControls();
     syncTranslationScopeControls();
     markReadingStarted(job.job_id);
-    loadReaderData(job.job_id, { notesReady, notesSession }).catch((error) => setPanelStatus(error.message, true));
+    loadReaderData(job.job_id, { notesReady, notesSession, mount }).catch((error) => {
+      if (readerMountMatches(mount)) setPanelStatus(error.message, true);
+    });
+    if (mount.loaded) void prepareMountedReader(mount);
+    if (mount.ready && !reducedMotionQuery.matches) {
+      mount.transition = mount.frame.animate([{ opacity: 0.88 }, { opacity: 1 }], { duration: 100, easing: 'ease-out' });
+    }
   }
 
   // Local Markdown notes use one editable, rendered surface.
@@ -11067,9 +11571,30 @@
     renderAIStatusHistory();
   }
 
+  function syncTranslationProviderControls() {
+    const provider = $('#setting-translation-provider')?.value || 'openai-compatible';
+    $$('[data-translation-provider-fields]').forEach((field) => { field.hidden = !field.dataset.translationProviderFields.split(' ').includes(provider); });
+    const reuseChat = $('[data-ai-reuse-source="chat"][data-ai-reuse-target="translation"]');
+    if (reuseChat) reuseChat.hidden = provider !== 'openai-compatible';
+  }
+
   function renderAISettings(settings = {}) {
     Object.keys(aiServiceNames).forEach((service) => {
       const config = settings?.[service] || {};
+      if (service === 'translation') {
+        $('#setting-translation-provider').value = config.provider || 'openai-compatible';
+        $('#setting-translation-deepl-tier').value = config.deepl_tier === 'pro' ? 'pro' : 'free';
+        $('#setting-translation-source-language').value = config.source_language || 'auto';
+        $('#setting-translation-target-language').value = config.target_language || 'zh';
+        for (const name of ['access_key_id', 'secret_access_key']) {
+          const input = $(`#setting-translation-${name.replaceAll('_', '-')}`);
+          const button = $(`[data-translation-clear-secret="${name}"]`);
+          input.value = '';
+          input.placeholder = config[`${name}_configured`] ? '已配置；留空保持不变' : '输入服务密钥';
+          button.dataset.clearRequested = 'false';
+          button.disabled = !config[`${name}_configured`];
+        }
+      }
       const baseURL = $(`#setting-${service}-base-url`);
       const model = $(`#setting-${service}-model`);
       const mode = service === 'translation' ? $('#setting-translation-mode') : null;
@@ -11097,6 +11622,7 @@
       if (modelFilter) modelFilter.value = '';
       if (modelStatus) modelStatus.textContent = '';
     });
+    syncTranslationProviderControls();
   }
 
   function aiSettingsFromControls() {
@@ -11105,7 +11631,17 @@
       model: $(`#setting-${service}-model`)?.value.trim() || '',
       api_key: $(`#setting-${service}-api-key`)?.value || '',
       clear_api_key: $(`#setting-${service}-clear-key`)?.dataset.clearRequested === 'true',
-      ...(service === 'translation' ? { mode: $('#setting-translation-mode')?.value === 'chat' ? 'chat' : 'qwen-mt' } : {}),
+      ...(service === 'translation' ? {
+        mode: $('#setting-translation-mode')?.value === 'chat' ? 'chat' : 'qwen-mt',
+        provider: $('#setting-translation-provider')?.value || 'openai-compatible',
+        deepl_tier: $('#setting-translation-deepl-tier')?.value || 'free',
+        source_language: $('#setting-translation-source-language')?.value.trim() || 'auto',
+        target_language: $('#setting-translation-target-language')?.value.trim() || 'zh',
+        access_key_id: $('#setting-translation-access-key-id')?.value || '',
+        secret_access_key: $('#setting-translation-secret-access-key')?.value || '',
+        clear_access_key_id: $('[data-translation-clear-secret="access_key_id"]')?.dataset.clearRequested === 'true',
+        clear_secret_access_key: $('[data-translation-clear-secret="secret_access_key"]')?.dataset.clearRequested === 'true',
+      } : {}),
     }]));
   }
 
@@ -11394,6 +11930,9 @@
   let currentLocalMinerUCandidates = [];
   let currentLocalMinerUDiscoveryState = 'idle';
   let parsingProvidersRequest = 0;
+  let parsingProvidersLoadPromise = null;
+  let parsingProvidersLoadedAt = 0;
+  let remoteParserConnectionPromise = null;
   let parsingInstallPromise = null;
 
   function parsingProviderRecords(payload = {}) {
@@ -11610,21 +12149,33 @@
   }
 
   async function fetchParsingProviders({ render = true } = {}) {
+    const request = parsingProvidersRequest;
     const payload = await api('/api/parsing/providers');
     const remote = parsingProviderRecords(payload).find((provider) => provider.id === 'remote-guzi') || {};
-    renderRemoteParserProvider(remote);
     const provider = remote.configured === true ? remote : localMinerUFromPayload(payload) || { id: 'local-mineru', status: 'artifact_unavailable' };
-    if (render && provider.id !== 'remote-guzi') renderLocalMinerUProvider(provider);
+    if (render && request === parsingProvidersRequest) {
+      renderRemoteParserProvider(remote);
+      if (provider.id !== 'remote-guzi') renderLocalMinerUProvider(provider);
+    }
     return provider;
   }
 
   async function changeRemoteParserConnection(action) {
-    try {
-      const payload = await api(`/api/parsing/providers/remote-guzi/${action}`, { method: 'POST' });
-      renderRemoteParserProvider(payload.provider || {});
-    } catch (error) {
-      showToast(error.message, true);
-    }
+    if (remoteParserConnectionPromise) return remoteParserConnectionPromise;
+    const request = ++parsingProvidersRequest;
+    parsingProvidersLoadedAt = 0;
+    const operation = (async () => {
+      try {
+        const payload = await api(`/api/parsing/providers/remote-guzi/${action}`, { method: 'POST' });
+        if (request === parsingProvidersRequest) {
+          renderRemoteParserProvider(payload.provider || {});
+          parsingProvidersLoadedAt = Date.now();
+        }
+      } catch (error) { showToast(error.message, true); }
+    })();
+    remoteParserConnectionPromise = operation;
+    try { return await operation; }
+    finally { remoteParserConnectionPromise = null; }
   }
   $('#connect-remote-parser')?.addEventListener('click', () => { void changeRemoteParserConnection('connect'); });
   $('#disconnect-remote-parser')?.addEventListener('click', () => { void changeRemoteParserConnection('disconnect'); });
@@ -11647,12 +12198,22 @@
     }
   }
 
-  async function loadParsingProviders() {
+  async function loadParsingProviders({ refresh = false } = {}) {
+    if (remoteParserConnectionPromise) await remoteParserConnectionPromise;
+    if (!refresh && Date.now() - parsingProvidersLoadedAt < 30000) return currentRemoteParserProvider?.configured ? currentRemoteParserProvider : currentLocalMinerUProvider;
+    if (!refresh && parsingProvidersLoadPromise) return parsingProvidersLoadPromise;
+    const operation = readParsingProviders();
+    parsingProvidersLoadPromise = operation;
+    try { return await operation; }
+    finally { if (parsingProvidersLoadPromise === operation) parsingProvidersLoadPromise = null; }
+  }
+
+  async function readParsingProviders() {
     const request = ++parsingProvidersRequest;
     try {
-      const provider = await fetchParsingProviders({ render: false });
+      const provider = await fetchParsingProviders();
       if (request !== parsingProvidersRequest) return provider;
-      if (provider.id !== 'remote-guzi') renderLocalMinerUProvider(provider);
+      parsingProvidersLoadedAt = Date.now();
       if (parsingInstallStates.has(parsingInstallStatus(provider)) && !parsingInstallPromise) {
         parsingInstallPromise = monitorParsingInstall().finally(() => { parsingInstallPromise = null; });
         void parsingInstallPromise.catch(() => {});
@@ -11912,21 +12473,37 @@
   $('#cancel-local-mineru-install')?.addEventListener('click', () => { void cancelLocalMinerUInstall(); });
   $('#remove-local-mineru')?.addEventListener('click', () => { void removeLocalMinerU(); });
 
-  async function loadSettings() {
+  async function loadSettings({ refresh = false } = {}) {
+    if (!refresh && settingsLoadInFlight) return settingsLoadInFlight;
+    if (!refresh && Date.now() - settingsLoadedAt < 30000) return flushPendingSettings();
+    const operation = readSettings().then((loaded) => {
+      if (loaded) settingsLoadedAt = Date.now();
+      return loaded;
+    });
+    settingsLoadInFlight = operation;
+    try { return await operation; }
+    finally { if (settingsLoadInFlight === operation) settingsLoadInFlight = null; }
+  }
+
+  async function readSettings() {
     loadLibraryLocation();
     loadAppInfo();
-    if ($('#settings-view')?.classList.contains('active-view')) loadParsingProviders();
     const generation = ++settingsLoadGeneration;
     try {
       if (!await flushPendingSettings()) return false;
       const revision = settingsSaveRevision;
       const settings = await api('/api/settings');
       if (generation !== settingsLoadGeneration || revision !== settingsSaveRevision || settingsSavedRevision < settingsSaveRevision) return false;
+      const renderKey = JSON.stringify(settings);
+      if (settingsRenderedKey === renderKey) return true;
       aiStatusHistoryRecords = Array.isArray(settings.ai_status_history)
         ? settings.ai_status_history.map((record) => sanitizeAIStatusRecord(record?.results, record?.checkedAt))
         : [];
       aiStatusHistoryPage = 0;
       renderAISettings(settings.ai || {});
+      state.annotationActions = normalizeAnnotationActions(settings.annotation_actions);
+      renderAnnotationActionSettings();
+      renderSelectionActions();
       renderAIServiceCards(state.health?.ai?.services || settings.ai_services || {});
       const metadata = settings.metadata || {};
       state.metadataAutoRetrieve = metadata.auto_retrieve !== false;
@@ -11961,6 +12538,7 @@
       validateShortcutInputs();
       settingsSavedRevision = Math.max(settingsSavedRevision, revision);
       setSettingsSaveStatus('已保存', 'saved');
+      settingsRenderedKey = renderKey;
       return true;
     } catch (error) {
       showToast(`设置读取失败：${error.message}`, true);
@@ -11979,6 +12557,7 @@
     const shortcutValidation = validateShortcutInputs();
     return {
       ai: aiSettingsFromControls(),
+      annotation_actions: state.annotationActions,
       shortcuts: shortcutValidation.shortcuts,
       appearance: appearanceFromControls(),
       metadata: {
@@ -12002,6 +12581,9 @@
   let settingsSaveRequested = false;
   let settingsExitFlushedRevision = -1;
   let settingsLoadGeneration = 0;
+  let settingsLoadInFlight = null;
+  let settingsLoadedAt = 0;
+  let settingsRenderedKey = null;
   function setSettingsSaveStatus(message, stateName = 'saved') {
     const status = $('#settings-save-status');
     if (!status) return;
@@ -12009,6 +12591,11 @@
     status.dataset.state = stateName;
   }
   async function persistSettings() {
+    const invalidAction = state.annotationActions.custom.find((item) => !item.label.trim());
+    if (invalidAction) {
+      setSettingsSaveStatus('语义标记名称不能为空', 'error');
+      return false;
+    }
     window.clearTimeout(settingsSaveTimer);
     settingsSaveTimer = null;
     const shortcutValidation = validateShortcutInputs();
@@ -12029,10 +12616,13 @@
         const response = await api('/api/settings', jsonOptions(submitted));
         settingsSavedRevision = Math.max(settingsSavedRevision, revision);
         if (revision === settingsSaveRevision) {
+          settingsLoadedAt = Date.now();
           state.appearance = normalizeAppearance(response?.settings?.appearance || submitted.appearance, submitted.appearance);
           state.shortcuts = { ...state.shortcuts, ...(response?.settings?.shortcuts || submitted.shortcuts) };
           state.metadataAutoRetrieve = (response?.settings?.metadata || submitted.metadata).auto_retrieve !== false;
           renderAISettings(response?.settings?.ai || submitted.ai);
+          state.annotationActions = normalizeAnnotationActions(response?.settings?.annotation_actions || submitted.annotation_actions);
+          renderSelectionActions();
           if (!state.metadataAutoRetrieve) cancelImportMetadataFollowup();
           state.pendingAppearance = { ...state.appearance };
           applyAppearance();
@@ -12068,6 +12658,7 @@
     return true;
   }
   function queueSettingsSave(immediate = false) {
+    settingsRenderedKey = null;
     settingsSaveRevision += 1;
     settingsExitFlushedRevision = -1;
     setSettingsSaveStatus(immediate ? '正在保存…' : '正在等待保存…', immediate ? 'saving' : 'pending');
@@ -12150,6 +12741,33 @@
     const pageCount = Math.max(1, Math.ceil(readAIStatusHistory().length / aiStatusHistoryPageSize));
     aiStatusHistoryPage = Math.min(pageCount - 1, aiStatusHistoryPage + 1);
     renderAIStatusHistory();
+  });
+
+  $('#setting-translation-provider')?.addEventListener('change', () => {
+    $('#setting-translation-api-key').value = '';
+    $('#setting-translation-api-key').placeholder = '为当前提供商输入密钥';
+    $('#setting-translation-clear-key').disabled = true;
+    syncTranslationProviderControls();
+  });
+  $$('[data-translation-clear-secret]').forEach((button) => button.addEventListener('click', () => {
+    const name = button.dataset.translationClearSecret;
+    $(`#setting-translation-${name.replaceAll('_', '-')}`).value = '';
+    button.dataset.clearRequested = 'true';
+    button.disabled = true;
+    queueSettingsSave(true);
+  }));
+  $('#test-translation-button')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    const result = $('#translation-provider-test-result');
+    button.disabled = true;
+    result.textContent = '正在检测…';
+    try {
+      if (!await flushPendingSettings()) throw new Error('请先解决未保存的设置。');
+      const payload = await api('/api/translation/test', jsonOptions({}));
+      const test = payload.result || {};
+      result.textContent = test.ok ? `连接成功 · ${Math.round(Number(test.elapsed_ms) || 0)} ms` : `检测失败：${test.error || '服务无响应'}`;
+    } catch (error) { result.textContent = `检测失败：${error.message}`; }
+    finally { button.disabled = false; }
   });
 
   $('#test-ai-button').addEventListener('click', async () => {
@@ -12379,9 +12997,9 @@
     if (isActive) captureCurrentReadingLocation();
     mergeReflowJob(job, documentURL);
     if (isActive) {
-      $('#reader-view')?.classList.add('is-document-loading');
-      beginReaderMount(job.job_id, documentURL);
+      openReader(state.activeJob, { addTab: false });
     } else {
+      disposeReaderMount(job.job_id);
       showToast(`${prefix}AI 重排已完成，下次打开即为新版。`);
     }
     run.hideTimer = window.setTimeout(() => dismissReflowRun(run.jobId), 2200);

@@ -40,7 +40,7 @@ ALLOWED_INLINE_TAGS = (
     "sup", "/sup", "sub", "/sub", "br", "em", "/em", "strong", "/strong",
     "i", "/i", "u", "/u",
 )
-REF_RE = re.compile(r"(?<![A-Za-z0-9])\[(\d+(?:\s*[-–]\s*\d+)?(?:\s*,\s*\d+)*)\]")
+REF_RE = re.compile(r"(?<![A-Za-z0-9])\[(\d+(?:\s*[-–]\s*\d+)?(?:\s*,\s*\d+(?:\s*[-–]\s*\d+)?)*)\]")
 # A panel letter is part of the reference ("Fig. 2c, upper"), and \b after the
 # digits refused to match one, so every lettered cross reference stayed plain.
 CROSS_REF_RE = re.compile(
@@ -2205,6 +2205,8 @@ def _linkify_text(value: str, refs: Set[int], anchors: Set[str], unresolved: Lis
                 if "-" in token or "–" in token:
                     try:
                         start, end = re.split(r"\s*[-–]\s*", token)[:2]
+                        if not 0 <= int(end)-int(start) <= 1000:
+                            return raw
                         numbers.extend(range(int(start), int(end) + 1))
                     except ValueError:
                         continue
@@ -2294,18 +2296,28 @@ class BuildState:
 # Semantic HTML assembly for text, references, figures, tables and formulas.
 def _extract_ref_numbers(pages: List[List[Dict[str, Any]]]) -> Set[int]:
     refs: Set[int] = set()
+    reference_mode = False
     for page in pages:
         for item in page:
-            if item.get("type") != "list":
-                continue
             content = item.get("content", {})
             if not isinstance(content, dict):
                 continue
+            if item.get("type") == "title":
+                reference_mode = bool(re.fullmatch(r"\s*(?:References?|Bibliography)\s*", _text_from_content(content), re.I))
+            if item.get("type") == "paragraph" and reference_mode:
+                match = re.match(r"\s*(?:\[(\d+)\]|(\d+)[.)])\s+", _text_from_content(content))
+                if match:
+                    refs.add(int(match[1] or match[2]))
+            if item.get("type") != "list":
+                continue
+            if content.get("list_type") == "reference_list":
+                reference_mode = True
             for entry in content.get("list_items", []) or []:
                 text = _text_from_content(entry)
-                match = re.match(r"\s*\[(\d+)\]", text)
+                match = re.match(r"\s*(?:\[(\d+)\]|(\d+)[.)])\s+", text)
                 if match:
-                    refs.add(int(match.group(1)))
+                    if reference_mode:
+                        refs.add(int(match[1] or match[2]))
     return refs
 
 
@@ -2532,11 +2544,11 @@ def _list_html(item: Dict[str, Any], state: BuildState) -> str:
     lines = [f'<{tag} class="{classes}">']
     for entry in entries:
         text = _text_from_content(entry).strip()
-        number_match = re.match(r"\s*\[(\d+)\]\s*(.*)", text, flags=re.S)
+        number_match = re.match(r"\s*(?:\[(\d+)\]|(\d+)[.)])\s*(.*)", text, flags=re.S)
         if is_refs and number_match:
-            number = int(number_match.group(1))
+            number = int(number_match[1] or number_match[2])
             state.last_reference = number
-            body = _safe_inline(number_match.group(2))
+            body = _safe_inline(number_match[3])
             lines.append(f'<li id="ref-{number}" data-ref="{number}"><span class="ref-number">[{number}]</span> {body}</li>')
         elif is_refs:
             body = _safe_inline(text)
@@ -2764,6 +2776,9 @@ def _build_document_html(
                 if section_kind == "references":
                     state.reference_mode = True
                     reference_started = True
+                elif reference_started:
+                    state.reference_mode = False
+                    reference_started = False
             elif kind == "paragraph":
                 # Standalone equation labels left by some extractors are not
                 # paragraphs; avoid displaying a duplicate (1)/(2).
@@ -2777,6 +2792,12 @@ def _build_document_html(
                     (inline_candidates or {}).get(page_no, []),
                 )
                 record["text"] = _text_from_content(item.get("content", {}))
+                if state.reference_mode:
+                    reference = re.match(r"\s*(?:\[(\d+)\]|(\d+)[.)])\s+", record["text"])
+                    if reference:
+                        number = int(reference[1] or reference[2])
+                        block = block.replace("<p>", f'<p id="ref-{number}" data-ref="{number}" class="reference-item">', 1)
+                        record["reference_numbers"] = [number]
                 paragraph_role = str(ir_metadata.get("section_role") or _inline_section_role(record["text"]))
                 tokens = _special_tokens(record["text"])
                 if tokens:

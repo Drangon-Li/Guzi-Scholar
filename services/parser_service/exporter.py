@@ -16,6 +16,8 @@ import zipfile
 import unicodedata
 from xml.etree import ElementTree
 
+from .bibliography import bibliography_anchors, bibliography_layout, citation_links, is_bibliography_entry, native_reference_duplicates, reference_numbers
+
 
 def save_json(path, data):
     path = Path(path)
@@ -514,24 +516,33 @@ def composite_figures(entries, assignments, groups, source_frames=None):
                 region = [entry for entry in page_entries if min(entry["bbox"][2], frame[2]) > max(entry["bbox"][0], frame[0]) and min(entry["bbox"][3], frame[3]) > max(entry["bbox"][1], frame[1])]
                 if not region or any(entry["scope"] != caption["scope"] or entry["references"] or entry["caption"] or entry.get("toc_heading") or entry.get("toc_entries") or (entry["page"], entry["index"]) in assignments or not (frame[0]-.01 <= entry["bbox"][0] < entry["bbox"][2] <= frame[2]+.01 and frame[1]-.01 <= entry["bbox"][1] < entry["bbox"][3] <= frame[3]+.01) for entry in region):
                     continue
-                media = [entry for entry in region if entry["label"] == "image"]
-                if len(media) < 2:
+                media = [entry for entry in region if entry["label"] in {"image", "table"}]
+                images = [entry for entry in media if entry["label"] == "image"]
+                if len(media) < 2 or not images:
                     continue
+                if len(images) == 1:
+                    # A table can be a figure panel, but only the source frame
+                    # plus explicit panel labels establishes that association.
+                    markers = {entry["plain"].strip("(). ") for entry in region if re.fullmatch(r"\(?[A-Z]\)?[.]?", entry["plain"])}
+                    if len(markers) < 2 or not all(re.search(rf"\b{re.escape(marker)}[,.):]\s", caption["plain"]) for marker in markers):
+                        continue
                 image_box = [min(entry["bbox"][0] for entry in media), min(entry["bbox"][1] for entry in media), max(entry["bbox"][2] for entry in media), max(entry["bbox"][3] for entry in media)]
                 if max(abs(a-b) for a, b in zip(frame, image_box)) > .04:
                     continue
                 def framed_label(entry):
                     box = entry["bbox"]
+                    if re.fullmatch(r"\(?[A-Z]\)?[.]?", entry["plain"]):
+                        return box[2]-box[0] <= .04 and box[3]-box[1] <= .03
                     if entry["label"] not in {"text", "title", "heading"} or len(entry["plain"]) > 200 or box[2]-box[0] > .5 or box[3]-box[1] > .03 or re.match(r"^(?:\d+(?:\.\d+)*|[A-Z]\.\d+)[.)]?\s", entry["plain"]) or re.search(r"[.!?]\s*$", entry["plain"]):
                         return False
                     return any(min(abs(box[3]-image["bbox"][1]), abs(box[1]-image["bbox"][3])) <= .035 and min(box[2], image["bbox"][2])-max(box[0], image["bbox"][0]) >= (box[2]-box[0])*.3 for image in media)
-                if any(entry["label"] != "image" and not framed_label(entry) for entry in region):
+                if any(entry["label"] not in {"image", "table"} and not framed_label(entry) for entry in region):
                     continue
                 following = ordered[caption["order"]+1] if caption["order"]+1 < len(ordered) else None
                 full_caption = following if following and following["page"] == page_number+1 and following["scope"] == caption["scope"] and following["caption"] == caption["caption"] else caption
                 number = caption["caption"][1]
                 suffix = "" if caption["scope"] == "main" else "-" + re.sub(r"[^A-Za-z0-9_-]", "-", caption["scope"])
-                group = {"anchor": f"fig-{number}{suffix}", "kind": "image", "number": number, "scope": caption["scope"], "page": page_number, "order": region[0]["order"], "caption_location": (full_caption["page"], full_caption["index"]), "members": [(entry["page"], entry["index"]) for entry in media]}
+                group = {"anchor": f"fig-{number}{suffix}", "kind": "image", "number": number, "scope": caption["scope"], "page": page_number, "order": region[0]["order"], "caption_location": (full_caption["page"], full_caption["index"]), "members": [(entry["page"], entry["index"]) for entry in images]}
                 groups.append(group)
                 for part, location in enumerate(group["members"], 1):
                     assignments[location] = {"group": group, "anchor": group["anchor"] if part == 1 else f'{group["anchor"]}-part-{part}'}
@@ -735,6 +746,8 @@ def export_document(pdf, fusion_dir, output, title=None, job_id=None):
     native_fonts = None
     counts = {"pages": len(source_pages), "images": 0, "tables": 0, "display_formulas": 0, "references": 0}
     reference_entries, reference_assignments, reference_groups = reference_layout(source_pages)
+    bibliography_targets, duplicate_references = bibliography_layout(reference_entries, source_pages)
+    counts["references"] = len(bibliography_targets)
     previous_reference_assignments = reference_assignments.copy()
     composites = composite_figures(reference_entries, reference_assignments, reference_groups, lambda page: source_figure_frames(pdf, page))
     caption_ids = {group["caption_location"]: "caption-" + group["anchor"] for group in reference_groups if group["caption_location"] not in group["members"]}
@@ -1162,22 +1175,272 @@ def export_document(pdf, fusion_dir, output, title=None, job_id=None):
     html_pages = []
     for pi, (page, ir_page) in enumerate(zip(pages, ir_pages), 1):
         for index, (record, ir_element) in enumerate(zip(page["elements"], ir_page["elements"])):
-            fragment = cross_references(record["html"], reference_entries[pi, index], reference_groups)
+            entry = reference_entries[pi, index]
+            fragment = cross_references(record["html"], entry, reference_groups)
+            location = (pi, index)
+            if location in duplicate_references:
+                fragment = f'<span class="reference-aggregate-anchor" data-block-id="{record["block_id"]}" aria-hidden="true"></span>'
+                record["render_mode"] = "suppressed-reference-aggregate"
+                record["suppression_evidence"] = duplicate_references[location]
+                record["markdown"] = ""
+                ir_element.update({"render_mode": record["render_mode"], "suppression_evidence": record["suppression_evidence"]})
+                ir_element["render"]["markdown"] = ""
+            elif entry["references"] or entry["label"] == "reference":
+                numbers = {number for number, target in bibliography_targets.items() if target == location}
+                fragment = re.sub(r"(<(?:p|div)\b[^>]*>)(.*?)(</(?:p|div)>)", lambda match: match[1] + bibliography_anchors(match[2], numbers) + match[3], fragment, flags=re.S)
+                if len(numbers) == 1:
+                    number = next(iter(numbers))
+                    fragment = re.sub(r"(<(?:p|div)\b)", rf'\1 id="ref-{number}" data-ref="{number}" class="reference-item"', fragment, count=1) if f'id="ref-{number}"' not in fragment else fragment
+                record["reference_numbers"] = sorted(numbers)
+                ir_element["reference_numbers"] = sorted(numbers)
+            else:
+                fragment = citation_links(fragment, bibliography_targets)
             record["html"] = fragment
             ir_element["html"] = fragment
             ir_element["render"]["html"] = fragment
         html_pages.append(f'<section class="pdf-page" id="page-{pi}" data-page="{pi}">' + "\n".join(record["html"] for record in page["elements"]) + '</section>')
-    css = """body{margin:0;background:var(--paper,#faf9f6);color:var(--ink,#242323);font-family:var(--paper-font,Georgia,'Times New Roman',serif);font-size:calc(18px * var(--reader-font-scale,1));line-height:var(--reader-line-height,1.7)}.reader-content{max-width:960px;margin:auto;padding:40px}.pdf-page{padding:12px 0}h1,h2,h3,h4{line-height:1.3}h1{font-size:2em}.paper-toc{font-size:1em;line-height:1.55}.paper-toc ol{list-style:none;padding:0;margin:.6em 0}.paper-toc li{padding:.2em 0 .2em var(--toc-indent,0)}.toc-row{display:grid;grid-template-columns:minmax(2.8em,max-content) minmax(0,1fr) max-content;column-gap:.6em;color:inherit;text-decoration:none}.toc-link:hover .toc-title{text-decoration:underline}.toc-page-label{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}.toc-title{overflow-wrap:anywhere}p{white-space:pre-wrap}figure{margin:24px 0}img{max-width:100%;height:auto}table{border-collapse:collapse;width:100%}td,th{border:1px solid var(--line,#ddd);padding:6px}table p{margin:0}.table-scroll{overflow:auto}.pdf-equation{text-align:center;overflow-x:auto}.equation-layout{display:grid;grid-template-columns:minmax(max-content,1fr) max-content;align-items:center;column-gap:1.5em;padding:.25em 0}.equation-body{min-width:max-content;overflow:visible}.equation-body math{margin:0}.equation-number{white-space:nowrap;font-variant-numeric:tabular-nums}.math-source-visual{display:inline;position:relative}.math-source-text{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.math-source-inline{display:inline;max-height:3.6em;max-width:100%;width:auto}.source-crop{font-size:.8em;color:#666}u{text-underline-offset:.14em}math{font-size:1.08em}strong{font-weight:700}@media(prefers-color-scheme:dark){:root{--paper:#1e2124;--ink:#dcdcde;--line:#55462f;--soft:#32281a}}"""
+    css = """body{margin:0;background:var(--paper,#faf9f6);color:var(--ink,#242323);font-family:var(--paper-font,Georgia,'Times New Roman',serif);font-size:calc(18px * var(--reader-font-scale,1));line-height:var(--reader-line-height,1.7)}.reader-content{max-width:960px;margin:auto;padding:40px}.pdf-page{padding:12px 0}h1,h2,h3,h4{line-height:1.3}h1{font-size:2em}.paper-toc{font-size:1em;line-height:1.55}.paper-toc ol{list-style:none;padding:0;margin:.6em 0}.paper-toc li{padding:.2em 0 .2em var(--toc-indent,0)}.toc-row{display:grid;grid-template-columns:minmax(2.8em,max-content) minmax(0,1fr) max-content;column-gap:.6em;color:inherit;text-decoration:none}.toc-link:hover .toc-title{text-decoration:underline}.toc-page-label{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}.toc-title{overflow-wrap:anywhere}p{white-space:normal;overflow-wrap:anywhere}.reference-item{margin:.55em 0}.reference-aggregate-anchor{display:none}.pdf-page{padding:0}.pdf-page>:first-child{margin-top:0}.pdf-page>:last-child{margin-bottom:0}figure{margin:24px 0}img{max-width:100%;height:auto}table{border-collapse:collapse;width:100%}td,th{border:1px solid var(--line,#ddd);padding:6px}table p{margin:0}.table-scroll{overflow:auto}.pdf-equation{text-align:center;overflow-x:auto}.equation-layout{display:grid;grid-template-columns:minmax(max-content,1fr) max-content;align-items:center;column-gap:1.5em;padding:.25em 0}.equation-body{min-width:max-content;overflow:visible}.equation-body math{margin:0}.equation-number{white-space:nowrap;font-variant-numeric:tabular-nums}.math-source-visual{display:inline;position:relative}.math-source-text{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.math-source-inline{display:inline;max-height:3.6em;max-width:100%;width:auto}.source-crop{font-size:.8em;color:#666}u{text-underline-offset:.14em}math{font-size:1.08em}strong{font-weight:700}@media(prefers-color-scheme:dark){:root{--paper:#1e2124;--ink:#dcdcde;--line:#55462f;--soft:#32281a}}"""
     document_html = f'<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src \'self\' data:; style-src \'unsafe-inline\'"><title>{html.escape(title)}</title><style>{css}</style></head><body><main class="reader-content">' + "\n".join(html_pages) + '</main></body></html>'
-    validation = {"status": "REVIEW" if warnings else "PASS", "warnings": warnings, "source_sha256": source_sha, "page_coverage": len(pages), "math_audit": math_audits}
+    validation = {"status": "REVIEW" if warnings else "PASS", "warnings": warnings, "source_sha256": source_sha, "page_coverage": len(pages), "math_audit": math_audits, "bibliography": {"known_references": sorted(bibliography_targets), "suppressed_aggregates": len(duplicate_references)}}
     metadata = {**fusion, "pages": pages, "summary": counts, "backend": engine, "ir_version": 5, "source_sha256": source_sha, "source_filename": title, "math_audit": math_audits}
     save_json(output / "document.json", metadata)
     save_json(output / "document-ir.json", {"ir_version": 5, "backend": engine, "pages": ir_pages, "suppressed": [], "quality": validation})
     save_json(output / "validation.json", validation)
     (output / "document.html").write_text(document_html, encoding="utf-8")
-    (output / "document.md").write_text("\n\n".join(md_pages) + "\n", encoding="utf-8")
+    (output / "document.md").write_text("\n\n".join(f'<!-- PDF page {page["page"]} -->\n\n' + "\n\n".join(record["markdown"] for record in page["elements"] if record["markdown"]) for page in pages) + "\n", encoding="utf-8")
     save_json(output / "manifest.json", {"job_id": job_id, "source": {"filename": title, "bytes": pdf.stat().st_size, "sha256": source_sha}, "engine": {"name": engine}, "counts": counts, "assets": {"images": sorted(str(p.relative_to(output)) for p in images.iterdir()), "page_thumbnails": page_assets}, "outputs": ["document.html", "document.json", "document-ir.json", "validation.json", "source.pdf", "document.md"], "validation": validation})
     return validation
+
+
+def _cached_records(page):
+    return page.get("blocks", page.get("elements", []))
+
+
+def _cached_source_pages(document):
+    # Source candidates are used only to locate captions and bibliography entries.
+    # They must never replace the already corrected text or math renderings.
+    return [{**page, "blocks": [{**record, "label": record.get("label") or {"paragraph": "text", "equation_interline": "formula"}.get(record.get("type"), record.get("type", "text")), "content": record.get("source_content", record.get("content", record.get("text", "")))} for record in _cached_records(page)]} for page in document["pages"]]
+
+
+def _cached_native_reference_duplicates(pdf, source_pages):
+    candidates = [(pi, page) for pi, page in enumerate(source_pages, 1) if {"reference", "footnote"} <= {block.get("label") for block in page["blocks"]}]
+    if not candidates:
+        return []
+    import pypdfium2 as pdfium
+
+    proposals = []
+    with pdfium.PdfDocument(pdf) as source:
+        for pi, page_data in candidates:
+            page = source[pi-1]
+            text = page.get_textpage()
+            width, height = page.get_size()
+            try:
+                def native_text(bounds):
+                    return text.get_text_bounded(left=bounds[0]*width, bottom=(1-bounds[3])*height, right=bounds[2]*width, top=(1-bounds[1])*height)
+                proposals.extend({"page": pi, **proposal} for proposal in native_reference_duplicates(page_data["blocks"], native_text))
+            finally:
+                text.close()
+                page.close()
+    return proposals
+
+
+def _cached_figure_patches(pdf, source_pages, records, output):
+    """Recompose only figures proved by saved blocks and native PDF frames."""
+    import pypdfium2 as pdfium
+
+    entries, assignments, groups = reference_layout(source_pages)
+    composites = composite_figures(entries, assignments, groups, lambda page: source_figure_frames(pdf, page))
+    patches, assets = {}, []
+    if not composites:
+        return patches, assets
+    with pdfium.PdfDocument(pdf) as source:
+        for composite in composites:
+            host = records[composite["host"]]
+            old_html = host.get("html", "")
+            if not old_html or not re.search(r"<img\b", old_html):
+                continue
+            locations = composite["components"]
+            # A math-bearing paragraph remains in its verified rendering.
+            # Tables enter a composite only through the native frame evidence.
+            if any(records[location].get("math_audit") and entries[location]["label"] not in {"image", "table"} for location in locations):
+                continue
+            outside = [entry for location, entry in entries.items() if entry["page"] == composite["host"][0] and location not in locations]
+            bounds = source_figure_ink_bounds(pdf, composite["host"][0], composite["bbox"], outside)
+            old_bounds = host.get("render_bbox")
+            old_components = set(host.get("figure_group", {}).get("component_block_ids", []))
+            component_ids = [records[location]["block_id"] for location in locations]
+            if old_bounds and all(old_bounds[i] <= bounds[i]+1e-5 for i in (0, 1)) and all(old_bounds[i] >= bounds[i]-1e-5 for i in (2, 3)) and set(component_ids).issubset(old_components):
+                continue
+            page = source[composite["host"][0]-1]
+            width, height = page.get_size()
+            dpi = bounded_visual_dpi(width, height, max(288., 2160*72/((bounds[2]-bounds[0])*width)))
+            bitmap = page.render(scale=dpi/72, crop=(bounds[0]*width, (1-bounds[3])*height, (1-bounds[2])*width, bounds[1]*height))
+            asset = f'assets/images/{host["block_id"]}-cached-figure.png'
+            (output / asset).parent.mkdir(parents=True, exist_ok=True)
+            image = bitmap.to_pil()
+            pixels = list(image.size)
+            image.save(output / asset)
+            image.close()
+            bitmap.close()
+            page.close()
+            fragment = re.sub(r'(<img\b[^>]*\bsrc=")[^"]*(")', lambda match: match[1] + asset + match[2], old_html, count=1)
+            fragment = re.sub(r'(<img\b[^>]*?)\sstyle="[^"]*"', r'\1', fragment, count=1)
+            aliases = []
+            for location in locations:
+                if location == composite["host"]:
+                    continue
+                original = records[location].get("html", "")
+                aliases.extend(re.findall(r'(?<![-\w])id="([^"]+)"', original))
+                if original:
+                    patches[location] = {"html": f'<span class="figure-member-anchor" data-block-id="{records[location]["block_id"]}" aria-hidden="true"></span>', "cached_display": {"mode": "figure-component", "parent_block_id": host["block_id"]}}
+            aliases = [alias for alias in dict.fromkeys(aliases) if f'id="{alias}"' not in fragment]
+            fragment = re.sub(r'(<figure\b[^>]*>)', lambda match: match[1] + "".join(f'<span id="{html.escape(alias, quote=True)}" class="figure-member-anchor"></span>' for alias in aliases), fragment, count=1)
+            patches[composite["host"]] = {"html": fragment, "cached_display": {"mode": "composite-figure", "render_bbox": bounds, "component_block_ids": component_ids, "asset": asset, "asset_provenance": {"kind": "pdf-render", "render_dpi": dpi, "intrinsic_pixels": pixels, "source_bbox": bounds}}}
+            assets.append(asset)
+    return patches, assets
+
+
+def reexport_document(exported_dir, output, source_pdf=None):
+    """Patch a complete cached reader package without rerunning extraction."""
+    exported_dir, output = Path(exported_dir), Path(output)
+    job_file = exported_dir / "job.json"
+    if job_file.is_file():
+        active_render = json.loads(job_file.read_text()).get("active_render")
+        if active_render is not None:
+            raise ValueError(f"Cached refresh cannot use a job container; use its active render package: {exported_dir / 'renders' / str(active_render)}")
+    if output.resolve() == exported_dir.resolve() or output.resolve().is_relative_to(exported_dir.resolve()):
+        raise ValueError("Cached refresh output must be outside the input package")
+    if output.exists():
+        raise FileExistsError(output)
+    document = json.loads((exported_dir / "document.json").read_text())
+    def cached_json(name, default):
+        path = exported_dir / name
+        return json.loads(path.read_text()) if path.is_file() else default
+    manifest = cached_json("manifest.json", {})
+    ir = cached_json("document-ir.json", {"pages": []})
+    validation = cached_json("validation.json", {})
+    raw = (exported_dir / "document.html").read_text()
+    source_pages = _cached_source_pages(document)
+    records = {(pi, index): record for pi, page in enumerate(document["pages"], 1) for index, record in enumerate(_cached_records(page))}
+    expected_ids = [record.get("block_id", record.get("id")) for record in records.values()]
+    for record in records.values():
+        if record.get("html") and record["html"] not in raw:
+            raise ValueError("Cached HTML no longer matches its saved block records")
+    entries, _, _ = reference_layout(source_pages)
+    targets, duplicates = bibliography_layout(entries, source_pages)
+    pdf = Path(source_pdf) if source_pdf else exported_dir / "source.pdf"
+    if (source_pdf or pdf.is_file()) and manifest.get("source", {}).get("sha256") and hashlib.sha256(pdf.read_bytes()).hexdigest() != manifest["source"]["sha256"]:
+        raise ValueError("Cached refresh source PDF identity mismatch")
+    native_duplicates = _cached_native_reference_duplicates(pdf, source_pages) if pdf.is_file() else []
+    native_members = {}
+    for proposal in native_duplicates:
+        canonical = proposal["page"], proposal["canonical_index"]
+        if canonical in duplicates:
+            continue
+        region_members = {canonical, *((proposal["page"], index) for index in proposal["suppressed_indices"])}
+        for number in proposal["reference_numbers"]:
+            if targets.get(number) in region_members:
+                targets[number] = canonical
+        for index in proposal["suppressed_indices"]:
+            native_members[proposal["page"], index] = proposal
+    reference_headings = [entry["order"] for entry in entries.values() if re.fullmatch(r"References?|Bibliography", entry["plain"], re.I)]
+    multiple_bibliographies = len(reference_headings) > 1
+    first_bibliography = min(reference_headings, default=float("inf"))
+    footnotes = {}
+    for location, entry in entries.items():
+        fragment = records[location].get("html", "")
+        explicit_numbers = re.findall(r'data-footnote-number="(\d+)"', fragment)
+        if explicit_numbers:
+            footnotes.setdefault(entry["page"], set()).update(map(int, explicit_numbers))
+        elif entry["label"] == "footnote" or re.search(r'class="[^"]*\bfootnote\b', fragment):
+            match = re.match(r"\s*\[?(\d+)\]?[.)]?\s+", entry["plain"])
+            if match:
+                footnotes.setdefault(entry["page"], set()).add(int(match[1]))
+    patches = {}
+    for location, record in records.items():
+        original = record.get("html", "")
+        if not original:
+            continue
+        entry = entries[location]
+        if location in native_members:
+            evidence = native_members[location]
+            canonical = records[evidence["page"], evidence["canonical_index"]]
+            aliases = [identity for identity in re.findall(r'(?<![-\w])id="([^"]+)"', original) if not re.fullmatch(r"ref-\d+", identity)]
+            fragment = f'<span class="reference-member-anchor" data-block-id="{record["block_id"]}" aria-hidden="true">' + "".join(f'<span id="{html.escape(identity, quote=True)}"></span>' for identity in dict.fromkeys(aliases)) + '</span>'
+            patches[location] = {"html": fragment, "cached_display": {"mode": "suppressed-reference-member", "parent_block_id": canonical["block_id"], "evidence": evidence}}
+            continue
+        if location in duplicates:
+            patches[location] = {"html": f'<span class="reference-aggregate-anchor" data-block-id="{record["block_id"]}" aria-hidden="true"></span>', "cached_display": {"mode": "suppressed-reference-aggregate", "evidence": duplicates[location]}}
+            continue
+        numbers = {number for number, target in targets.items() if target == location}
+        if entry["references"] or entry["label"] == "reference" or is_bibliography_entry(original):
+            missing = {number for number in numbers if not re.search(rf'(?<![-\w])id="ref-{number}"', original)}
+            fragment = re.sub(r"(<(?:p|div)\b[^>]*>)(.*?)(</(?:p|div)>)", lambda match: match[1] + bibliography_anchors(match[2], missing) + match[3], original, flags=re.S)
+        elif entry["label"] == "footnote" or re.search(r'class="[^"]*\bfootnote\b|data-footnote-number=', original):
+            fragment = original
+        elif multiple_bibliographies and entry["order"] >= first_bibliography:
+            fragment = original
+        else:
+            fragment = citation_links(original, targets, superscript=entry["label"] != "footnote", footnote_numbers=footnotes.get(entry["page"], ()))
+        if fragment != original:
+            patches[location] = {"html": fragment}
+    shutil.copytree(exported_dir, output)
+    if source_pdf:
+        shutil.copy2(pdf, output / "source.pdf")
+    assets = []
+    if str(document.get("backend", "")).startswith("guzi-fusion-") and pdf.is_file():
+        figure_patches, assets = _cached_figure_patches(pdf, source_pages, records, output)
+        patches.update(figure_patches)
+    ir_records = {record.get("block_id", record.get("id")): record for page in ir["pages"] for record in page.get("elements", page.get("blocks", []))}
+    for location, changes in patches.items():
+        record = records[location]
+        original = record["html"]
+        if original not in raw:
+            raise ValueError("Cached fragment replacement is ambiguous")
+        raw = raw.replace(original, changes["html"], 1)
+        identity = record.get("block_id", record.get("id"))
+        record.update(changes)
+        page = document["pages"][location[0]-1]
+        for key in ("blocks", "elements"):
+            for peer in page.get(key, []):
+                if peer.get("block_id", peer.get("id")) == identity:
+                    peer.update(changes)
+        if identity in ir_records:
+            ir_record = ir_records[identity]
+            ir_record.update(changes)
+            if "render" in ir_record:
+                ir_record["render"]["html"] = changes["html"]
+    flow_css = '<style id="guzi-cached-flow">.reader-content .pdf-page{padding-top:0;padding-bottom:0;min-height:0;height:auto}.reader-content .pdf-page>:first-child{margin-top:0}.reader-content .pdf-page>:last-child{margin-bottom:0}.reader-content p{white-space:normal;overflow-wrap:anywhere}.reference-aggregate-anchor{display:none}.figure-member-anchor{display:inline}</style>'
+    if 'id="guzi-cached-flow"' not in raw:
+        raw = raw.replace("</head>", flow_css + "</head>", 1)
+    actual_ids = [record.get("block_id", record.get("id")) for page in document["pages"] for record in _cached_records(page)]
+    if actual_ids != expected_ids:
+        raise ValueError("Cached refresh changed stable block IDs")
+    audit = {"mode": "preserve-cached-rendering", "inference_performed": False, "backend_preserved": True, "block_ids_preserved": True, "math_evidence_preserved": True, "changed_blocks": len(patches), "figure_assets": assets, "bibliography": {"known_references": sorted(targets), "suppressed_aggregates": len(duplicates), "native_reference_regions": native_duplicates, "suppressed_reference_members": len(native_members), "later_scopes_deferred": multiple_bibliographies}}
+    validation["cached_refresh"] = audit
+    document["cached_refresh"] = audit
+    document.setdefault("summary", {})["references"] = len(targets)
+    manifest.setdefault("counts", {})["references"] = len(targets)
+    manifest["validation"] = validation
+    manifest.setdefault("assets", {}).setdefault("images", []).extend(asset for asset in assets if asset not in manifest.get("assets", {}).get("images", []))
+    if "citation_audit" in document:
+        document["citation_audit"]["known_references"] = sorted(targets)
+        document["citation_audit"]["unresolved"] = [value for value in document["citation_audit"].get("unresolved", []) if not (re.fullmatch(r"ref-\d+", value) and int(value[4:]) in targets)]
+    save_json(output / "document.json", document)
+    for name, value in (("document-ir.json", ir), ("manifest.json", manifest), ("validation.json", validation)):
+        if (exported_dir / name).is_file():
+            save_json(output / name, value)
+    (output / "document.html").write_text(raw, encoding="utf-8")
+    provenance_file = output / "provenance.json"
+    provenance = json.loads(provenance_file.read_text()) if provenance_file.exists() else {}
+    provenance.setdefault("local_refreshes", []).append({**audit, "renderer_files": {name: hashlib.sha256((Path(__file__).parent / name).read_bytes()).hexdigest() for name in ("exporter.py", "bibliography.py")}})
+    save_json(provenance_file, provenance)
+    return {**validation, "known_references": sorted(targets)}
+
+
+def refresh_cached_layout(exported_dir, output):
+    """Apply conservative cached repairs; no parser/backend fallback is allowed."""
+    return reexport_document(exported_dir, output)
 
 
 def zip_result(directory, target):

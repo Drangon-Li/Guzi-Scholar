@@ -659,6 +659,20 @@ class LayoutPipelineTest(unittest.TestCase):
         self.assertEqual(normalized.count("<table"), 1)
 
 
+    def test_split_reference_paragraphs_keep_targets_after_the_list_pages(self) -> None:
+        pages = [
+            [{"type": "title", "content": {"title_content": "Methods"}}, {"type": "paragraph", "content": {"paragraph_content": "41. Prepare the sample."}}],
+            [{"type": "title", "content": {"title_content": "References"}}, {"type": "list", "content": {"list_type": "reference_list", "list_items": ["[40] Author. Previous paper."]}}],
+            [{"type": "paragraph", "content": {"paragraph_content": "[41] Author. A later paper."}}, {"type": "paragraph", "content": {"paragraph_content": "42. Author. Another later paper."}}],
+            [{"type": "title", "content": {"title_content": "Appendix"}}, {"type": "paragraph", "content": {"paragraph_content": "43. An ordinary numbered step."}}],
+        ]
+        self.assertEqual(_extract_ref_numbers(pages), {40, 41, 42})
+        html, _ = _build_document_html("Paper", pages, {}, [], {})
+        self.assertIn('id="ref-41"', html)
+        self.assertIn('id="ref-42"', html)
+        self.assertNotIn('id="ref-43"', html)
+        self.assertEqual(_extract_ref_numbers([[{"type": "list", "content": {"list_type": "ordered", "list_items": ["[1] Prepare the sample.", "2. Measure it."]}}]]), set())
+
     def test_citations_and_cross_references_resolve(self) -> None:
         unresolved: list[str] = []
         value = _linkify_text("See Fig. 1 and [3, 4].", {3, 4}, {"fig-1"}, unresolved)

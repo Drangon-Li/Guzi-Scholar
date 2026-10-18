@@ -14,6 +14,7 @@ const context = vm.createContext({
   state: { activeJob: { job_id: 'synthetic' } },
   hashText: () => 'hash',
   translationProfileId: () => 'fixture',
+  translationTargetLanguage: () => 'zh',
   protectSpecialTokens: (text) => ({ text, tokens: [] }),
   cachedTranslation: () => null,
   jsonOptions: (body) => ({ body }),
@@ -25,7 +26,13 @@ const context = vm.createContext({
   restoreInlineMarkers: (text) => text,
   restoreInlineMath: (text) => text,
 });
-vm.runInContext(`${functionSource('protectInlineMath', 'const SPECIAL_MATH_TOKEN_RE')}\n${functionSource('requestTranslation', 'function insertTranslation')}\nthis.request = requestTranslation;`, context);
+vm.runInContext(`${functionSource('hashText', 'function paragraphSource')}\n${functionSource('protectInlineMath', 'const SPECIAL_MATH_TOKEN_RE')}\n${functionSource('requestTranslation', 'function insertTranslation')}\nthis.request = requestTranslation;`, context);
+
+vm.runInContext(`${functionSource('translationErrorMessage', 'function hashText')}\nthis.errorMessage = translationErrorMessage;`, context);
+for (const message of ['服务暂不可用', '翻译失败：服务暂不可用', '翻译失败:服务暂不可用', '翻译失败：翻译失败：服务暂不可用']) {
+  assert.equal(context.errorMessage({ message }), '翻译失败：服务暂不可用');
+}
+assert.equal(context.errorMessage({}), '翻译失败：未知错误');
 
 (async () => {
   const costs = 'Costs $4.48 ± $1.02 per article and $200 per batch.';
@@ -40,8 +47,14 @@ vm.runInContext(`${functionSource('protectInlineMath', 'const SPECIAL_MATH_TOKEN
     { token: '__MY_SCHOLAR_MATH_1__', tex: '[公式原图]', markup: '<span class="math-source-visual">[公式原图]</span>' },
   ]);
   assert.deepEqual(requests.at(-1).formulas, [{ token: '__MY_SCHOLAR_MATH_0__', tex: '12' }, { token: '__MY_SCHOLAR_MATH_1__', tex: '[公式原图]' }]);
+  const emphasis = Array.from({ length: 24 }, (_, index) => ({ index, style: index % 2 ? 'color' : 'bold', ...(index % 2 ? { tone: 'blue' } : {}) }));
+  const styled = emphasis.map(({ index }) => `__MY_SCHOLAR_BOLD_START_${index}__phrase-${index}__MY_SCHOLAR_BOLD_END_${index}__`).join(' ');
+  const restored = await context.request(styled, 'many-styles', [], { emphasis });
+  assert.equal(requests.at(-1).text, styled);
+  assert.deepEqual(restored.emphasis, emphasis);
+  assert.equal(restored.text, styled);
   await context.request('Legacy $x^2$ survives.');
   assert.equal(requests.at(-1).text, 'Legacy __MY_SCHOLAR_MATH_0__ survives.');
   assert.deepEqual(requests.at(-1).formulas, [{ token: '__MY_SCHOLAR_MATH_0__', tex: 'x^2' }]);
-  console.log(JSON.stringify({ translationFormulaPayload: true, authoritativeEmptyParagraph: true, authoritativeEmptySelection: true, mixedSupAndSourceImage: true, legacyRawTex: true, checks: 4 }));
+  console.log(JSON.stringify({ translationFormulaPayload: true, authoritativeEmptyParagraph: true, authoritativeEmptySelection: true, mixedSupAndSourceImage: true, legacyRawTex: true, manyEmphasisRunsPreserved: true, errorPrefixNormalized: true, checks: 6 }));
 })().catch((error) => { console.error(error); process.exitCode = 1; });
