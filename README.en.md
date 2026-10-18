@@ -12,7 +12,7 @@ The project code is licensed under [Apache License 2.0](LICENSE). Third-party de
 
 ## Downloads
 
-Download the latest macOS Apple Silicon DMG from the [Releases](https://github.com/Drangon-Li/Guzi-Scholar/releases) page. The current macOS package is the `v0.2.0` GitHub release: it uses ad-hoc signing and has not been signed with an Apple Developer ID or notarized by Apple. If Gatekeeper blocks the first launch, right-click `Guzi Scholar.app` in Finder, choose **Open**, and confirm the prompt. Updates are manual downloads from the Releases page; reliable in-app automatic replacement is not promised. Windows packages are coming after real-machine verification.
+Download the latest macOS Apple Silicon DMG from the [Releases](https://github.com/Drangon-Li/Guzi-Scholar/releases) page. The current macOS package is the `v0.3.0` GitHub release: it uses ad-hoc signing and has not been signed with an Apple Developer ID or notarized by Apple. If Gatekeeper blocks the first launch, right-click `Guzi Scholar.app` in Finder, choose **Open**, and confirm the prompt. Updates are manual downloads from the Releases page; reliable in-app automatic replacement is not promised. Windows packages are coming after real-machine verification.
 
 ## Development
 
@@ -23,3 +23,7 @@ npm run desktop:dev
 ```
 
 The shared desktop source lives in `apps/desktop/`. Platform packaging and launch configuration lives in `platforms/`. Please see [README.md](README.md) for the current feature list, requirements, data model, and contribution notes.
+
+## Remote parsing
+
+Version 0.3.0 can connect to a self-hosted GLM-OCR + MinerU parsing service. The desktop download does not include a public service, credentials, or GPU models. PDFs are uploaded to your configured server; parsed results remain stored locally. See the [remote server setup guide](README.md#远端解析服务器配置) for connection fields, the private configuration file, SSH host verification, deployment prerequisites, and troubleshooting. Translation API credentials are configured separately.

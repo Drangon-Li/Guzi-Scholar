@@ -1444,10 +1444,15 @@ def _run_mineru(
     executable = Path(executable).expanduser().resolve()
     output.mkdir(parents=True, exist_ok=True)
     resolved_backend = normalize_mineru_backend(backend)
+    parse_method = os.environ.get("MY_SCHOLAR_MINERU_PARSE_METHOD", "").strip().lower() or "auto"
+    if parse_method not in {"auto", "txt", "ocr"}:
+        raise LayoutPipelineError(
+            "MY_SCHOLAR_MINERU_PARSE_METHOD 无效：合法值为 auto、txt、ocr。"
+        )
     command = [
         str(executable), "-p", str(pdf_path), "-o", str(output),
         "-b", resolved_backend,
-        "-m", "auto", "-f", "true", "-t", "true",
+        "-m", parse_method, "-f", "true", "-t", "true",
     ]
     if resolved_backend in REMOTE_MINERU_BACKENDS:
         resolved_url = normalize_mineru_server_url(server_url)

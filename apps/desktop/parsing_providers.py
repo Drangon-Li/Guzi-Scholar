@@ -16,6 +16,8 @@ from component_manager import (
 )
 from mineru_discovery import MineruCandidate, clear_discovery_cache, discover_mineru, discover_mineru_candidates
 from pipeline import process_pdf
+from remote_parser_connection import RemoteParserConnection
+from remote_parser_client import RemoteParserError
 
 
 ProgressCallback = Callable[[str, float], None]
@@ -370,17 +372,20 @@ class RemoteGuziProvider:
     provider_id = "remote-guzi"
     kind = "remote"
 
+    def __init__(self, connection: Optional[RemoteParserConnection] = None) -> None:
+        self.connection = connection or RemoteParserConnection(Path(os.environ.get("MY_SCHOLAR_REMOTE_PARSER_CONFIG") or Path(__file__).resolve().parent / "config.local.json"))
+
+    def configured(self) -> bool:
+        try:
+            return self.connection.configured()
+        except RemoteParserError:
+            # A malformed enabled configuration must never select local OCR.
+            return True
+
     def status(self) -> Dict[str, Any]:
         return {
-            "id": self.provider_id,
-            "kind": self.kind,
-            "type": self.kind,
-            "state": "disabled",
-            "reason_code": "not_configured",
-            "ready": False,
-            "configured": False,
-            "can_install": False,
-            "message": "谷子在线解析服务尚未提供。",
+            "id": self.provider_id, "kind": self.kind, "type": self.kind,
+            "can_install": False, **self.connection.status(),
         }
 
     def capability(self) -> Dict[str, Any]:
@@ -393,15 +398,24 @@ class RemoteGuziProvider:
         return False
 
     def remove(self) -> Dict[str, Any]:
-        raise ProviderError("远程解析服务未配置。", code="not_configured")
+        self.connection.close()
+        return self.status()
 
-    def run(
-        self,
-        request: Any,
-        progress: Optional[ProgressCallback] = None,
-        cancel_event: Any = None,
-    ) -> ParsingResult:
-        raise ProviderError("谷子在线解析服务尚未提供。", code="not_configured")
+    def run(self, request: Any, progress: Optional[ProgressCallback] = None, cancel_event: Any = None) -> ParsingResult:
+        try:
+            client = self.connection.client()
+        except RemoteParserError as exc:
+            raise ProviderError(str(exc), code=exc.code, http_status=502) from None
+        parsed = ParsingRequest.from_value(request)
+        started = time.perf_counter()
+        try:
+            manifest = client.run(
+                parsed.source_pdf, parsed.output_dir, source_name=parsed.source_name,
+                job_id=parsed.job_id, progress=progress, cancel_event=cancel_event,
+            )
+        except RemoteParserError as exc:
+            raise ProviderError(str(exc), code=exc.code, http_status=502 if exc.code != "cancelled" else 409) from None
+        return ParsingResult(manifest=manifest, metrics={"provider_id": self.provider_id, "seconds": round(time.perf_counter() - started, 3)})
 
 
 class ParsingProviderRegistry:
@@ -430,6 +444,7 @@ def create_default_registry(
     system_probe: Any = None,
     health_check: Optional[Callable[[Path], Optional[str]]] = None,
     signature_verifier: Any = None,
+    remote_config_path: Optional[Path] = None,
 ) -> ParsingProviderRegistry:
     component_health_check = (lambda path, _manifest: health_check(path)) if health_check else None
     manager = ComponentManager(
@@ -446,7 +461,7 @@ def create_default_registry(
             health_check=health_check,
             project_root=Path(os.environ.get("MY_SCHOLAR_PROJECT_ROOT") or Path(__file__).resolve().parent),
         ),
-        RemoteGuziProvider(),
+        RemoteGuziProvider(RemoteParserConnection(remote_config_path or Path(os.environ.get("MY_SCHOLAR_REMOTE_PARSER_CONFIG") or Path(__file__).resolve().parent / "config.local.json"))),
     ])
 
 

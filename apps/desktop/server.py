@@ -1289,7 +1289,11 @@ def _migrate_job_artifacts(job_dir: Path, manifest: Dict[str, Any]) -> Dict[str,
             manifest_changed = True
     if manifest_changed:
         (job_dir / "manifest.json").write_text(json.dumps(migrated, ensure_ascii=False, indent=2), encoding="utf-8")
-    _migrate_reader_html(job_dir)
+    # Remote fusion packages already carry their current structured renderer.
+    # Legacy migration replaces semantic tables with images and loses MathML.
+    engine = manifest.get("engine") if isinstance(manifest.get("engine"), dict) else {}
+    if engine.get("name") not in {"guzi-fusion-auto-v2", "guzi-fusion-auto-v3"}:
+        _migrate_reader_html(job_dir)
     _clean_legacy_translation_cache(job_dir)
     highlight_result = _read_json_file(job_dir / "ai-highlights.json", {})
     if isinstance(highlight_result, dict) and isinstance(highlight_result.get("highlights"), list):
@@ -1650,14 +1654,15 @@ def _run_conversion_job(job_id: str, source_name: str) -> None:
 
     try:
         attempt_dir.mkdir(parents=True, exist_ok=False)
-        manifest = process_pdf(
-            job_dir / "upload.pdf",
-            attempt_dir,
-            job_id=job_id,
-            source_name=source_name,
-            progress=progress,
-            backend_override="odl",
-        )
+        remote_provider = _parsing_provider_registry().get("remote-guzi")
+        if getattr(remote_provider, "configured", lambda: False)() is True:
+            result = remote_provider.run(ParsingRequest(job_id=job_id, source_pdf=job_dir / "upload.pdf", output_dir=attempt_dir, source_name=source_name), progress=progress)
+            manifest = result.manifest
+        else:
+            manifest = process_pdf(
+                job_dir / "upload.pdf", attempt_dir, job_id=job_id,
+                source_name=source_name, progress=progress, backend_override="odl",
+            )
         source = manifest.setdefault("source", {})
         if record.get("source_sha256"):
             source["sha256"] = record["source_sha256"]
@@ -1747,12 +1752,27 @@ def _forget_reflow_cancel_event(job_id: str, generation: int) -> None:
         REFLOW_CANCEL_EVENTS.pop((str(job_id), int(generation)), None)
 
 
+def _remote_parser_config_path() -> Path:
+    explicit = os.environ.get("MY_SCHOLAR_REMOTE_PARSER_CONFIG")
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    persistent = DATA_ROOT / "remote-parser.config.json"
+    legacy = PROJECT_ROOT / "config.local.json"
+    return persistent if persistent.is_file() or not legacy.is_file() else legacy
+
+
 def _parsing_provider_registry() -> Any:
     global PARSING_PROVIDERS
     with PARSING_PROVIDER_LOCK:
         if PARSING_PROVIDERS is None:
-            PARSING_PROVIDERS = create_default_registry(COMPONENTS_ROOT)
+            PARSING_PROVIDERS = create_default_registry(COMPONENTS_ROOT, remote_config_path=_remote_parser_config_path())
         return PARSING_PROVIDERS
+
+
+def _active_parsing_provider() -> Any:
+    registry = _parsing_provider_registry()
+    remote = registry.get("remote-guzi")
+    return remote if getattr(remote, "configured", lambda: False)() is True else registry.get("local-mineru")
 
 
 def _provider_failure(capability: Dict[str, Any]) -> ProviderError:
@@ -1867,7 +1887,7 @@ def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
             raise PipelineError("原始 PDF 校验失败，已取消重新排版。")
         renders_root.mkdir(parents=True, exist_ok=True)
         attempt_dir.mkdir(parents=False, exist_ok=False)
-        provider_result = _parsing_provider_registry().get("local-mineru").run(
+        provider_result = _active_parsing_provider().run(
             ParsingRequest(
                 job_id=job_id,
                 source_pdf=source_path,
@@ -2157,7 +2177,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._send_json({
                 "ok": True,
                 "service": "my-scholar",
-                "version": "0.2.0",
+                "version": "0.3.0",
                 "readonly": runtime.READONLY_MODE,
                 "shell": os.environ.get("MY_SCHOLAR_SHELL", "reference"),
                 "ai": ai,
@@ -2180,7 +2200,12 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._send_json(_public_settings())
             return
         if path == "/api/parsing/providers":
-            self._send_json({"providers": _parsing_provider_registry().list_capabilities()})
+            registry = _parsing_provider_registry()
+            remote = registry.get("remote-guzi")
+            if getattr(remote, "configured", lambda: False)() is True:
+                self._send_json({"providers": [remote.status()], "active_provider_id": "remote-guzi"})
+            else:
+                self._send_json({"providers": registry.list_capabilities(), "active_provider_id": "local-mineru"})
             return
         if path == "/api/jobs":
             jobs = STORE.list()
@@ -2293,7 +2318,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             "source.pdf",
         }
         render_match = re.fullmatch(
-            r"renders/([1-9][0-9]{0,8})/(document\.html|document\.json|document-ir\.json|manifest\.json|validation\.json|layout-content-list\.json|backend-selection\.json|converter\.log|layout-error\.log|(?:assets/images|pages)/[A-Za-z0-9._@-]+)",
+            r"renders/([1-9][0-9]{0,8})/(document\.html|document\.json|document-ir\.json|manifest\.json|validation\.json|layout-content-list\.json|backend-selection\.json|converter\.log|layout-error\.log|(?:(?:assets/images|pages)/[A-Za-z0-9._@-]+|assets/pages/[A-Za-z0-9._@-]+\.jpg))",
             relative,
         )
         download = "download=1" in query
@@ -2305,7 +2330,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             path = STORE.path(job_id, relative)
         elif relative in allowed:
             path = STORE.path(job_id, relative)
-        elif relative.startswith("assets/images/") or relative.startswith("pages/"):
+        elif relative.startswith("assets/images/") or relative.startswith("pages/") or re.fullmatch(r"assets/pages/[A-Za-z0-9._@-]+\.jpg", relative):
             path = STORE.path(job_id, relative)
         elif NOTE_ASSET_PATH_RE.fullmatch(relative):
             path = STORE.path(job_id, relative)
@@ -2357,6 +2382,21 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return
         if path == "/api/migration/cancel":
             self._cancel_library_migration()
+            return
+        if path in {"/api/parsing/providers/remote-guzi/connect", "/api/parsing/providers/remote-guzi/disconnect"}:
+            try:
+                with PARSING_PROVIDER_LOCK:
+                    _ensure_provider_configuration_idle("更改远端连接")
+                    if any(record.get("status") in {"queued", "running"} for record in (STORE.list() if STORE is not None else [])):
+                        raise ProviderError("文献正在解析，暂不能更改远端连接。", code="busy")
+                    provider = _parsing_provider_registry().get("remote-guzi")
+                    if path.endswith("/connect"):
+                        provider.connection.connect()
+                    else:
+                        provider.connection.close()
+                    self._send_json({"provider": provider.status()})
+            except ProviderError as exc:
+                self._send_provider_error(exc)
             return
         if path == "/api/parsing/providers/local-mineru/install":
             self._start_provider_install("local-mineru")
@@ -2962,6 +3002,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     if same_annotation:
                         self._send_json({"annotation": existing, "annotations": annotations})
                         return
+                render_generation = str(payload.get("render_generation") or "")
+                if render_generation != "base" and not RENDER_GENERATION_RE.fullmatch(render_generation):
+                    render_generation = str(((STORE.get(job_id) if STORE is not None else {}) or {}).get("active_render") or "base")
                 item = {
                     "id": uuid.uuid4().hex,
                     "kind": kind,
@@ -2974,6 +3017,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     "start": start,
                     "end": end,
                     "source": source,
+                    "quote_prefix": str(payload.get("quote_prefix") or "")[-48:],
+                    "quote_suffix": str(payload.get("quote_suffix") or "")[:48],
+                    "render_generation": render_generation,
                     "created_at": utc_now(),
                 }
                 if surface:
@@ -3833,7 +3879,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             with PARSING_PROVIDER_LOCK:
                 if PARSING_INSTALL_THREAD is not None and PARSING_INSTALL_THREAD.is_alive():
                     raise ProviderError("版面引擎正在安装或更新，请完成后再开始 AI 重排。", code="busy")
-                capability = _parsing_provider_registry().get("local-mineru").capability()
+                capability = _active_parsing_provider().capability()
                 if not capability.get("ready"):
                     raise _provider_failure(capability)
                 record = STORE.begin_reflow(job_id)
@@ -4133,6 +4179,8 @@ def main() -> None:
             print("\nStopping My Scholar", flush=True)
         finally:
             httpd.server_close()
+            if PARSING_PROVIDERS is not None:
+                PARSING_PROVIDERS.get("remote-guzi").connection.close()
             for shutdown_signal, handler in previous_handlers.items():
                 signal.signal(shutdown_signal, handler)
     except RuntimeError as exc:

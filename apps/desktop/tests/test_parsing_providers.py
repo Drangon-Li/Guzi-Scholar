@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from component_manager import ComponentError, ComponentManifest  # noqa: E402
 from mineru_discovery import MineruCandidate  # noqa: E402
+from remote_parser_connection import RemoteParserConnection  # noqa: E402
 from parsing_providers import (  # noqa: E402
     LocalMineruProvider,
     ParsingProviderRegistry,
@@ -107,7 +108,7 @@ class ParsingProviderTest(unittest.TestCase):
                 downloader_called = True
 
             with patch.dict(os.environ, {"MY_SCHOLAR_PACKAGED": "1"}):
-                registry = create_default_registry(Path(temp), downloader=downloader)
+                registry = create_default_registry(Path(temp), downloader=downloader, remote_config_path=Path(temp) / "missing-config.json")
                 capabilities = registry.list_capabilities()
             json.dumps(capabilities)
             self.assertEqual([item["id"] for item in capabilities], ["local-mineru", "remote-guzi"])
@@ -274,7 +275,8 @@ class ParsingProviderTest(unittest.TestCase):
         self.assertEqual(caught.exception.http_status, 502)
 
     def test_remote_provider_and_unknown_registry_never_submit(self) -> None:
-        remote = RemoteGuziProvider()
+        with tempfile.TemporaryDirectory(prefix="guzi-unconfigured-remote-") as temp:
+            remote = RemoteGuziProvider(RemoteParserConnection(Path(temp) / "missing-config.json"))
         registry = ParsingProviderRegistry([remote])
         with self.assertRaises(ProviderError) as caught:
             remote.run({"source_pdf": "/tmp/private.pdf"})

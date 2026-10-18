@@ -29,6 +29,24 @@ from ai import TranslationQualityError  # noqa: E402
 from server import AI_STATUS_HISTORY_LIMIT, DataRootLock, MAX_CHAT_IMAGE_BYTES, MAX_NOTE_ASSET_BYTES, JobStore, ScholarHandler, _ai_status_history, _chat_image_context, _copy_ai_profile, _deduplicate_figure_ids, _migrate_job_artifacts, _note_image_type, _public_job, _public_settings, _record_ai_status, _runtime_lock_roots, _store_note_asset, _sync_ai_annotations, _translation_key, _translation_records, _write_content_manifest, _write_settings, _write_translation_records  # noqa: E402
 
 
+class RemoteParserConfigPathTest(unittest.TestCase):
+    def test_persistent_config_precedes_legacy_and_explicit_override_wins(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data = root / "state"
+            data.mkdir()
+            legacy = root / "config.local.json"
+            persistent = data / "remote-parser.config.json"
+            with patch.object(server_module, "DATA_ROOT", data), patch.object(server_module, "PROJECT_ROOT", root), patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(server_module._remote_parser_config_path(), persistent)
+                legacy.write_text("{}")
+                self.assertEqual(server_module._remote_parser_config_path(), legacy)
+                persistent.write_text("{}")
+                self.assertEqual(server_module._remote_parser_config_path(), persistent)
+                with patch.dict(os.environ, {"MY_SCHOLAR_REMOTE_PARSER_CONFIG": str(root / "explicit.json")}):
+                    self.assertEqual(server_module._remote_parser_config_path(), (root / "explicit.json").resolve())
+
+
 class PDFEvidenceWorkerTest(unittest.TestCase):
     def test_dependency_smoke_checks_provider_imports_before_runtime_locks(self) -> None:
         registry = MagicMock()
@@ -749,6 +767,7 @@ class TranslationCacheTest(unittest.TestCase):
                 patch.object(server_module, "LIBRARY", LibraryStub()),
                 patch.object(server_module, "CONVERSION_QUEUE", work_queue),
                 patch.object(server_module, "process_pdf", side_effect=fake_process_pdf),
+                patch.object(server_module, "_parsing_provider_registry", return_value={"remote-guzi": SimpleNamespace(configured=lambda: False)}),
                 patch.object(server_module, "_metadata_settings", return_value={"auto_retrieve": False}),
             ):
                 with ThreadPoolExecutor(max_workers=2) as executor:

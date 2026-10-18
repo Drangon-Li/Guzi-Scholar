@@ -3915,7 +3915,7 @@
   function readerImageTarget(target) {
     const image = target?.closest?.('img');
     if (!image?.matches?.(readerImageSelector)) return null;
-    if (image.matches('.page-raster') || image.closest('.annotation-note-popover, .annotation-note-editor, .source-crop, .page-source')) return null;
+    if (image.matches('.page-raster, .math-source-inline, .source-block-crop') || image.closest('.pdf-source-block, .pdf-equation, .annotation-note-popover, .annotation-note-editor, .source-crop, .page-source')) return null;
     return image;
   }
 
@@ -3926,7 +3926,7 @@
     let url;
     try { url = new URL(source, doc.baseURI); } catch (_) { return null; }
     const figure = image.closest('figure, .figure-cluster') || image.closest('.my-scholar-media-block');
-    const captionNode = figure?.querySelector('figcaption');
+    const captionNode = doc.getElementById(figure?.dataset.captionId || '') || figure?.querySelector('figcaption');
     const caption = captionNode ? paragraphText(captionNode) : '';
     const jobId = state.activeJob.job_id;
     const prefix = `/api/jobs/${jobId}/`;
@@ -3995,6 +3995,7 @@
     const next = normalizedMediaWidth(width);
     block.dataset.mediaWidth = String(next);
     block.style.setProperty('--my-scholar-media-width', `${next}%`);
+    block.style.setProperty('--my-scholar-media-scale', String(next / 100));
     block.querySelectorAll('.my-scholar-media-resize-handle').forEach((handle) => {
       handle.setAttribute('aria-valuenow', String(next));
       handle.setAttribute('aria-valuetext', `${next}%`);
@@ -4003,7 +4004,7 @@
   }
 
   function mediaBlockKey(block, type, index, source = block) {
-    const stable = String(source.dataset.blockId || '').trim();
+    const stable = String(source.dataset.blockId || block.dataset.mediaKey || '').trim();
     if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(stable)) return stable;
     const page = String(source.dataset.page || source.closest('.pdf-page')?.dataset.page || '0').replace(/[^0-9A-Za-z_-]/gu, '') || '0';
     const sources = [...block.querySelectorAll('img')].map((image) => image.getAttribute('src') || '').join('|');
@@ -4043,9 +4044,15 @@
     doc.querySelectorAll('figure.pdf-figure').forEach((figure, index) => add(wrapFigureMedia(figure, 'figure'), 'figure', index, figure));
     doc.querySelectorAll('figure.pdf-table').forEach((figure, index) => add(wrapFigureMedia(figure, 'table'), 'table', index, figure));
     doc.querySelectorAll('.figure-cluster').forEach((cluster, index) => add(wrapFigureMedia(cluster, 'cluster'), 'cluster', index, cluster));
+    doc.querySelectorAll('.my-scholar-media-table-wrapper').forEach((block, index) => add(block, 'table', index));
+    doc.querySelectorAll('.my-scholar-media-image-wrapper').forEach((block, index) => add(block, 'image', index));
     doc.querySelectorAll('table.extracted-table').forEach((table, index) => {
       if (table.closest('figure.pdf-figure, figure.pdf-table, .figure-cluster, .my-scholar-media-block')) return;
       const wrapper = wrapLegacyMedia(table, 'my-scholar-media-table-wrapper');
+      const scroll = doc.createElement('div');
+      scroll.className = 'table-scroll';
+      table.before(scroll);
+      scroll.append(table);
       add(wrapper, 'table', index);
     });
     doc.querySelectorAll(readerImageSelector).forEach((image, index) => {
@@ -4055,6 +4062,43 @@
       add(wrapper, 'image', index);
     });
     return descriptors;
+  }
+
+  function prepareMediaSizing(block) {
+    if (block.querySelector('table')) return;
+    const images = [...block.querySelectorAll('img')];
+    if (block.classList.contains('my-scholar-media-cluster-visual') && images.length > 1) {
+      if (block.dataset.mediaSizingReady) return;
+      const view = block.ownerDocument.defaultView;
+      const limits = images.map((image) => {
+        const style = view.getComputedStyle(image);
+        return { width: parseFloat(style.maxWidth) || Infinity, height: parseFloat(style.maxHeight) || Infinity };
+      });
+      const update = () => {
+        if (images.some((image) => !image.naturalWidth)) return;
+        const widths = images.map((image, index) => Math.min(image.naturalWidth, limits[index].width, limits[index].height * image.naturalWidth / image.naturalHeight));
+        const gap = parseFloat(view.getComputedStyle(block.parentElement).columnGap) || 0;
+        block.style.setProperty('--my-scholar-media-preferred-width', `${widths.reduce((sum, width) => sum + width, 0) + gap * (images.length - 1)}px`);
+        widths.forEach((width, index) => images[index].style.setProperty('--my-scholar-media-panel-weight', String(width)));
+        block.classList.add('my-scholar-media-sized-cluster');
+      };
+      images.forEach((image) => image.addEventListener('load', update));
+      update();
+      block.dataset.mediaSizingReady = 'true';
+      return;
+    }
+    if (images.length !== 1) return;
+    const image = images[0];
+    if (image.classList.contains('my-scholar-media-primary-image')) return;
+    const declared = image.style.width.match(/^([\d.]+)px$/u)?.[1] || image.getAttribute('width');
+    const preferredWidth = Number(declared);
+    const update = () => {
+      const width = preferredWidth > 0 ? preferredWidth : image.naturalWidth;
+      if (width > 0) block.style.setProperty('--my-scholar-media-preferred-width', `${width}px`);
+    };
+    update();
+    image.addEventListener('load', update);
+    image.classList.add('my-scholar-media-primary-image');
   }
 
   function mediaBlockLabel(type) {
@@ -4130,7 +4174,7 @@
     event.preventDefault();
     event.stopPropagation();
     const rect = block.getBoundingClientRect();
-    const containerWidth = block.parentElement?.getBoundingClientRect().width || rect.width;
+    const containerWidth = rect.width / (Number(block.dataset.mediaWidth) / 100 || 1);
     Object.assign(mediaResize, {
       active: true, pointerId: event.pointerId, handle, block, doc, jobId, key,
       side: handle.dataset.mediaResizeSide || 'right', startX: event.clientX,
@@ -4184,6 +4228,7 @@
   function prepareReaderMedia(doc = frameDocument(), jobId = state.activeJob?.job_id) {
     if (!doc || !jobId) return;
     readerMediaBlocks(doc).forEach(({ block, key, type }) => {
+      prepareMediaSizing(block);
       block.classList.add('my-scholar-media-resizable');
       block.dataset.mediaKey = key;
       block.dataset.mediaJobId = jobId;
@@ -4430,7 +4475,15 @@
     const doc = event.currentTarget;
     const element = selectionElement(doc, event);
     if (element?.closest?.('input, textarea, [contenteditable="true"]')) return;
-    if (!isPaperSelectionSurface(element)) event.preventDefault();
+    if (!isPaperSelectionSurface(element)) { event.preventDefault(); return; }
+    if (event.type === 'copy' && event.clipboardData) {
+      const selection = doc.getSelection();
+      if (!selection?.rangeCount || selection.isCollapsed) return;
+      const selected = selection.getRangeAt(0).cloneContents();
+      if (!selected.querySelector('.math-source-visual, .math-source-text, .paragraph-translate-trigger, .annotation-note-trigger')) return;
+      const text = textNodes(selected, doc).map((node) => node.nodeValue).join('');
+      if (text) { event.clipboardData.setData('text/plain', text); event.preventDefault(); }
+    }
   }
 
   function blockForNode(node) { return node?.nodeType === Node.ELEMENT_NODE ? node.closest('[data-block-id]') : node?.parentElement?.closest('[data-block-id]'); }
@@ -4619,6 +4672,10 @@
     const range = doc.createRange();
     range.setStart(startPoint[0], startPoint[1]);
     range.setEnd(endPoint[0], endPoint[1]);
+    const startObject = startPoint[0].parentElement?.closest('.math-source-visual');
+    const endObject = endPoint[0].parentElement?.closest('.math-source-visual');
+    if (startObject && startPoint[1] === 0) range.setStartBefore(startObject);
+    if (endObject && endPoint[1] === endPoint[0].nodeValue.length) range.setEndAfter(endObject);
     return range;
   }
 
@@ -4686,6 +4743,9 @@
       page: block?.dataset.page || translation?.dataset.page || null,
       start,
       end,
+      quote_prefix: canonicalText.slice(Math.max(0, start - 48), start),
+      quote_suffix: canonicalText.slice(end, end + 48),
+      render_generation: activeChatSourceGeneration(),
       anchorRect: { left: rect.left, top: rect.top, bottom: rect.bottom },
     };
     const nextKey = selectionRequestKey(nextSelection);
@@ -4819,8 +4879,8 @@
 
   function previewStructuredClone(source) {
     const htmlAllowed = new Set(['table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td', 'figcaption', 'div', 'span', 'p', 'strong', 'b', 'em', 'i', 'sup', 'sub', 'br', 'code']);
-    const mathAllowed = new Set(['math', 'mrow', 'mi', 'mn', 'mo', 'mtext', 'mfrac', 'msqrt', 'mroot', 'msub', 'msup', 'msubsup', 'munder', 'mover', 'munderover', 'mtable', 'mtr', 'mtd', 'mstyle', 'mpadded', 'mphantom', 'menclose', 'ms', 'semantics', 'annotation']);
-    const mathAttributes = new Set(['display', 'mathvariant', 'displaystyle', 'scriptlevel', 'stretchy', 'fence', 'separator', 'accent', 'accentunder', 'linethickness', 'bevelled', 'notation', 'rowalign', 'columnalign', 'rowspan', 'columnspan']);
+    const mathAllowed = new Set(['math', 'mrow', 'mi', 'mn', 'mo', 'mtext', 'mfrac', 'msqrt', 'mroot', 'msub', 'msup', 'msubsup', 'munder', 'mover', 'munderover', 'mtable', 'mtr', 'mtd', 'mstyle', 'mpadded', 'mphantom', 'menclose', 'ms', 'semantics', 'annotation', 'mspace', 'mmultiscripts', 'mprescripts', 'none']);
+    const mathAttributes = new Set(['display', 'mathvariant', 'displaystyle', 'scriptlevel', 'stretchy', 'fence', 'separator', 'accent', 'accentunder', 'linethickness', 'bevelled', 'notation', 'rowalign', 'columnalign', 'rowspan', 'columnspan', 'width', 'height', 'depth', 'lspace', 'rspace']);
     function clone(node) {
       if (node.nodeType === Node.TEXT_NODE) return document.createTextNode(node.nodeValue);
       if (node.nodeType !== Node.ELEMENT_NODE) return null;
@@ -4837,6 +4897,21 @@
       // MathML; previews keep only the MathML half to avoid duplicated glyphs.
       if (node.classList?.contains('katex-html')) return null;
       const name = String(node.localName || node.tagName || '').toLowerCase();
+      if (name === 'img' && node.classList.contains('math-source-inline')) {
+        const url = safePreviewAssetURL(node.currentSrc || node.src);
+        if (!url) return null;
+        const crop = document.createElement('img');
+        crop.className = 'math-source-inline';
+        crop.src = url;
+        crop.alt = node.alt || '';
+        crop.setAttribute('aria-hidden', 'true');
+        const height = Number(node.dataset.heightEm);
+        const baseline = Number(node.dataset.baselineOffsetEm);
+        if (Number.isFinite(height) && height > 0 && height <= 3.6) crop.dataset.heightEm = String(height);
+        if (Number.isFinite(baseline) && Math.abs(baseline) <= 3.6) crop.dataset.baselineOffsetEm = String(baseline);
+        Object.assign(crop.style, { display: 'inline', verticalAlign: `${Number.isFinite(baseline) ? -baseline : 0}em`, maxHeight: '3.6em', maxWidth: '100%', width: 'auto', height: height > 0 && height <= 3.6 ? `${height}em` : 'auto' });
+        return crop;
+      }
       const isMath = mathAllowed.has(name);
       if (!isMath && !htmlAllowed.has(name)) return null;
       const annotationEncoding = name === 'annotation' ? String(node.getAttribute('encoding') || '').toLowerCase() : '';
@@ -4844,6 +4919,7 @@
       const copy = isMath
         ? document.createElementNS('http://www.w3.org/1998/Math/MathML', name)
         : document.createElement(name);
+      if (name === 'span' && node.matches('.math-source-visual, .math-source-text')) copy.className = node.className;
       ['rowspan', 'colspan', 'scope'].forEach((attribute) => {
         const value = node.getAttribute(attribute);
         if (value && /^[a-z0-9-]{1,16}$/i.test(value)) copy.setAttribute(attribute, value);
@@ -4916,37 +4992,34 @@
     const title = document.createElement('h3');
     title.textContent = link?.textContent?.trim() || (isTable ? '表格预览' : '图片预览');
     card.append(title);
-    if (isTable) {
-      const sourceTable = target.querySelector('table');
-      if (sourceTable) {
-        const shell = document.createElement('div');
-        shell.className = 'quick-preview-table';
-        const table = previewStructuredClone(sourceTable);
-        if (table) shell.append(table);
-        card.append(shell);
-      } else {
-        const sourceImage = target.querySelector('img');
-        const url = safePreviewAssetURL(sourceImage?.currentSrc || sourceImage?.src);
-        if (url) {
-          const image = document.createElement('img');
-          image.src = url;
-          image.alt = '表格原图';
-          attachQuickPreviewZoom(image, sourceImage);
-          card.append(image);
+    const group = target.dataset.mediaGroup;
+    const members = group
+      ? [...target.ownerDocument.querySelectorAll(`[data-media-group="${cssEscape(group)}"]`)]
+      : [target];
+    for (const member of members) {
+      if (isTable) {
+        const sourceTable = member.querySelector('table');
+        if (sourceTable) {
+          const shell = document.createElement('div');
+          shell.className = 'quick-preview-table';
+          const table = previewStructuredClone(sourceTable);
+          if (table) shell.append(table);
+          card.append(shell);
+          continue;
         }
       }
-    } else {
-      const sourceImage = target.querySelector('img');
-      const url = safePreviewAssetURL(sourceImage?.currentSrc || sourceImage?.src);
-      if (url) {
+      const sourceImages = [...member.querySelectorAll('img')].filter((image) => readerImageTarget(image));
+      for (const sourceImage of sourceImages) {
+        const url = safePreviewAssetURL(sourceImage.currentSrc || sourceImage.src);
+        if (!url) continue;
         const image = document.createElement('img');
         image.src = url;
-        image.alt = sourceImage.alt || '论文图片';
+        image.alt = sourceImage.alt || (isTable ? '表格原图' : '论文图片');
         attachQuickPreviewZoom(image, sourceImage);
         card.append(image);
       }
     }
-    const sourceCaption = target.querySelector('figcaption');
+    const sourceCaption = target.ownerDocument.getElementById(target.dataset.captionId || '') || target.querySelector('figcaption');
     if (sourceCaption) {
       const caption = previewStructuredClone(sourceCaption);
       if (caption) {
@@ -5252,7 +5325,7 @@
       const blockId = String(node?.dataset?.blockId || '');
       const title = String(heading.textContent || '').replace(/\s+/g, ' ').trim();
       const level = inferReaderSectionLevel(title, Number(heading.tagName.slice(1)));
-      if (!node || heading.matches('h1.paper-title') || !readerBlockIdPattern.test(blockId) || seen.has(blockId) || !title || title.length > 180) return null;
+      if (!node || heading.matches('h1.paper-title, [data-reader-toc-excluded]') || !readerBlockIdPattern.test(blockId) || seen.has(blockId) || !title || title.length > 180) return null;
       if (/^(?:keywords?|ccs concepts?)\b/iu.test(title)) return null;
       seen.add(blockId);
       return { blockId, level, title, node };
@@ -5323,7 +5396,7 @@
       return false;
     }
     const blocks = [...doc.querySelectorAll('[data-block-id]')];
-    let target = blocks.find((block) => block.dataset.blockId === location.blockId) || null;
+    let target = readerBlockById(location.blockId, doc);
     const exactBlock = Boolean(target);
     if (!target) target = blocks.find((block) => Number(block.dataset.page || block.closest('[data-page]')?.dataset?.page) === location.page) || null;
     let top;
@@ -5395,6 +5468,7 @@
         || hashText(source.text) === record.source_hash
         || String(record.source_text || '') === source.text;
       if (!sourceMatches) continue;
+      if (block.dataset.continuationPages && !record.source_hash && String(record.source_text || '') !== source.text) continue;
       const role = block.matches('h1.paper-title, h1[data-translate-block-id]') ? 'title' : '';
       const tokenPayload = protectSpecialTokens(source.text);
       // Persisted records only carry {token, tex}; graft the live MathML
@@ -5594,14 +5668,116 @@
     else window.setTimeout(fn, 60);
   }
 
+  const readerContinuations = new WeakMap();
+
+  function readerBlockById(blockId, doc = frameDocument()) {
+    return doc?.querySelector(`[data-block-id="${cssEscape(blockId || '')}"]`)
+      || readerContinuations.get(doc)?.get(String(blockId))?.root || null;
+  }
+
+  function joinReaderContinuations(doc) {
+    if (readerContinuations.has(doc)) return;
+    const aliases = new Map();
+    readerContinuations.set(doc, aliases);
+    const pages = [...doc.querySelectorAll('.reader-content > .pdf-page')];
+    let referenceDepth = 0;
+    const boundaries = pages.map((page) => {
+      const blocks = [...page.children].filter((node) => !node.matches('.page-number, .page-label, [data-render-mode="suppressed-margin"]'));
+      return blocks.map((node) => {
+        const text = canonicalBlockText(node, doc);
+        const headingDepth = /^H[1-6]$/u.test(node.tagName) ? Number(node.tagName.slice(1)) : 0;
+        if (headingDepth) {
+          if (/^(?:references|bibliography|参考文献)\s*$/iu.test(text.trim())) referenceDepth = headingDepth;
+          else if (referenceDepth && headingDepth <= referenceDepth) referenceDepth = 0;
+        }
+        let bbox = null;
+        try { bbox = JSON.parse(node.dataset.bbox || 'null'); } catch (_) {}
+        return { node, page: Number(node.dataset.page || page.dataset.page), bbox, text, tag: node.tagName.toLowerCase(),
+          excluded: Boolean(referenceDepth || !node.dataset.blockId || node.matches('.footnote, .paper-metadata, [data-reader-toc-excluded], [data-translation-excluded]')) };
+      });
+    });
+    for (let index = 1; index < boundaries.length; index += 1) {
+      const previous = boundaries[index - 1].at(-1);
+      const next = boundaries[index][0];
+      if (!previous || !next || !window.GuziParagraphContinuation.canJoin(previous, next)) continue;
+      const root = aliases.get(previous.node.dataset.blockId)?.root || previous.node;
+      if (!aliases.has(root.dataset.blockId)) {
+        const segment = doc.createElement('span');
+        segment.dataset.continuationBlockId = root.dataset.blockId;
+        segment.dataset.page = root.dataset.page;
+        segment.append(...root.childNodes);
+        root.append(segment);
+        aliases.set(root.dataset.blockId, { root, page: String(previous.page), start: 0, end: previous.text.length });
+      }
+      const before = canonicalBlockText(root, doc);
+      const separator = /[\s\-\u00ad]$/u.test(before) || /^\s/u.test(next.text) ? '' : ' ';
+      const start = before.length + separator.length;
+      const segment = doc.createElement('span');
+      segment.dataset.continuationBlockId = next.node.dataset.blockId;
+      segment.dataset.page = String(next.page);
+      segment.append(...next.node.childNodes);
+      root.append(doc.createTextNode(separator), segment);
+      aliases.set(next.node.dataset.blockId, { root, page: String(next.page), start, end: start + next.text.length });
+      root.dataset.continuationPages = [...new Set([...aliases.values()].filter((source) => source.root === root).map((source) => source.page))].join(',');
+      next.node.remove();
+    }
+  }
+
   function wireFrame(mount = readerMount) {
     const doc = frameDocument(); if (!readerMountMatches(mount, doc)) return;
+    joinReaderContinuations(doc);
     doc.body.classList.add('reader-embedded');
     let runtimeStyle = doc.querySelector('#my-scholar-annotation-runtime-style');
     if (!runtimeStyle) {
       runtimeStyle = doc.createElement('style');
       runtimeStyle.id = 'my-scholar-annotation-runtime-style';
       runtimeStyle.textContent = `
+        body.reader-embedded {
+          --reader-ui-paper:#fff;
+          --reader-ui-ink:#191919;
+          --reader-ui-muted:#756b60;
+        }
+        @media (prefers-color-scheme:dark) {
+          body.reader-embedded { --reader-ui-paper:#1e2124; --reader-ui-ink:#dcdcde; --reader-ui-muted:#b6afa6; }
+        }
+        .annotation-note-popover,.annotation-note-popover *,
+        .paragraph-translate-trigger,.annotation-note-trigger,.reference-hover-card {
+          box-sizing:border-box;
+        }
+        .annotation-note-popover,.paragraph-translate-trigger,.annotation-note-trigger {
+          font-family:var(--ui-font,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);
+        }
+        .my-scholar-underline {
+          background:transparent;
+          color:inherit;
+          text-decoration:underline 2px var(--highlight-orange,#f59e0b);
+          text-underline-offset:3px;
+        }
+        :is(p,ul,ol)[data-block-id] { position:relative; }
+        .paragraph-translate-trigger {
+          position:absolute;
+          right:-34px;
+          top:50%;
+          transform:translateY(-50%);
+          opacity:0;
+          padding:3px 7px;
+          border:1px solid var(--line,#e7ded2);
+          border-radius:6px;
+          background:var(--paper,var(--reader-ui-paper));
+          color:var(--muted,var(--reader-ui-muted));
+          font-size:11px;
+          line-height:1.2;
+          cursor:pointer;
+          transition:opacity .15s ease,background .15s ease;
+        }
+        .paragraph-translate-trigger:hover,.paragraph-translate-trigger:focus-visible,
+        :is(p,ul,ol)[data-block-id]:hover > .paragraph-translate-trigger {
+          opacity:1;
+          background:var(--soft,#fbf6ed);
+        }
+        @media (max-width:760px) {
+          .paragraph-translate-trigger { right:0; top:-22px; transform:none; opacity:.7; }
+        }
         ::highlight(${readerSearchHighlightName}) {
           background:color-mix(in srgb,var(--accent,#d97706) 12%,transparent);
           color:inherit;
@@ -5650,7 +5826,7 @@
         }
         .annotation-note-editor.is-empty::before {
           content:attr(data-placeholder);
-          color:var(--muted);
+          color:var(--muted,var(--reader-ui-muted));
           pointer-events:none;
         }
         .annotation-note-editor > :first-child { margin-top:0; }
@@ -5668,15 +5844,15 @@
           height:20px;
           flex:0 0 20px;
           padding:0;
-          border:2px solid var(--paper);
+          border:2px solid var(--paper,var(--reader-ui-paper));
           border-radius:50%;
           background:var(--swatch-color);
-          box-shadow:0 0 0 1px color-mix(in srgb,var(--swatch-color) 70%,var(--line));
+          box-shadow:0 0 0 1px color-mix(in srgb,var(--swatch-color) 70%,var(--line,#e7ded2));
           cursor:pointer;
         }
         .annotation-color-swatch:hover { transform:scale(1.08); }
         .annotation-color-swatch[aria-pressed="true"] {
-          box-shadow:0 0 0 2px var(--paper),0 0 0 4px var(--swatch-color);
+          box-shadow:0 0 0 2px var(--paper,var(--reader-ui-paper)),0 0 0 4px var(--swatch-color);
         }
         .annotation-color-swatch[aria-pressed="true"]::after {
           content:'✓';
@@ -5721,13 +5897,34 @@
           outline-offset:2px;
         }
         .annotation-note-trigger {
-          --annotation-color:var(--highlight-orange);
-          border-color:color-mix(in srgb,var(--annotation-color) 72%,var(--line));
+          --annotation-color:var(--highlight-orange,#f59e0b);
+          display:inline-flex;
+          width:17px;
+          height:17px;
+          align-items:center;
+          justify-content:center;
+          margin:0 3px;
+          border:1px solid;
+          border-radius:50%;
+          font-size:10px;
+          line-height:1;
+          vertical-align:2px;
+          cursor:pointer;
+          border-color:color-mix(in srgb,var(--annotation-color) 72%,var(--line,#e7ded2));
           background:color-mix(in srgb,var(--annotation-color) 16%,transparent);
-          color:color-mix(in srgb,var(--annotation-color) 72%,var(--ink));
+          color:color-mix(in srgb,var(--annotation-color) 72%,var(--ink,var(--reader-ui-ink)));
         }
-        .annotation-note-popover { --annotation-color:var(--highlight-orange); }
+        .annotation-note-popover { --annotation-color:var(--highlight-orange,#f59e0b); }
         .annotation-note-popover {
+          position:absolute;
+          z-index:30;
+          padding:11px 12px;
+          border:1px solid var(--line,#e7ded2);
+          border-radius:10px;
+          background:var(--paper,var(--reader-ui-paper));
+          box-shadow:0 12px 32px rgba(30,48,65,.2);
+          color:var(--ink,var(--reader-ui-ink));
+          overflow-wrap:anywhere;
           font-size:calc(var(--reader-content-font-size,17px) * .82);
           line-height:1.48;
           transform-origin:top center;
@@ -5748,33 +5945,45 @@
           gap:4px;
           margin-bottom:8px;
           padding:3px 7px;
-          border:1px dashed color-mix(in srgb,var(--annotation-color) 64%,var(--line));
+          border:1px dashed color-mix(in srgb,var(--annotation-color) 64%,var(--line,#e7ded2));
           border-radius:99px;
-          background:color-mix(in srgb,var(--annotation-color) 8%,var(--paper));
-          color:color-mix(in srgb,var(--annotation-color) 76%,var(--ink));
+          background:color-mix(in srgb,var(--annotation-color) 8%,var(--paper,var(--reader-ui-paper)));
+          color:color-mix(in srgb,var(--annotation-color) 76%,var(--ink,var(--reader-ui-ink)));
           font-size:var(--reader-caption-font-size,12px);
           line-height:1.35;
           font-weight:700;
         }
         .ai-suggestion-reason {
           margin-top:8px;
-          color:var(--muted);
+          color:var(--muted,var(--reader-ui-muted));
           font-size:calc(var(--reader-content-font-size,17px) * .78);
           line-height:1.48;
         }
-        .ai-suggestion-reason strong { color:var(--ink); }
-        .annotation-note-popover-head { color:color-mix(in srgb,var(--annotation-color) 72%,var(--ink)); }
+        .ai-suggestion-reason strong { color:var(--ink,var(--reader-ui-ink)); }
+        .annotation-note-popover-head {
+          display:flex;
+          align-items:baseline;
+          justify-content:space-between;
+          gap:12px;
+          margin-bottom:7px;
+          color:color-mix(in srgb,var(--annotation-color) 72%,var(--ink,var(--reader-ui-ink)));
+        }
         .annotation-note-popover-head strong {
           font-size:calc(var(--reader-content-font-size,17px) * .78);
           line-height:1.35;
         }
         .annotation-note-popover-head span {
+          color:var(--muted,var(--reader-ui-muted));
           font-size:var(--reader-caption-font-size,12px);
           line-height:1.35;
         }
         .annotation-note-popover-quote {
-          border-left-color:var(--annotation-color);
-          background:color-mix(in srgb,var(--annotation-color) 9%,var(--paper));
+          max-height:100px;
+          overflow:auto;
+          padding:7px 8px;
+          border-left:3px solid var(--annotation-color);
+          color:var(--ink,var(--reader-ui-ink));
+          background:color-mix(in srgb,var(--annotation-color) 9%,var(--paper,var(--reader-ui-paper)));
           font-family:var(--reader-content-font-family,var(--paper-font,"Times New Roman",Times,serif));
           font-size:calc(var(--reader-content-font-size,17px) * .78);
           line-height:1.48;
@@ -5785,7 +5994,16 @@
           font-size:calc(var(--reader-content-font-size,17px) * .82);
           line-height:1.48;
         }
-        .annotation-note-popover-body blockquote,.annotation-note-editor blockquote { border-left-color:var(--annotation-color); }
+        .annotation-note-popover-body { margin-top:8px; white-space:normal; }
+        .annotation-note-popover-body p,.annotation-note-editor p { margin:.35em 0; }
+        .annotation-note-popover-body ul,.annotation-note-popover-body ol,
+        .annotation-note-editor ul,.annotation-note-editor ol { margin:.35em 0; padding-left:20px; }
+        .annotation-note-popover-body blockquote,.annotation-note-editor blockquote {
+          margin:.45em 0;
+          padding-left:8px;
+          border-left:3px solid var(--annotation-color);
+          color:var(--muted,var(--reader-ui-muted));
+        }
         .annotation-note-popover-body h1,.annotation-note-popover-body h2,.annotation-note-popover-body h3,
         .annotation-note-editor h1,.annotation-note-editor h2,.annotation-note-editor h3 {
           margin:.5em 0 .3em;
@@ -5796,11 +6014,11 @@
         .annotation-note-popover-body code,.annotation-note-editor code {
           padding:1px 3px;
           border-radius:3px;
-          background:color-mix(in srgb,var(--annotation-color) 10%,var(--soft));
+          background:color-mix(in srgb,var(--annotation-color) 10%,var(--soft,#fbf6ed));
           font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
           font-size:.92em;
         }
-        .annotation-note-popover-body a,.annotation-note-editor a { color:color-mix(in srgb,var(--annotation-color) 70%,var(--ink)); }
+        .annotation-note-popover-body a,.annotation-note-editor a { color:color-mix(in srgb,var(--annotation-color) 70%,var(--ink,var(--reader-ui-ink))); }
         .annotation-note-popover-body img,.annotation-note-editor img {
           display:block;
           max-width:100%;
@@ -5810,9 +6028,9 @@
         }
         .annotation-note-editor-shell {
           overflow:hidden;
-          border:1px solid var(--line);
+          border:1px solid var(--line,#e7ded2);
           border-radius:8px;
-          background:var(--paper);
+          background:var(--paper,var(--reader-ui-paper));
         }
         .annotation-note-editor-shell:focus-within {
           border-color:var(--annotation-color);
@@ -5823,8 +6041,8 @@
           flex-wrap:wrap;
           gap:3px;
           padding:5px;
-          border-bottom:1px solid var(--line);
-          background:color-mix(in srgb,var(--annotation-color) 6%,var(--soft));
+          border-bottom:1px solid var(--line,#e7ded2);
+          background:color-mix(in srgb,var(--annotation-color) 6%,var(--soft,#fbf6ed));
         }
         .annotation-note-formatbar button {
           min-height:25px;
@@ -5832,13 +6050,13 @@
           border:0;
           border-radius:5px;
           background:transparent;
-          color:var(--ink);
+          color:var(--ink,var(--reader-ui-ink));
           font:inherit;
           font-size:var(--reader-caption-font-size,12px);
           cursor:pointer;
         }
         .annotation-note-formatbar button:hover,.annotation-note-formatbar button:focus-visible {
-          background:color-mix(in srgb,var(--annotation-color) 16%,var(--paper));
+          background:color-mix(in srgb,var(--annotation-color) 16%,var(--paper,var(--reader-ui-paper)));
           outline:none;
         }
         .annotation-note-editor[contenteditable="true"] {
@@ -5849,9 +6067,22 @@
           border-radius:0;
           caret-color:var(--annotation-color);
         }
+        .annotation-note-popover-actions { display:flex; flex-wrap:wrap; gap:5px; margin-top:10px; }
         .annotation-note-popover-actions button {
+          padding:4px 7px;
+          border:1px solid var(--line,#e7ded2);
+          border-radius:6px;
+          background:var(--paper,var(--reader-ui-paper));
+          color:var(--ink,var(--reader-ui-ink));
+          font:inherit;
+          cursor:pointer;
           font-size:calc(var(--reader-caption-font-size,12px) * .96);
           line-height:1.25;
+        }
+        .annotation-note-popover-actions button:hover,
+        .annotation-note-popover-actions button:focus-visible {
+          border-color:var(--annotation-color);
+          background:color-mix(in srgb,var(--annotation-color) 12%,var(--paper,var(--reader-ui-paper)));
         }
         .reference-hover-card {
           position:fixed;
@@ -5859,12 +6090,12 @@
           max-height:min(220px,42vh);
           overflow:auto;
           padding:9px 11px;
-          border:1px solid var(--line);
+          border:1px solid var(--line,#e7ded2);
           border-radius:9px;
-          background:color-mix(in srgb,var(--paper) 94%,transparent);
+          background:color-mix(in srgb,var(--paper,var(--reader-ui-paper)) 94%,transparent);
           backdrop-filter:blur(20px) saturate(160%);
           box-shadow:0 10px 30px rgba(30,48,65,.18);
-          color:var(--ink);
+          color:var(--ink,var(--reader-ui-ink));
           font-family:var(--paper-font);
           font-size:calc(var(--reader-content-font-size,17px) * .78);
           line-height:1.5;
@@ -5880,9 +6111,10 @@
         }
         .reader-content .my-scholar-media-resizable {
           --my-scholar-media-width:100%;
+          --my-scholar-media-scale:1;
           position:relative!important;
           box-sizing:border-box;
-          width:min(var(--my-scholar-media-width),100%)!important;
+          width:calc(min(var(--my-scholar-media-preferred-width,100%),100%) * var(--my-scholar-media-scale))!important;
           max-width:100%!important;
           margin-left:auto!important;
           margin-right:auto!important;
@@ -5890,6 +6122,36 @@
         }
         .reader-content .my-scholar-media-visual {
           min-width:0;
+        }
+        .reader-content .my-scholar-media-resizable .my-scholar-media-primary-image {
+          display:block!important;
+          width:100%!important;
+          max-width:100%!important;
+          height:auto!important;
+          margin-left:auto!important;
+          margin-right:auto!important;
+        }
+        .reader-content .my-scholar-media-resizable :is(.table-source-primary,a.asset-link) {
+          display:block;
+          width:100%;
+        }
+        .reader-content .my-scholar-media-resizable table {
+          width:100%!important;
+          margin-left:auto;
+          margin-right:auto;
+        }
+        .reader-content .my-scholar-media-sized-cluster {
+          display:flex;
+          align-items:flex-start;
+          gap:inherit;
+        }
+        .reader-content .my-scholar-media-sized-cluster > img {
+          flex:var(--my-scholar-media-panel-weight) 1 0;
+          min-width:0;
+          max-width:100%;
+          max-height:none;
+          height:auto;
+          margin:0;
         }
         .reader-content .my-scholar-media-resizable.is-resizing {
           transition:none;
@@ -5909,8 +6171,20 @@
           margin-right:auto;
         }
         .reader-content .my-scholar-media-table-wrapper {
+          overflow:visible;
+        }
+        .reader-content .my-scholar-media-table-wrapper > .table-scroll {
           overflow-x:auto;
         }
+        .reader-content img.math-source-inline {
+          display:inline!important;
+          max-height:3.6em!important;
+          max-width:100%;
+          width:auto!important;
+          height:auto;
+        }
+        .math-source-visual { display:inline; position:relative; }
+        .math-source-text { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
         .reader-content .my-scholar-media-resize-handle {
           position:absolute;
           z-index:12;
@@ -5985,7 +6259,7 @@
           padding-right:0!important;
         }
         .paper-metadata {
-          color:color-mix(in srgb,var(--ink) 42%,var(--paper));
+          color:color-mix(in srgb,var(--ink,var(--reader-ui-ink)) 42%,var(--paper,var(--reader-ui-paper)));
           font-size:.92em;
           line-height:1.55;
         }
@@ -6292,13 +6566,64 @@
     affectedBlocks.forEach(repairEmphasisFragments);
   }
 
+  function resolveAnnotationAnchor(annotation, doc = frameDocument()) {
+    if (!doc || !annotation.quote) return null;
+    const root = doc.querySelector(`[data-block-id="${cssEscape(annotation.block_id || '')}"]`);
+    const generation = normalizeChatSourceGeneration(annotation.render_generation) || 'base';
+    if (generation === activeChatSourceGeneration() && root) {
+      const range = annotationRange(root, annotation, doc);
+      if (range) return { root, range };
+    }
+    const continuation = readerContinuations.get(doc)?.get(String(annotation.block_id));
+    if (continuation && annotation.surface !== 'translation' && generation === activeChatSourceGeneration() && (!annotation.page || String(annotation.page) === continuation.page)) {
+      const start = continuation.start + Number(annotation.start);
+      const end = continuation.start + Number(annotation.end);
+      if (start >= continuation.start && end <= continuation.end && canonicalBlockText(continuation.root, doc).slice(start, end) === annotation.quote) {
+        return { root: continuation.root, range: rangeAtOffsets(continuation.root, start, end, doc) };
+      }
+    }
+    // Reflow may renumber blocks. Only an unambiguous quote on the original
+    // page may relocate an existing annotation; offsets belong to its old text.
+    const candidates = [];
+    const quote = String(annotation.quote);
+    const sources = [...doc.querySelectorAll('[data-block-id]')].map((root) => ({
+      root, page: root.dataset.page, start: 0,
+      matchStartEnd: readerContinuations.get(doc)?.get(root.dataset.blockId)?.end,
+    }));
+    for (const [id, source] of readerContinuations.get(doc) || []) {
+      if (id !== source.root.dataset.blockId) sources.push(source);
+    }
+    for (const source of sources) {
+      const block = source.root;
+      const translation = block.closest?.('.my-scholar-translation');
+      if ((annotation.surface === 'translation') !== Boolean(translation)) continue;
+      if (annotation.page != null && String(source.page || translation?.dataset.page || '') !== String(annotation.page)) continue;
+      const text = canonicalBlockText(block, doc).slice(source.start, source.end);
+      let cursor = text.indexOf(quote);
+      while (cursor >= 0) {
+        const prefix = String(annotation.quote_prefix || '');
+        const suffix = String(annotation.quote_suffix || '');
+        if ((source.matchStartEnd == null || cursor < source.matchStartEnd)
+          && (!prefix || text.slice(Math.max(0, cursor - prefix.length), cursor) === prefix)
+          && (!suffix || text.slice(cursor + quote.length, cursor + quote.length + suffix.length) === suffix)) {
+          candidates.push({ root: block, start: source.start + cursor, end: source.start + cursor + quote.length });
+        }
+        cursor = text.indexOf(quote, cursor + 1);
+      }
+    }
+    if (candidates.length !== 1) return null;
+    const found = candidates[0];
+    return { root: found.root, range: rangeAtOffsets(found.root, found.start, found.end, doc) };
+  }
+
   function applyMark(annotation) {
     const doc = frameDocument();
-    const root = doc?.querySelector(`[data-block-id="${cssEscape(annotation.block_id || '')}"]`);
-    if (!root || !annotation.quote || !annotation.id) return false;
-    if (doc.querySelector(`[data-annotation-id="${cssEscape(annotation.id)}"]`)) return true;
-    const range = annotationRange(root, annotation, doc);
-    if (!range || range.collapsed) return false;
+    if (!annotation.quote || !annotation.id) return false;
+    if (doc?.querySelector(`[data-annotation-id="${cssEscape(annotation.id)}"]`)) return true;
+    const anchor = resolveAnnotationAnchor(annotation, doc);
+    const root = anchor?.root;
+    const range = anchor?.range;
+    if (!root || !range || range.collapsed) return false;
     const mark = doc.createElement('mark');
     mark.dataset.annotationId = annotation.id;
     if (annotation.kind === 'underline') {
@@ -6439,11 +6764,12 @@
 
   function annotationLocation(annotation) {
     const doc = frameDocument();
-    const root = doc?.querySelector(`[data-block-id="${cssEscape(annotation?.block_id || '')}"]`);
-    if (!root) return {};
-    const range = annotationRange(root, annotation, doc);
+    const anchor = resolveAnnotationAnchor(annotation, doc);
+    if (!anchor) return {};
+    const { root, range } = anchor;
     const translation = root.closest?.('.my-scholar-translation') || (root.classList?.contains('my-scholar-translation') ? root : null);
     return {
+      block_id: root.dataset.blockId,
       page: root.dataset.page || translation?.dataset.page || annotation.page || null,
       start: range ? textOffset(root, range.startContainer, range.startOffset, doc) : null,
       end: range ? textOffset(root, range.endContainer, range.endOffset, doc) : null,
@@ -6514,7 +6840,7 @@
       return;
     }
     const doc = frameDocument();
-    const block = doc?.querySelector(`[data-block-id="${cssEscape(annotation.block_id || '')}"]`);
+    const block = readerBlockById(annotation.block_id, doc);
     const marks = [...(doc?.querySelectorAll('.my-scholar-ai-suggestion[data-annotation-id]') || [])].filter((mark) => mark.offsetParent !== null);
     const following = block && doc?.defaultView?.Node
       ? marks.find((mark) => block.compareDocumentPosition(mark) & doc.defaultView.Node.DOCUMENT_POSITION_FOLLOWING)
@@ -6680,7 +7006,15 @@
         : `${isAIAnnotation(annotation) ? 'ai' : 'manual'}\u0000${target}`;
       visualAnnotations.set(key, annotation);
     });
-    visualAnnotations.forEach((annotation) => applyMark(annotation));
+    let unresolved = 0;
+    visualAnnotations.forEach((annotation) => {
+      if (!applyMark(annotation) && !isAIAnnotation(annotation)) unresolved += 1;
+    });
+    const annotationStatus = $('#annotation-anchor-status');
+    if (annotationStatus) {
+      annotationStatus.hidden = unresolved === 0;
+      annotationStatus.textContent = unresolved ? `${unresolved} 条标注在当前排版中无法唯一定位，原文与笔记均已保留。` : '';
+    }
     rebuildReaderSentencePairs(doc);
     if (readerSearchState.open && doc === frameDocument()) refreshReaderSearch();
   }
@@ -7125,13 +7459,17 @@
     });
     repairEmphasisFragments(clone);
     clone.querySelectorAll('.math-token').forEach((token) => token.replaceWith(token.dataset.token || token.textContent || ''));
+    clone.querySelectorAll('.math-source-visual, sup, sub').forEach((source) => {
+      if (!clone.contains(source)) return;
+      const token = `__MY_SCHOLAR_MATH_${formulas.length}__`;
+      formulas.push({ token, tex: source.classList.contains('math-source-visual') ? '[公式原图]' : source.textContent || '', markup: source.outerHTML });
+      source.replaceWith(source.matches('sup, sub') ? token : ` ${token} `);
+    });
     clone.querySelectorAll('math').forEach((math) => {
       const annotation = math.querySelector('annotation[encoding="application/x-tex"]');
-      if (annotation?.textContent) {
-        const token = `__MY_SCHOLAR_MATH_${formulas.length}__`;
-        formulas.push({ token, tex: annotation.textContent, markup: math.outerHTML });
-        math.replaceWith(` ${token} `);
-      }
+      const token = `__MY_SCHOLAR_MATH_${formulas.length}__`;
+      formulas.push({ token, tex: annotation?.textContent || math.getAttribute('alttext') || math.textContent || '', markup: math.outerHTML });
+      math.replaceWith(` ${token} `);
     });
     // Every emphasis run costs the model two placeholders it has to reproduce
     // verbatim. A heavily emphasised paragraph carried so many that dropping
@@ -7266,6 +7604,18 @@
         if (formula.tex) math.setAttribute('aria-label', formula.tex);
         return math;
       }
+      const source = holder.querySelector('.math-source-visual');
+      const image = source?.querySelector('img.math-source-inline');
+      if (image && safePreviewAssetURL(image.src)) {
+        const copy = previewStructuredClone(source);
+        if (copy) return doc.importNode(copy, true);
+      }
+      const script = holder.querySelector('sup, sub');
+      if (script) {
+        const copy = doc.createElement(script.localName);
+        copy.textContent = script.textContent;
+        return copy;
+      }
     }
     const fallback = doc.createElement('span');
     fallback.className = 'math-fallback math-inline translation-math-fallback';
@@ -7392,11 +7742,11 @@
     return result;
   }
 
-  async function requestTranslation(text, blockId = null, suppliedFormulas = [], { jobId = state.activeJob?.job_id, onDelta = null, markers = [], emphasis = [], signal = null, refresh = false } = {}) {
+  async function requestTranslation(text, blockId = null, suppliedFormulas = null, { jobId = state.activeJob?.job_id, onDelta = null, markers = [], emphasis = [], signal = null, refresh = false } = {}) {
     const originalText = String(text || '').trim();
     const sourceHash = hashText(originalText);
     const profileId = translationProfileId();
-    const mathPayload = suppliedFormulas.length ? { text: originalText, formulas: suppliedFormulas } : protectInlineMath(originalText);
+    const mathPayload = Array.isArray(suppliedFormulas) ? { text: originalText, formulas: suppliedFormulas } : protectInlineMath(originalText);
     const tokenPayload = protectSpecialTokens(mathPayload.text);
     const protectedPayload = { text: tokenPayload.text, formulas: mathPayload.formulas, tokens: tokenPayload.tokens };
     const targetLanguage = '中文';
@@ -7973,7 +8323,7 @@
     }).join('')}</section>`).join('');
     highlightList.querySelectorAll('[data-highlight-main]').forEach((button) => button.addEventListener('click', () => {
       const card = button.closest('.highlight-card');
-      const target = frameDocument()?.querySelector(`[data-block-id="${cssEscape(button.dataset.highlightBlock || '')}"]`);
+      const target = readerBlockById(button.dataset.highlightBlock);
       target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       window.setTimeout(() => {
         const manual = state.annotations.find((item) => item.id === card.dataset.manualAnnotationId);
@@ -7995,7 +8345,7 @@
       const action = button.dataset.highlightAction;
       if (['note', 'adopt', 'open-personal'].includes(action)) {
         const blockId = card.querySelector('[data-highlight-main]')?.dataset.highlightBlock || '';
-        frameDocument()?.querySelector(`[data-block-id="${cssEscape(blockId)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        readerBlockById(blockId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         await new Promise((resolve) => window.setTimeout(resolve, 180));
       }
       if (action === 'note' && aiAnnotation) adoptAISuggestion(aiAnnotation, { withNote: true });
@@ -8029,7 +8379,7 @@
     $$('.annotation-item').forEach((node) => {
       const item = state.annotations.find((annotation) => annotation.id === node.dataset.annotationId);
       node.querySelector('.annotation-quote').addEventListener('click', () => {
-        const target = frameDocument()?.querySelector(`[data-block-id="${cssEscape(item?.block_id || '')}"]`);
+        const target = resolveAnnotationAnchor(item)?.root;
         target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         const trigger = frameDocument()?.querySelector(`.annotation-note-trigger[data-annotation-id="${cssEscape(item?.id || '')}"]`);
         if (trigger && item) showInlineAnnotation(item, trigger);
@@ -8823,6 +9173,8 @@
     const idsFor = (candidate) => [candidate.dataset.blockId, candidate.dataset.translateBlockId].filter(Boolean);
     const exact = candidates.find((candidate) => idsFor(candidate).includes(requestedId));
     if (exact) return exact;
+    const continuation = readerContinuations.get(doc)?.get(requestedId);
+    if (continuation?.page === canonicalPage) return continuation.root;
 
     const pageAndIndex = requestedId.match(/^block-([1-9][0-9]{0,4})-(0|[1-9][0-9]{0,8})$/);
     const indexOnly = requestedId.match(/^block-(0|[1-9][0-9]{0,8})$/);
@@ -11038,6 +11390,7 @@
 
   const parsingInstallStates = new Set(['preparing', 'checking', 'downloading', 'verifying', 'publishing', 'installing', 'importing', 'cancelling']);
   let currentLocalMinerUProvider = null;
+  let currentRemoteParserProvider = null;
   let currentLocalMinerUCandidates = [];
   let currentLocalMinerUDiscoveryState = 'idle';
   let parsingProvidersRequest = 0;
@@ -11234,12 +11587,47 @@
     return provider;
   }
 
+  function renderRemoteParserProvider(provider = {}) {
+    currentRemoteParserProvider = provider;
+    const enabled = provider.configured === true;
+    const card = $('#remote-parsing-provider');
+    if (card) card.className = `parsing-provider-card ${provider.ready ? 'is-ready' : enabled ? 'is-error' : 'is-disabled'}`;
+    const status = $('#remote-parsing-status');
+    if (status) {
+      status.textContent = provider.ready ? '已连接' : enabled ? '连接不可用' : '未配置';
+      status.className = `ai-service-status ${provider.ready ? 'is-ready' : 'is-unavailable'}`;
+    }
+    const detail = $('#remote-parsing-detail');
+    if (detail) detail.textContent = provider.message || '在当前设备的私有配置中填写远端连接信息后即可启用。';
+    const version = $('#remote-parsing-version');
+    if (version) version.textContent = [typeof provider.engine === 'string' ? provider.engine : provider.engine?.name, provider.version].filter(Boolean).join(' · ') || '—';
+    $('#connect-remote-parser')?.toggleAttribute('disabled', !enabled);
+    $('#disconnect-remote-parser')?.toggleAttribute('disabled', !enabled || !provider.ready);
+    $('#local-mineru-provider')?.toggleAttribute('hidden', enabled);
+    const backend = $('#setting-parsing-backend')?.closest('label');
+    if (backend) backend.hidden = enabled;
+    if (enabled) $('#setting-parsing-server-field')?.setAttribute('hidden', '');
+  }
+
   async function fetchParsingProviders({ render = true } = {}) {
     const payload = await api('/api/parsing/providers');
-    const provider = localMinerUFromPayload(payload) || { id: 'local-mineru', status: 'artifact_unavailable' };
-    if (render) renderLocalMinerUProvider(provider);
+    const remote = parsingProviderRecords(payload).find((provider) => provider.id === 'remote-guzi') || {};
+    renderRemoteParserProvider(remote);
+    const provider = remote.configured === true ? remote : localMinerUFromPayload(payload) || { id: 'local-mineru', status: 'artifact_unavailable' };
+    if (render && provider.id !== 'remote-guzi') renderLocalMinerUProvider(provider);
     return provider;
   }
+
+  async function changeRemoteParserConnection(action) {
+    try {
+      const payload = await api(`/api/parsing/providers/remote-guzi/${action}`, { method: 'POST' });
+      renderRemoteParserProvider(payload.provider || {});
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  }
+  $('#connect-remote-parser')?.addEventListener('click', () => { void changeRemoteParserConnection('connect'); });
+  $('#disconnect-remote-parser')?.addEventListener('click', () => { void changeRemoteParserConnection('disconnect'); });
 
   async function monitorParsingInstall() {
     let failures = 0;
@@ -11264,7 +11652,7 @@
     try {
       const provider = await fetchParsingProviders({ render: false });
       if (request !== parsingProvidersRequest) return provider;
-      renderLocalMinerUProvider(provider);
+      if (provider.id !== 'remote-guzi') renderLocalMinerUProvider(provider);
       if (parsingInstallStates.has(parsingInstallStatus(provider)) && !parsingInstallPromise) {
         parsingInstallPromise = monitorParsingInstall().finally(() => { parsingInstallPromise = null; });
         void parsingInstallPromise.catch(() => {});
@@ -12017,6 +12405,10 @@
       const provider = await fetchParsingProviders();
       const status = parsingProviderStatus(provider);
       if (status === 'ready') return true;
+      if (provider.id === 'remote-guzi') {
+        renderReflowPreflightFailure(provider.message || '远端解析服务暂不可用，请检查设置中的连接状态。');
+        return false;
+      }
       if (parsingInstallStates.has(parsingInstallStatus(provider))) {
         if (!parsingInstallPromise) parsingInstallPromise = monitorParsingInstall().finally(() => { parsingInstallPromise = null; });
         const completed = await parsingInstallPromise;
@@ -12072,7 +12464,7 @@
     reflowPreflightInFlight = false;
     if (!reflowRunIsActive(activeReflowRun())) updateReflowButton(false);
     if (!ready || state.activeJob?.job_id !== job.job_id) return;
-    const confirmed = await requestConfirmation('AI 重排会在后台重新分析当前文章。完成前会继续显示当前版本；只有成功后才切换到新版。', '开始 AI 重排？');
+    const confirmed = await requestConfirmation(`${currentRemoteParserProvider?.configured ? 'PDF 将上传至你配置的远端融合解析服务。' : ''}AI 重排会在后台重新分析当前文章。完成前会继续显示当前版本；只有成功后才切换到新版。`, '开始 AI 重排？');
     if (!confirmed || state.activeJob?.job_id !== job.job_id) return;
     const run = ensureReflowRun(job.job_id, { fresh: true });
     renderReflowStatus(job.job_id, { status: 'queued', stage: '正在提交重排任务', progress: 0, error: null });
