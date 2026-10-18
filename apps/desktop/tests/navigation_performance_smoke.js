@@ -47,7 +47,7 @@ function instrument(source) {
   const injection = `
   window.__navigationPerformance = {
     metrics: {}, refs: {}, refreshLibrary: () => loadLibrary(), refreshSettings: () => loadSettings({ refresh: true }), refreshProviders: () => loadParsingProviders({ refresh: true }),
-    reader: () => ({ jobId: state.activeJob?.job_id, ready: readerMount?.ready, notes: document.querySelector('#notes-editor')?.textContent }),
+    reader: () => ({ jobId: state.activeJob?.job_id, ready: readerMount?.ready, cachedAnnotations: readerMount?.annotations.length, notes: document.querySelector('#notes-editor')?.textContent }),
   };
   ${functions.map((name) => `{
     const original = ${name};
@@ -97,6 +97,8 @@ async function staticServer() {
     let holdSettings = false;
     let releaseSettings = null;
     let holdSecondReader = false;
+    let holdFirstDocument = true;
+    let releaseFirstDocument = null;
     let releaseTranslations = null;
     let holdTranslations = true;
     let releaseHighlights = null;
@@ -142,7 +144,13 @@ async function staticServer() {
       else if (pathname.startsWith('/api/library/items/')) payload = { library, item: library.items[pathname.split('/')[4]] };
       else if (/^\/api\/jobs\/[ab]{16}(?:\/|$)/u.test(pathname)) {
         const [, id, endpoint = ''] = pathname.match(/^\/api\/jobs\/([ab]{16})\/?(.*)$/u);
-        if (endpoint === 'document.html') { await route.fulfill({ contentType: 'text/html', body: documentHTML(id) }); return; }
+        if (endpoint === 'document.html') {
+          if (id === ids[0] && holdFirstDocument) {
+            holdFirstDocument = false;
+            await new Promise((resolve) => { releaseFirstDocument = resolve; pending.add(resolve); });
+          }
+          await route.fulfill({ contentType: 'text/html', body: documentHTML(id) }); return;
+        }
         if (holdSecondReader && id === ids[1] && ['annotations', 'notes'].includes(endpoint)) await new Promise((resolve) => pending.add(resolve));
         if (endpoint === 'translations') {
           if (holdTranslations && id === ids[0]) {
@@ -198,6 +206,9 @@ async function staticServer() {
     await page.waitForFunction(() => document.querySelector('#setting-metadata-email').value === 'initial@example.invalid');
     const beforeFirst = await snapshot();
     await page.locator(`#library-view .library-row[data-job-id="${ids[0]}"]`).dblclick();
+    await page.waitForFunction((marks) => window.__navigationPerformance.reader().cachedAnnotations === marks, annotationCount);
+    assert.ok(releaseFirstDocument, 'Document response must wait for annotations cached before reader wiring');
+    pending.delete(releaseFirstDocument); releaseFirstDocument();
     await page.waitForFunction(() => window.__navigationPerformance.metrics.wireFrame?.calls === 1 && window.__navigationPerformance.metrics.ensureTitleTranslation?.calls > 0);
     assert.ok(releaseTranslations, 'Title cache request must be delayed until reader wiring');
     pending.delete(releaseTranslations); releaseTranslations();

@@ -24,11 +24,12 @@ function documentHTML(id, generation, revision) {
     body { margin: 0; } .reader-content { max-width: 720px; margin: auto; }
     p[data-block-id] { min-height: 340px; margin: 0; padding: 12px; box-sizing: border-box; }
     img { display: block; width: 100%; height: auto; } figure { margin: 0; }
+    img.math-source-inline { display: inline; width: 24px; height: 12px; }
   </style></head><body data-fixture-job="${id}" data-generation="${generation}" data-source-revision="${revision}"><main class="reader-content"><section class="pdf-page" data-page="1">
     <h2 data-block-id="heading" data-page="1">Synthetic generation ${generation}</h2>
     <details id="body-details"><summary>Experimental details</summary><div>Native expanded reading state.</div></details>
     <figure class="pdf-figure" data-block-id="fixture-figure" data-page="1"><img width="720" height="240" src="/api/jobs/${id}/assets/images/fixture.svg" alt="Synthetic keepalive figure"><figcaption>Synthetic figure.</figcaption></figure>
-    ${Array.from({ length: 6 }, (_, index) => `<p data-block-id="paragraph-${index}" data-page="1">${prose} Document ${id[0].toUpperCase()}, paragraph ${index}. Source revision ${revision}.</p>`).join('')}
+    ${Array.from({ length: 6 }, (_, index) => `<p data-block-id="paragraph-${index}" data-page="1">${prose} Document ${id[0].toUpperCase()}, paragraph ${index}. Source revision ${revision}.${index === 1 ? `<span class="math-source-visual"><img class="math-source-inline" src="/api/jobs/${id}/assets/images/inline.png" alt="x + y" data-height-em="1"></span>` : ''}</p>`).join('')}
   </section></main></body></html>`;
 }
 
@@ -120,6 +121,11 @@ async function signal(promise, label) {
           gate?.finish();
           return;
         }
+        if (endpoint === 'assets/images/inline.png') {
+          await route.fulfill({ contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=', 'base64') });
+          gate?.finish();
+          return;
+        }
         if (endpoint === 'translations') payload = { translations: fixture.translations };
         else if (endpoint === 'media-layout') {
           if (method === 'PATCH') fixture.width = body.items['fixture-figure'].width_percent;
@@ -129,7 +135,7 @@ async function signal(promise, label) {
         else if (endpoint === 'auto-highlights') payload = { result: { status: 'mock', highlights: [] } };
         else if (endpoint === 'translate') {
           const revision = body.text.match(/Source revision ([a-z-]+)\./u)?.[1] || 'hover';
-          const record = { ...body, text: `${id[0].toUpperCase()} mocked translation for ${body.block_id || 'hover'}. Source revision ${revision}.`, profile_id: activeProfile };
+          const record = { ...body, text: `${id[0].toUpperCase()} mocked translation for ${body.block_id || 'hover'}. Source revision ${revision}. ${(body.formulas || []).map((formula) => formula.token).join(' ')}`.trim(), profile_id: activeProfile };
           fixture.translations = fixture.translations.filter((item) => item.block_id !== record.block_id).concat(record);
           if (id === ids[0] && fixture.translations.filter((item) => /^paragraph-/u.test(item.block_id || '')).length === 6) fullCompleted.resolve();
           payload = { result: record };
@@ -234,10 +240,12 @@ async function signal(promise, label) {
     await active().locator('body').evaluate(() => scrollTo(0, 1100));
     await page.waitForFunction(() => document.querySelector('#html-preview').contentWindow.scrollY >= 1000);
     await remember(a);
-    const aResources = [count(a, 'document.html'), count(a, 'assets/images/fixture.svg')];
+    const aResources = [count(a, 'document.html'), count(a, 'assets/images/fixture.svg'), count(a, 'assets/images/inline.png')];
+    assert.deepEqual(aResources, [1, 1, 1], 'Opening and translating A duplicated document resources');
     await open(b);
     await remember(b);
-    const bResources = [count(b, 'document.html'), count(b, 'assets/images/fixture.svg')];
+    const bResources = [count(b, 'document.html'), count(b, 'assets/images/fixture.svg'), count(b, 'assets/images/inline.png')];
+    assert.deepEqual(bResources, [1, 1, 1], 'Opening B duplicated document resources');
     for (let index = 0; index < 4; index += 1) {
       await activate(a); await preserved(a);
       await activate(b); await preserved(b);
@@ -247,8 +255,8 @@ async function signal(promise, label) {
     await activate(a);
     await preserved(a);
     await structure(2);
-    assert.deepEqual([count(a, 'document.html'), count(a, 'assets/images/fixture.svg')], aResources, 'Warm A switches requested resources');
-    assert.deepEqual([count(b, 'document.html'), count(b, 'assets/images/fixture.svg')], bResources, 'Warm B switches requested resources');
+    assert.deepEqual([count(a, 'document.html'), count(a, 'assets/images/fixture.svg'), count(a, 'assets/images/inline.png')], aResources, 'Warm A switches requested resources');
+    assert.deepEqual([count(b, 'document.html'), count(b, 'assets/images/fixture.svg'), count(b, 'assets/images/inline.png')], bResources, 'Warm B switches requested resources');
 
     const hoverBefore = count(a, 'translate', 'POST');
     const hoverSource = active().locator('[data-block-id="paragraph-2"]');
@@ -268,6 +276,11 @@ async function signal(promise, label) {
     const paragraphBefore = count(a, 'translate', 'POST');
     await translateParagraph(1);
     await active().locator('.my-scholar-translation[data-for="paragraph-1"]:not(.is-pending)').waitFor();
+    const inlineFormula = active().locator('.my-scholar-translation[data-for="paragraph-1"] img.math-source-inline');
+    await inlineFormula.waitFor();
+    await inlineFormula.evaluate((image) => image.decode());
+    assert.deepEqual(requests.find((item) => item.id === a && item.endpoint === 'translate' && item.body.block_id === 'paragraph-1').body.formulas,
+      [{ token: '__MY_SCHOLAR_MATH_0__', tex: '[公式原图]' }], 'Inline formula extraction lost its source image');
     assert.equal(count(a, 'translate', 'POST') - paragraphBefore, 1, 'Paragraph control dispatched duplicate requests');
     assert.equal(await active().locator('[data-block-id="paragraph-1"] > .paragraph-translate-trigger').count(), 1);
 

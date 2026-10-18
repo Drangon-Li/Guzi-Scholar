@@ -3905,6 +3905,7 @@
     if (!readerMount) return;
     window.clearTimeout(readerMount.saveTimer);
     window.clearTimeout(readerMount.saveMaxTimer);
+    readerMount.cancelFontWait?.();
     readerMount.activation += 1;
     readerMount.transition?.cancel();
     readerMount.frame.removeAttribute('id');
@@ -3922,6 +3923,7 @@
     }
     window.clearTimeout(mount.saveTimer);
     window.clearTimeout(mount.saveMaxTimer);
+    mount.cancelFontWait?.();
     mount.frame.contentWindow?.cancelAnimationFrame(mount.viewportRAF);
     mount.transition?.cancel();
     mount.transition = null;
@@ -5653,11 +5655,18 @@
     await mount.layoutReady;
     if (!current()) return false;
     if (doc.fonts?.ready) {
-      await Promise.race([
-        doc.fonts.ready.catch(() => {}),
-        new Promise((resolve) => window.setTimeout(resolve, 600)),
-      ]);
+      await new Promise((resolve) => {
+        const finish = () => {
+          window.clearTimeout(timer);
+          if (mount.cancelFontWait === finish) mount.cancelFontWait = null;
+          resolve();
+        };
+        const timer = window.setTimeout(finish, 600);
+        mount.cancelFontWait = finish;
+        doc.fonts.ready.then(finish, finish);
+      });
     }
+    if (!current()) return false;
     await readerFrames(doc, 2);
     if (!current()) return false;
     restoreReadingLocation(mount);
@@ -6690,6 +6699,8 @@
     mount.preparingActivation = activation;
     try {
       if (mount.wiredDocument !== doc) {
+        state.annotations = mount.annotations;
+        state.aiHighlights = mount.aiHighlights;
         wireFrame(mount);
         mount.wiredDocument = doc;
       } else {
@@ -7889,7 +7900,8 @@
   }
 
   function paragraphSource(block) {
-    const clone = block?.cloneNode(true);
+    // Extract from an inert document so copying inline images cannot reload their resources.
+    const clone = block && document.createElement('template').content.ownerDocument.importNode(block, true);
     if (!clone) return { text: '', formulas: [], markers: [], emphasis: [] };
     const formulas = [];
     const markers = [];

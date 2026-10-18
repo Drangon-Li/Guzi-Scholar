@@ -42,7 +42,9 @@ function instrument(source) {
         mounts: readerMounts.size, open: state.openDocuments.length,
         translationCaches: state.translationCaches.size, mediaLayouts: state.mediaLayouts.size, chatSessions: state.chatSessions.size, translationRuns: state.translationRuns.size,
         chatStreaming: [...state.chatSessions.values()].reduce((count, envelope) => count + (envelope.sessions || []).reduce((total, thread) => total + thread.messages.filter((message) => message.streaming).length, 0), 0),
-        activeMount: Number(Boolean(readerMount)), sections: readerSections.length,
+        activeMount: Number(Boolean(readerMount)), activeReady: Boolean(readerMount?.ready), sections: readerSections.length,
+        fontWaits: [...readerMounts.values()].filter((mount) => mount.cancelFontWait).length,
+        fontTimers: window.__memoryFontTimers.active.size,
         activeTranslations: state.translationCache.length, activeChat: state.chat.length, annotations: state.annotations.length, aiHighlights: state.aiHighlights.length,
         sentenceDocuments: Number(Boolean(readerSentenceState.doc)), sentencePairs: readerSentenceState.pairs.length,
         sentencePending: readerSentenceState.pendingTranslations.size, searchMatches: readerSearchState.matches.length,
@@ -53,6 +55,7 @@ function instrument(source) {
         previewNodes: document.querySelector('#quick-preview-content')?.childElementCount || 0,
         detachedDocuments: documents.filter((reference) => { const doc = reference.deref(); return doc && ![...readerMounts.values()].some((mount) => mount.frame.contentDocument === doc); }).length,
         liveDocuments: documents.filter((reference) => Boolean(reference.deref())).length,
+        detachedDocumentNumbers: documents.flatMap((reference, index) => { const doc = reference.deref(); return doc && ![...readerMounts.values()].some((mount) => mount.frame.contentDocument === doc) ? [index + 1] : []; }),
         observedDocuments: documents.length,
       }),
     };
@@ -106,6 +109,27 @@ async function signal(promise, label) {
       gates.set(id, gate); pending.push(gate); return gate;
     };
     await page.addInitScript(() => {
+      if (window !== window.top) {
+        // Keep the unresolved promise in its frame; a host-held resolver would itself pin the Document.
+        if (window.top.__memoryHoldFonts) Object.defineProperty(document.fonts, 'ready', { get: () => new Promise(() => {}) });
+        return;
+      }
+      window.__memoryHoldFonts = false;
+      window.__memoryFontTimers = { active: new Set(), scheduled: 0, cleared: 0, fired: 0 };
+      const setTimeout = window.setTimeout.bind(window);
+      const clearTimeout = window.clearTimeout.bind(window);
+      window.setTimeout = (callback, delay, ...args) => {
+        if (delay !== 600) return setTimeout(callback, delay, ...args);
+        const counters = window.__memoryFontTimers;
+        const id = setTimeout(() => { counters.active.delete(id); counters.fired += 1; callback(...args); }, delay);
+        counters.active.add(id); counters.scheduled += 1;
+        return id;
+      };
+      window.clearTimeout = (id) => {
+        const counters = window.__memoryFontTimers;
+        if (counters.active.delete(id)) counters.cleared += 1;
+        return clearTimeout(id);
+      };
       const originalFetch = window.fetch.bind(window);
       window.__memoryChatStream = { requests: 0, finish: null };
       window.fetch = async (input, init = {}) => {
@@ -167,10 +191,12 @@ async function signal(promise, label) {
       await page.waitForFunction(({ jobId, marks }) => {
         const doc = document.querySelector('#html-preview')?.contentDocument;
         return doc?.body?.dataset.fixtureJob === jobId && doc.querySelector('[data-block-id="paragraph-0"] > .paragraph-translate-trigger')
-          && doc.querySelectorAll('mark[data-annotation-id]').length === marks && !document.querySelector('#reader-view').classList.contains('is-document-loading');
+          && doc.querySelectorAll('mark[data-annotation-id]').length === marks && !document.querySelector('#reader-view').classList.contains('is-document-loading')
+          && window.__readerMemory.counts().activeReady;
       }, { jobId: id, marks: markers });
+      if (!baseline) assert.equal(await page.evaluate(() => window.__readerMemory.counts().fontTimers), 0, 'Loaded fonts must clear the fallback timer immediately');
     }
-    async function open(id) { await page.locator('[data-view="library-view"]').click(); await page.locator(`#library-view .library-row[data-job-id="${id}"]`).dblclick(); await ready(id); }
+    async function open(id, wait = true) { await page.locator('[data-view="library-view"]').click(); await page.locator(`#library-view .library-row[data-job-id="${id}"]`).dblclick(); if (wait) await ready(id); }
     async function close(id) { await page.locator(`[data-close-job-id="${id}"]`).click(); await tab(id).waitFor({ state: 'detached' }); }
     async function closeAll() { for (const id of ids) if (await tab(id).count()) await close(id); await page.locator('#library-view.active-view').waitFor(); }
     async function settled() { await page.waitForTimeout(250); await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))); }
@@ -186,7 +212,17 @@ async function signal(promise, label) {
       const counts = await page.evaluate(() => window.__readerMemory.counts());
       const result = { label, usedHeap: heap.usedSize, totalHeap: heap.totalSize, ...dom,
         metricDocuments: metrics.Documents, metricNodes: metrics.Nodes, metricListeners: metrics.JSEventListeners, counts };
-      snapshots.push(result); console.log(`[reader-memory] ${JSON.stringify(result)}`); return result;
+      snapshots.push(result); console.log(`[reader-memory] ${JSON.stringify(result)}`);
+      if (process.env.MY_SCHOLAR_MEMORY_HEAP_SNAPSHOT && counts.detachedDocuments && ['preview-closed', 'saved-chat-closed', 'final-reopened-closed'].includes(label)) {
+        const filename = `${process.env.MY_SCHOLAR_MEMORY_HEAP_SNAPSHOT}-${label}.heapsnapshot`;
+        const output = fs.openSync(filename, 'w');
+        const writeChunk = ({ chunk }) => fs.writeSync(output, chunk);
+        cdp.on('HeapProfiler.addHeapSnapshotChunk', writeChunk);
+        try { await cdp.send('HeapProfiler.takeHeapSnapshot'); }
+        finally { cdp.off('HeapProfiler.addHeapSnapshotChunk', writeChunk); fs.closeSync(output); }
+        console.error(`[reader-memory] heap snapshot ${filename}`);
+      }
+      return result;
     }
     await page.goto(requestedURL || server.url, { waitUntil: 'networkidle' });
     cdp = await page.context().newCDPSession(page);
@@ -258,7 +294,22 @@ async function signal(promise, label) {
     await measure('background-chat-completed-closed');
     await open(ids[0]);
     await page.locator('.chat-bubble.assistant').filter({ hasText: 'Completed fixture reply to pending memory question.' }).waitFor();
-    await closeAll(); const final = await measure('final-reopened-closed');
+    await closeAll();
+    if (!baseline) {
+      await page.evaluate(() => { window.__memoryHoldFonts = true; });
+      const fontsBefore = await page.evaluate(() => ({ ...window.__memoryFontTimers, active: window.__memoryFontTimers.active.size }));
+      await open(ids[0], false);
+      await page.waitForFunction(() => window.__readerMemory.counts().fontWaits === 1);
+      assert.equal(await page.evaluate(() => window.__readerMemory.counts().fontTimers), 1, 'Unresolved font readiness must exercise the timeout path');
+      await close(ids[0]);
+      const fontsClosed = await page.evaluate(() => ({ ...window.__memoryFontTimers, active: window.__memoryFontTimers.active.size }));
+      assert.equal(fontsClosed.fired, fontsBefore.fired, 'Closing must cancel font waiting before the fallback timeout fires');
+      assert.equal(fontsClosed.active, 0, 'Closing a reader must synchronously clear its font fallback timer');
+      assert.ok(fontsClosed.cleared > fontsBefore.cleared);
+      await page.evaluate(() => { window.__memoryHoldFonts = false; });
+      await measure('pending-fonts-closed');
+    }
+    await open(ids[0]); await closeAll(); const final = await measure('final-reopened-closed');
 
     const closedRounds = snapshots.filter((sample) => /round-\d-closed/u.test(sample.label)).slice(1);
     const growth = { heap: closedRounds.at(-1).usedHeap - closedRounds[0].usedHeap, nodes: closedRounds.at(-1).nodes - closedRounds[0].nodes,
