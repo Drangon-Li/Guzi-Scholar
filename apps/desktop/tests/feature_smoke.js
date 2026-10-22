@@ -465,8 +465,17 @@ let browserSession;
     await frame.locator(`[data-block-id="${target.blockId}"].block-selected`).waitFor();
     if (await frame.locator('[data-chat-citation-smoke].block-selected').count() !== 1) throw new Error('Hashed Chat citation did not highlight exactly its target');
   }
-  // Finish the valid reference's smooth scroll before checking invalid-reference navigation.
-  await frame.locator('[data-block-id="b-36cea0e59e5170e53581c82c"]').evaluate((node) => node.scrollIntoView({ behavior: 'instant', block: 'center' }));
+  // The valid reference owns a two-second highlight timer; exclude its cleanup
+  // and pending smooth-scroll frames from the invalid-reference baseline.
+  await frame.locator('[data-chat-citation-smoke].block-selected').waitFor({ state: 'hidden', timeout: 3000 });
+  await frame.locator('[data-block-id="b-36cea0e59e5170e53581c82c"]').evaluate(async (node) => {
+    // Keep a stable selection so invalid references must preserve existing highlights.
+    node.classList.add('block-selected');
+    node.scrollIntoView({ behavior: 'instant', block: 'center' });
+    const nextFrame = () => new Promise((resolve) => node.ownerDocument.defaultView.requestAnimationFrame(resolve));
+    await nextFrame();
+    await nextFrame();
+  });
   for (const citation of ['[p10/b-c1355a4bb3893eca79548054]', '[p3/b-000000000000000000000000]']) {
     const before = await frame.locator('.pdf-page').first().evaluate((root) => ({
       scrollTop: root.ownerDocument.scrollingElement.scrollTop,
@@ -478,8 +487,9 @@ let browserSession;
       scrollTop: root.ownerDocument.scrollingElement.scrollTop,
       selected: [...root.ownerDocument.querySelectorAll('.block-selected')].map((node) => node.dataset.blockId),
     }));
-    if (JSON.stringify(after) !== JSON.stringify(before)) throw new Error(`Invalid hashed Chat citation moved or highlighted the source (${citation})`);
+    if (JSON.stringify(after) !== JSON.stringify(before)) throw new Error(`Invalid hashed Chat citation moved or highlighted the source (${citation}; before=${JSON.stringify(before)}; after=${JSON.stringify(after)})`);
   }
+  await frame.locator('[data-block-id="b-36cea0e59e5170e53581c82c"]').evaluate((node) => node.classList.remove('block-selected'));
   await assistantBubble.evaluate((bubble) => { delete bubble.dataset.chatSourceGeneration; });
   await validReference.click();
   await frame.locator('[data-block-id="block-1-6-paragraph"].block-selected').waitFor();
@@ -502,8 +512,7 @@ let browserSession;
   await frame.locator('[data-chat-alias-smoke="ambiguous"]').evaluate((node) => node.remove());
   await pageShortReference.click();
   await frame.locator('[data-block-id="block-1-6-paragraph"].block-selected').waitFor();
-  await page.waitForTimeout(2100);
-  if (await frame.locator('[data-block-id="block-1-6-paragraph"].block-selected').count()) throw new Error('Temporary Chat reference highlight was not cleared');
+  await frame.locator('[data-block-id="block-1-6-paragraph"].block-selected').waitFor({ state: 'hidden', timeout: 3000 });
   await page.locator('#open-chat-history').click();
   await page.locator('#chat-history-view:not([hidden])').waitFor();
   if (!(await page.locator('.sidebar-tab[data-panel="chat-panel"]').getAttribute('aria-selected') === 'true')) throw new Error('Opening Chat history deactivated the AI tab');
