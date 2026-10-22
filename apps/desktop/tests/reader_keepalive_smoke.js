@@ -253,6 +253,8 @@ async function signal(promise, label) {
     await activate(a);
     for (const width of [1450, 760]) {
       await page.setViewportSize({ width, height: 940 });
+      // The media-query change handler can run after setViewportSize resolves.
+      await page.waitForFunction((wide) => document.querySelector('#assistant-toggle').getAttribute('aria-expanded') === String(wide), width > 880);
       if (await page.locator('#assistant-toggle').getAttribute('aria-expanded') !== 'true') await page.locator('#assistant-toggle').click();
       await page.waitForFunction(() => document.querySelector('#reader-sidebar').classList.contains('is-open'));
       for (const destination of ['settings-view', 'library-view']) {
@@ -266,7 +268,7 @@ async function signal(promise, label) {
         assert.equal(parked.opacity, '0', `Open reader assistant leaked into ${destination} at ${width}px`);
         assert.equal(parked.inert, true);
         assert.equal(parked.ariaHidden, 'true');
-        assert.equal(parked.sidebarOpen, true, 'Parking must preserve expanded assistant state');
+        assert.equal(parked.sidebarOpen, true, `Parking must preserve expanded assistant state in ${destination} at ${width}px`);
         assert.ok(parked.width > 0 && parked.height > 0, 'Parked iframe viewport must retain its dimensions');
         assert.equal(parked.hitIsReader, false, 'Parked assistant must not intercept destination interactions');
         await activate(a);
