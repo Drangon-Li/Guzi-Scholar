@@ -58,14 +58,30 @@ class PDFEvidenceWorkerTest(unittest.TestCase):
             "server._runtime_lock_roots"
         ) as runtime_roots, patch("server.ThreadingHTTPServer") as http_server, patch(
             "server._parsing_provider_registry", return_value=registry
-        ), patch("builtins.print") as output:
+        ), patch("pymupdf_runtime.verify_pdf_glyph_extraction", return_value=True) as glyph_smoke, patch("builtins.print") as output:
             server_module.main()
         payload = json.loads(output.call_args.args[0])
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["hashlib_scrypt"])
+        self.assertIs(payload["pdf_glyph_extraction"], True)
+        glyph_smoke.assert_called_once_with()
         self.assertEqual([item["id"] for item in payload["providers"]], ["local-mineru", "remote-guzi"])
         runtime_roots.assert_not_called()
         http_server.assert_not_called()
+
+    def test_dependency_smoke_glyph_failures_abort_before_runtime_locks(self) -> None:
+        for error in (ModuleNotFoundError("fitz unavailable"), RuntimeError("no PDF glyphs")):
+            with self.subTest(error=type(error).__name__):
+                with patch.object(sys, "argv", ["server.py", "--dependency-smoke"]), patch(
+                    "pymupdf_runtime.verify_pdf_glyph_extraction", side_effect=error
+                ), patch("server._runtime_lock_roots") as runtime_roots, patch(
+                    "server.ThreadingHTTPServer"
+                ) as http_server, patch("builtins.print") as output:
+                    with self.assertRaises(type(error)):
+                        server_module.main()
+                runtime_roots.assert_not_called()
+                http_server.assert_not_called()
+                output.assert_not_called()
 
     def test_worker_mode_returns_before_runtime_locks_and_http_server(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-evidence-cli-") as temp:
@@ -1231,8 +1247,10 @@ class ChatStreamTest(unittest.TestCase):
             plain.assert_not_called()
             stream.assert_called_once()
             events = TranslateStreamTest._events(handler)
-            self.assertEqual(events[:2], [{"delta": "答"}, {"delta": "案"}])
-            self.assertEqual(events[2], {"result": {"text": "答案", "model": "chat-test"}})
+            self.assertIn("estimated_input_tokens", events[0]["context"])
+            self.assertEqual(events[1:3], [{"delta": "答"}, {"delta": "案"}])
+            self.assertEqual(events[3]["result"], {"text": "答案", "model": "chat-test"})
+            self.assertEqual(events[3]["context"], events[0]["context"])
 
     def test_chat_stream_falls_back_to_plain_request_before_first_delta(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-chat-stream-") as temp:
@@ -1246,7 +1264,8 @@ class ChatStreamTest(unittest.TestCase):
                 handler._chat("a" * 16)
             plain.assert_called_once()
             events = TranslateStreamTest._events(handler)
-            self.assertEqual(events, [{"result": {"text": "回退回答", "model": "chat-test"}}])
+            self.assertIn("context", events[0])
+            self.assertEqual(events[1]["result"], {"text": "回退回答", "model": "chat-test"})
 
     def test_chat_stream_midway_failure_reports_error(self) -> None:
         def broken_stream(*_args, **_kwargs):
@@ -1264,8 +1283,9 @@ class ChatStreamTest(unittest.TestCase):
                 handler._chat("a" * 16)
             plain.assert_not_called()
             events = TranslateStreamTest._events(handler)
-            self.assertEqual(events[0], {"delta": "部分回答"})
-            self.assertIn("AI 对话失败", events[1]["error"])
+            self.assertIn("context", events[0])
+            self.assertEqual(events[1], {"delta": "部分回答"})
+            self.assertIn("AI 对话失败", events[2]["error"])
 
 
 class MathMLEndpointTest(unittest.TestCase):
@@ -1868,7 +1888,9 @@ class SettingsBoundaryTest(unittest.TestCase):
             })
             for forbidden in ("base_url", "model", "api_key", "api_key_configured", "server_preset", "translation", "chat"):
                 self.assertNotIn(forbidden, public)
-            self.assertEqual(public["ai"], {
+            option_fields = {"api_format", "reasoning_effort", "thinking_budget", "context_window", "capabilities"}
+            self.assertEqual({service: {key: value for key, value in profile.items() if key not in option_fields}
+                              for service, profile in public["ai"].items()}, {
                 "translation": {"base_url": "", "model": "", "api_key_configured": False, "mode": "qwen-mt",
                                 "provider": "openai-compatible", "source_language": "auto", "target_language": "zh",
                                 "deepl_tier": "free", "access_key_id_configured": False, "secret_access_key_configured": False},
@@ -2011,7 +2033,7 @@ class SettingsBoundaryTest(unittest.TestCase):
         self.assertEqual(stored["ai"]["translation"]["api_key"], "shared-secret")
         self.assertEqual(stored["ai"]["translation"]["mode"], "chat")
 
-    def test_model_list_endpoint_uses_current_profile_and_returns_ids_only(self) -> None:
+    def test_model_list_endpoint_uses_current_profile_and_returns_capabilities_without_keys(self) -> None:
         handler = object.__new__(ScholarHandler)
         responses: list[dict] = []
         handler._read_json_body = lambda max_bytes=None: {
@@ -2019,10 +2041,15 @@ class SettingsBoundaryTest(unittest.TestCase):
             "profile": {"base_url": "https://models.example/v1", "api_key": "typed-secret"},
         }
         handler._send_json = lambda body, *_args, **_kwargs: responses.append(body)
-        with patch("server.ai_list_models", return_value=["model-a", "model-b"]) as list_models_mock:
+        with patch("server.discover_models", return_value=[{"id": "model-a", "capabilities": {"context_window": 32768}},
+                                                          {"id": "model-b", "capabilities": {"source": "unknown"}}]) as list_models_mock:
             handler._list_ai_models()
-        list_models_mock.assert_called_once_with("https://models.example/v1", "typed-secret")
-        self.assertEqual(responses, [{"service": "chat", "models": ["model-a", "model-b"]}])
+        list_models_mock.assert_called_once()
+        self.assertEqual(list_models_mock.call_args.args[0]["base_url"], "https://models.example/v1")
+        self.assertEqual(list_models_mock.call_args.args[0]["api_key"], "typed-secret")
+        self.assertEqual(responses, [{"service": "chat", "models": ["model-a", "model-b"],
+                                     "model_capabilities": {"model-a": {"context_window": 32768}, "model-b": {"source": "unknown"}}}])
+        self.assertNotIn("typed-secret", json.dumps(responses))
 
     def test_settings_writer_still_persists_non_ai_preferences_privately(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-settings-safe-") as temp:

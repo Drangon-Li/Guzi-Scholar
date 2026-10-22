@@ -24,16 +24,63 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from pymupdf_runtime import load_fitz  # noqa: E402
+from pymupdf_runtime import load_fitz, verify_pdf_glyph_extraction  # noqa: E402
 
 BARE_IMPORT = re.compile(r"^\s*import fitz\b", re.M)
 
 
 class PyMuPDFRuntimeTest(unittest.TestCase):
+    def test_pdf_glyph_smoke_round_trips_real_in_memory_pdf(self) -> None:
+        try:
+            load_fitz()
+        except ImportError:
+            self.skipTest("PyMuPDF is not installed")
+        self.assertTrue(verify_pdf_glyph_extraction())
+
+    def test_pdf_glyph_smoke_requires_pymupdf(self) -> None:
+        with patch("pymupdf_runtime.load_fitz", side_effect=ModuleNotFoundError("fitz unavailable")):
+            with self.assertRaisesRegex(ModuleNotFoundError, "fitz unavailable"):
+                verify_pdf_glyph_extraction()
+
+    def test_pdf_glyph_smoke_rejects_missing_or_incorrect_glyphs(self) -> None:
+        for text in ("", "Wrong result"):
+            with self.subTest(text=text):
+                document = MagicMock()
+                document.__enter__.return_value = document
+                document.__len__.return_value = 1
+                document.__getitem__.return_value.get_text.return_value = {
+                    "blocks": [{"type": 0, "lines": [{"spans": [{"chars": [
+                        {"c": char, "bbox": [1, 2, 3, 4]} for char in text
+                    ]}]}]}],
+                }
+                runtime = MagicMock()
+                runtime.open.return_value = document
+                with patch("pymupdf_runtime.load_fitz", return_value=runtime):
+                    with self.assertRaisesRegex(RuntimeError, "expected glyphs"):
+                        verify_pdf_glyph_extraction()
+
+    def test_pdf_glyph_smoke_rejects_invalid_bboxes(self) -> None:
+        for bbox in ([1, 2, 1, 4], [1, 2, 3, float("nan")], [1, 2, 3]):
+            with self.subTest(bbox=bbox):
+                document = MagicMock()
+                document.__enter__.return_value = document
+                document.__len__.return_value = 1
+                document.__getitem__.return_value.get_text.return_value = {
+                    "blocks": [{"type": 0, "lines": [{"spans": [{"chars": [
+                        {"c": char, "bbox": bbox} for char in "Guzi rawdict"
+                    ]}]}]}],
+                }
+                runtime = MagicMock()
+                runtime.open.return_value = document
+                with patch("pymupdf_runtime.load_fitz", return_value=runtime):
+                    with self.assertRaisesRegex(RuntimeError, "invalid glyph bbox"):
+                        verify_pdf_glyph_extraction()
+
     def test_loading_disables_the_python_diagnostic_callback(self) -> None:
         # PyMuPDF is an optional dependency and is absent on the CI runner.
         # The static guard below is the one that has to hold everywhere.

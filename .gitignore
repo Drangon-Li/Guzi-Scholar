@@ -33,6 +33,7 @@ webseit/demo-sources/
 
 # Local-only QA and agent planning records
 QA_REPORT.md
+apps/desktop/LOCAL-TEST-*.md
 docs/superpowers/
 
 # Python, test and editor caches

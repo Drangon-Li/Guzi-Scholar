@@ -26,6 +26,10 @@ async function main() {
   const onboardingStateV2 = JSON.stringify({ version: 2, action: 'completed', completedAt: '2026-08-07T00:00:00.000Z' });
   await afterRestart.set('my-scholar-onboarding-v2', onboardingStateV2);
   assert.strictEqual(new RendererStateStore(directory).get('my-scholar-onboarding-v2'), onboardingStateV2);
+  const translationPreferences = JSON.stringify({ hoverEnabled: false, displayMode: 'translation' });
+  await afterRestart.set('my-scholar-translation-preferences-v1', translationPreferences);
+  assert.strictEqual(new RendererStateStore(directory).get('my-scholar-translation-preferences-v1'), translationPreferences, 'translation controls must survive store recreation');
+  assert.strictEqual((await afterRestart.loadAll())['my-scholar-translation-preferences-v1'], translationPreferences);
   const readingLocations = JSON.stringify({
     version: 1,
     lastActiveJobId: '0123456789abcdef',

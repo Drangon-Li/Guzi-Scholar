@@ -143,7 +143,10 @@ class ConfigResolutionTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="my-scholar-config-") as temp:
             path = Path(temp) / "missing.json"
             profile = resolve_ai_profile("chat", environ={DEVELOPER_TOKENS_FILE_ENV: str(path), SETTINGS_FILE_ENV: str(Path(temp) / "missing-settings.json")})
-        self.assertEqual(profile, {"base_url": "", "api_key": "", "model": "", "profile_id": ""})
+        self.assertEqual(profile, {
+            "base_url": "", "api_key": "", "model": "", "profile_id": "",
+            "api_format": "auto", "reasoning_effort": "auto", "thinking_budget": 0, "context_window": 0,
+        })
 
     def test_user_settings_take_priority_over_developer_tokens(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-user-ai-") as temp:
@@ -168,7 +171,10 @@ class ConfigResolutionTest(unittest.TestCase):
             settings.write_text(json.dumps({"ai": {"chat": {"base_url": "", "model": ""}}}), encoding="utf-8")
             tokens.write_text(json.dumps({"chat": {"base_url": "https://developer.example/v1", "api_key": "developer-key", "model": "developer-model"}}), encoding="utf-8")
             profile = resolve_ai_profile("chat", environ={SETTINGS_FILE_ENV: str(settings), DEVELOPER_TOKENS_FILE_ENV: str(tokens)})
-        self.assertEqual(profile, {"base_url": "", "api_key": "", "model": "", "profile_id": ""})
+        self.assertEqual(profile, {
+            "base_url": "", "api_key": "", "model": "", "profile_id": "",
+            "api_format": "auto", "reasoning_effort": "auto", "thinking_budget": 0, "context_window": 0,
+        })
 
     def test_no_user_or_developer_profile_is_disabled(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-user-ai-") as temp:
@@ -176,7 +182,10 @@ class ConfigResolutionTest(unittest.TestCase):
                 SETTINGS_FILE_ENV: str(Path(temp) / "settings.json"),
                 DEVELOPER_TOKENS_FILE_ENV: str(Path(temp) / "missing.json"),
             })
-        self.assertEqual(profile, {"base_url": "", "api_key": "", "model": "", "profile_id": ""})
+        self.assertEqual(profile, {
+            "base_url": "", "api_key": "", "model": "", "profile_id": "",
+            "api_format": "auto", "reasoning_effort": "auto", "thinking_budget": 0, "context_window": 0,
+        })
 
     def test_unknown_service_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "未知 AI 服务"):

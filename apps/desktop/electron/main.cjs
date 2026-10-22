@@ -22,13 +22,18 @@ const { hasTrustedOrigin } = require('./url-security.cjs');
 const { checkForUpdate } = require('./update-service.cjs');
 const { consumeInstallationMarker, requestMacInstallation } = require('./macos-installation.cjs');
 
-const PRODUCT_NAME = '谷子学术';
+const packageMetadata = require('../package.json');
+const LOCAL_TEST_BUILD = typeof packageMetadata.localTestBuild === 'string' ? packageMetadata.localTestBuild.trim() : '';
+const PRODUCT_NAME = LOCAL_TEST_BUILD ? '谷子学术测试版' : '谷子学术';
 const UPDATE_CHANNEL = 'internal';
 const UPDATE_MANIFEST_URL = process.env.MY_SCHOLAR_UPDATE_MANIFEST_URL || 'https://raw.githubusercontent.com/Drangon-Li/Guzi-Scholar/main/release-manifests/macos-arm64.json';
 const UPDATE_ALLOWED_ORIGINS = Object.freeze(['https://raw.githubusercontent.com', 'https://github.com']);
 const defaultUserDataPath = app.getPath('userData');
 app.setName(PRODUCT_NAME);
-if (!app.isPackaged) app.setPath('userData', `${defaultUserDataPath}-development`);
+if (LOCAL_TEST_BUILD) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'GuziScholar-LocalTest'));
+  app.setAppLogsPath(path.join(app.getPath('userData'), 'logs'));
+} else if (!app.isPackaged) app.setPath('userData', `${defaultUserDataPath}-development`);
 
 let mainWindow = null;
 let pythonServer = null;
@@ -127,7 +132,8 @@ ipcMain.handle('my-scholar:get-startup-context', (event) => {
       version: app.getVersion(),
       platform: process.platform,
       arch: process.arch,
-      channel: UPDATE_CHANNEL,
+      channel: LOCAL_TEST_BUILD ? 'local-test' : UPDATE_CHANNEL,
+      ...(LOCAL_TEST_BUILD ? { localTestBuild: LOCAL_TEST_BUILD } : {}),
     },
     storage: startupStorageReport,
   };
@@ -135,6 +141,7 @@ ipcMain.handle('my-scholar:get-startup-context', (event) => {
 
 ipcMain.handle('my-scholar:check-for-updates', async (event) => {
   requireMainWindowSender(event);
+  if (LOCAL_TEST_BUILD) return { ok: false, error: '本地测试版不连接正式更新服务，请使用单独提供的测试包更新。' };
   try {
     const result = await checkForUpdate({
       manifestURL: UPDATE_MANIFEST_URL,
@@ -156,6 +163,7 @@ ipcMain.handle('my-scholar:check-for-updates', async (event) => {
 
 ipcMain.handle('my-scholar:open-update-download', async (event) => {
   requireMainWindowSender(event);
+  if (LOCAL_TEST_BUILD) return { ok: false, error: '本地测试版不提供正式版本更新下载。' };
   if (!availableUpdate?.downloadURL) return { ok: false, error: '请先检查更新。' };
   await shell.openExternal(availableUpdate.downloadURL, { activate: true });
   return { ok: true };
@@ -206,18 +214,26 @@ app.on('second-instance', () => {
 
 function storageConfiguration() {
   const projectRoot = path.resolve(__dirname, '..');
+  // A test launch must not inherit a production library or state override.
+  const storageEnvironment = LOCAL_TEST_BUILD
+    ? { ...process.env, MY_SCHOLAR_DATA_DIR: '', MY_SCHOLAR_LIBRARY_DIR: '' }
+    : process.env;
   const layout = desktopStorageLayout({
     projectRoot,
     userDataDir: app.getPath('userData'),
-    isPackaged: app.isPackaged,
-    env: process.env,
+    isPackaged: app.isPackaged || Boolean(LOCAL_TEST_BUILD),
+    env: storageEnvironment,
   });
-  const location = resolveLibraryLocation({ defaultLibraryDir: layout.defaultLibraryDir, pointerPath: layout.pointerPath, env: process.env });
+  const location = resolveLibraryLocation({ defaultLibraryDir: layout.defaultLibraryDir, pointerPath: layout.pointerPath, env: storageEnvironment });
   return { ...layout, ...location };
 }
 
 async function prepareDesktopStorage() {
   let storage = storageConfiguration();
+  if (LOCAL_TEST_BUILD) {
+    startupStorageReport = { state: 'none', adopted: false, current: await inspectLibraryDirectory(storage.currentPath), legacy: [] };
+    return;
+  }
   const migrated = await migrateLegacyDesktopState(storage);
   if (migrated.pointerMigrated || migrated.copied.length) {
     diagnosticLog('migrate-desktop-state', `pointer=${migrated.pointerMigrated} files=${migrated.copied.join(',')}`);
@@ -838,8 +854,8 @@ function ensureWindow() {
 }
 
 app.whenReady().then(async () => {
-  const installationCompletion = consumeInstallationMarker({ app });
-  const installation = requestMacInstallation({ app, dialog });
+  const installationCompletion = LOCAL_TEST_BUILD ? null : consumeInstallationMarker({ app });
+  const installation = LOCAL_TEST_BUILD ? { action: 'continue' } : requestMacInstallation({ app, dialog });
   if (installation.action !== 'continue') {
     if (installation.action === 'quit') app.quit();
     return;

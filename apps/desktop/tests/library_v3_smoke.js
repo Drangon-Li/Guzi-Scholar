@@ -113,7 +113,7 @@ let browserSession;
         const rect = node?.getBoundingClientRect();
         return rect ? { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, width: rect.width, height: rect.height } : null;
       };
-      const buttons = ['#library-sort', '#columns-button', '#import-pdf-button'].map((selector) => {
+      const buttons = ['#library-sort', '#library-status-filter', '#columns-button', '#import-zotero-button', '#import-pdf-button'].map((selector) => {
         const node = document.querySelector(selector);
         const rect = node?.getBoundingClientRect();
         const style = node ? getComputedStyle(node) : null;
@@ -138,9 +138,17 @@ let browserSession;
     const buttonBottoms = responsiveLayout.buttons.map(({ rect }) => rect.bottom);
     if (!main || !title || !subtitle || !actions || title.width < 60 || title.height > 32 || subtitle.height > 24) throw new Error(`Library heading became compressed at ${width}px (${JSON.stringify(responsiveLayout)})`);
     if (responsiveLayout.scrollWidth > responsiveLayout.viewportWidth + 1 || actions.left < main.left - 1 || actions.right > main.right + 1) throw new Error(`Library heading overflowed at ${width}px (${JSON.stringify(responsiveLayout)})`);
+    if (responsiveLayout.buttons.some(({ rect }) => rect.left < actions.left - 1 || rect.right > actions.right + 1 || rect.top < actions.top - 1 || rect.bottom > actions.bottom + 1)) throw new Error(`Library toolbar control overflowed at ${width}px (${JSON.stringify(responsiveLayout)})`);
     if (responsiveLayout.buttons.some(({ rect, whiteSpace, scrollHeight, clientHeight }) => whiteSpace !== 'nowrap' || rect.height > 44 || scrollHeight > clientHeight + 1)) throw new Error(`Library toolbar text wrapped at ${width}px (${JSON.stringify(responsiveLayout.buttons)})`);
-    if (buttonTops.length && Math.max(...buttonTops) - Math.min(...buttonTops) > 1.5) throw new Error(`Library toolbar buttons no longer share a row at ${width}px (${JSON.stringify(responsiveLayout.buttons)})`);
-    if (buttonBottoms.length && Math.max(...buttonBottoms) - Math.min(...buttonBottoms) > 1.5) throw new Error(`Library toolbar buttons have mismatched heights at ${width}px (${JSON.stringify(responsiveLayout.buttons)})`);
+    if (width > 860 && buttonTops.length && Math.max(...buttonTops) - Math.min(...buttonTops) > 1.5) throw new Error(`Library toolbar buttons no longer share a row at ${width}px (${JSON.stringify(responsiveLayout.buttons)})`);
+    if (width > 860 && buttonBottoms.length && Math.max(...buttonBottoms) - Math.min(...buttonBottoms) > 1.5) throw new Error(`Library toolbar buttons have mismatched heights at ${width}px (${JSON.stringify(responsiveLayout.buttons)})`);
+    for (let index = 0; index < responsiveLayout.buttons.length; index += 1) {
+      const first = responsiveLayout.buttons[index].rect;
+      for (const { rect: second } of responsiveLayout.buttons.slice(index + 1)) {
+        if (Math.min(first.right, second.right) - Math.max(first.left, second.left) > 1 && Math.min(first.bottom, second.bottom) - Math.max(first.top, second.top) > 1) throw new Error(`Library toolbar controls overlap at ${width}px (${JSON.stringify(responsiveLayout.buttons)})`);
+        if (Math.abs(first.top - second.top) <= 1.5 && Math.abs(first.bottom - second.bottom) > 1.5) throw new Error(`Library toolbar buttons have mismatched row heights at ${width}px (${JSON.stringify(responsiveLayout.buttons)})`);
+      }
+    }
   }
   await page.setViewportSize({ width: 1440, height: 900 });
 

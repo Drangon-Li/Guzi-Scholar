@@ -43,6 +43,7 @@ PYINSTALLER_PACKAGES=(
   'pyinstaller-hooks-contrib==2026.6'
   'setuptools==83.0.0'
   'pyinstaller==6.16.0'
+  'PyMuPDF==1.28.2'
 )
 
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
@@ -119,11 +120,20 @@ expected = {
     "pyinstaller-hooks-contrib": "2026.6",
     "setuptools": "83.0.0",
     "pyinstaller": "6.16.0",
+    "PyMuPDF": "1.28.2",
 }
 raise SystemExit(0 if all(metadata.version(name) == version for name, version in expected.items()) else 1)
 ' >/dev/null 2>&1; then
   "${PYINSTALLER_ENV}/bin/python3" -m pip install --disable-pip-version-check \
     "${PYINSTALLER_PACKAGES[@]}"
+fi
+
+# The Codex Python distribution loads this policy file relative to ssl.py.
+# Preserve it in the frozen runtime instead of changing its TLS policy.
+SSL_POLICY_FILE="$("${PYINSTALLER_ENV}/bin/python3" -c 'import pathlib, ssl; print(pathlib.Path(ssl.__file__).with_name("codex-rejected-cas.pem"))')"
+PYINSTALLER_SSL_DATA=()
+if [[ -f "${SSL_POLICY_FILE}" ]]; then
+  PYINSTALLER_SSL_DATA=(--add-data "${SSL_POLICY_FILE}:.")
 fi
 
 "${PYINSTALLER_ENV}/bin/python3" -m PyInstaller \
@@ -134,8 +144,10 @@ fi
   --distpath "${RUNTIME_DIR}" \
   --workpath "${BUILD_DIR}/pyinstaller-work" \
   --specpath "${BUILD_DIR}" \
-  --exclude-module fitz \
-  --exclude-module pymupdf \
+  --collect-binaries pymupdf \
+  --copy-metadata pymupdf \
+  --add-data "${PROJECT_DIR}/resources/licenses/pdf-runtime:licenses/pdf-runtime" \
+  "${PYINSTALLER_SSL_DATA[@]}" \
   "${PROJECT_DIR}/server.py"
 
 cp "${CERTIFI_CA}" "${RUNTIME_DIR}/my-scholar-server/${CA_BUNDLE_NAME}"

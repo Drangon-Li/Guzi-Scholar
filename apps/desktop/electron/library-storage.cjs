@@ -4,7 +4,7 @@ const os = require('os');
 const path = require('path');
 
 const POINTER_VERSION = 1;
-const LIBRARY_FILES = new Set(['library.json', 'library.json.bak']);
+const LIBRARY_FILES = new Set(['library.json', 'library.json.bak', 'vocabulary.json', 'vocabulary.json.bak']);
 const DESKTOP_STATE_FILES = ['settings.json', 'ai-status-history.json', 'account.json'];
 
 function expandHome(value) {
@@ -183,11 +183,12 @@ async function inspectLibraryDirectory(directory) {
     return { path: root, exists: true, valid: false, empty: false, itemCount: 0, jobCount, updatedAt: '', error: 'library.json 结构不受支持，未自动切换。' };
   }
   const itemCount = Array.isArray(items) ? items.length : Object.keys(items).length;
+  const hasVocabulary = (await fs.promises.readdir(root)).some((name) => name === 'vocabulary.json' || name === 'vocabulary.json.bak');
   return {
     path: root,
     exists: true,
     valid: true,
-    empty: itemCount === 0 && jobCount === 0,
+    empty: itemCount === 0 && jobCount === 0 && !hasVocabulary,
     itemCount,
     jobCount,
     updatedAt: typeof payload.updated_at === 'string' ? payload.updated_at : '',

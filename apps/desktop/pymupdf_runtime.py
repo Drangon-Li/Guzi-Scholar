@@ -14,12 +14,13 @@ Silencing the log loses nothing. MuPDF still reports failures the way callers
 already handle them, by raising (``FileDataError`` and friends); the printed
 lines were duplicate noise on a path that has to stay lock-free.
 
-Import failures are deliberately left to propagate: PyMuPDF is optional, and
-every call site already runs inside a ``try`` that treats it as unavailable.
+Import failures propagate: parsing callers can treat PyMuPDF as unavailable,
+while the packaged dependency smoke requires working PDF glyph extraction.
 """
 
 from __future__ import annotations
 
+import math
 import threading
 from typing import Any
 
@@ -55,4 +56,31 @@ def diagnostics_silenced() -> bool:
     return _configured
 
 
-__all__ = ["diagnostics_silenced", "load_fitz"]
+def verify_pdf_glyph_extraction() -> bool:
+    fitz = load_fitz()
+    expected = "Guzi rawdict"
+    with fitz.open() as document:
+        page = document.new_page(width=240, height=100)
+        page.insert_text((12, 30), expected, fontsize=12, fontname="helv")
+        pdf = document.tobytes()
+    with fitz.open(stream=pdf, filetype="pdf") as document:
+        if len(document) != 1:
+            raise RuntimeError("PDF glyph extraction smoke returned an invalid page count")
+        chars = [
+            char
+            for block in document[0].get_text("rawdict")["blocks"]
+            if block.get("type") == 0
+            for line in block["lines"]
+            for span in line["spans"]
+            for char in span["chars"]
+        ]
+        if len(chars) != len(expected) or "".join(char["c"] for char in chars) != expected:
+            raise RuntimeError("PDF glyph extraction smoke did not recover the expected glyphs")
+        for char in chars:
+            box = char["bbox"]
+            if len(box) != 4 or not all(math.isfinite(value) for value in box) or box[2] <= box[0] or box[3] <= box[1]:
+                raise RuntimeError("PDF glyph extraction smoke returned an invalid glyph bbox")
+    return True
+
+
+__all__ = ["diagnostics_silenced", "load_fitz", "verify_pdf_glyph_extraction"]

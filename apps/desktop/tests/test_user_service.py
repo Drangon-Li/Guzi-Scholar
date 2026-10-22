@@ -957,7 +957,7 @@ class AccountHandlerTest(unittest.TestCase):
         status, body = self._call("/api/health")
         self.assertEqual(status, 200)
         self.assertEqual(body["service"], "my-scholar-account")
-        self.assertEqual(body["version"], "0.4.0")
+        self.assertEqual(body["version"], "0.5.0")
         self.assertFalse(body["email_auth_available"])
         status, _body = self._call("/api/missing")
         self.assertEqual(status, 404)

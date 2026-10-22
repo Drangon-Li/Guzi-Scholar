@@ -38,7 +38,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 try:
     import fcntl
@@ -50,7 +50,9 @@ except ImportError:  # pragma: no cover - present only on Windows
     msvcrt = None
 
 import runtime
-from ai import TranslationQualityError, auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, is_metadata_block, list_models as ai_list_models, reference_quick_read, review_tables, services as ai_services, status as ai_status, test_connections as ai_test_connections, translate_text, translate_text_stream, translation_profile_id
+from annotation_style_sync import AnnotationStyleRecoveryRequiredError, AnnotationStyleSyncError, changed_action_fields, commit_style_sync, recover_pending_transactions
+from ai import TranslationQualityError, auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, chat_context_info, is_metadata_block, reference_quick_read, review_tables, services as ai_services, status as ai_status, test_connections as ai_test_connections, translate_text, translate_text_stream, translation_profile_id
+from ai_capabilities import discover_models, get_model_capabilities, normalize_ai_options
 from bibliography import is_fragmented_metadata_text, retrieve_bibliographic_metadata, retrieve_reference_evidence
 from config import AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE, TRANSLATION_PROVIDERS, resolve_ai_profile
 from ai import test_connection as ai_test_connection, translation_target_language
@@ -61,6 +63,8 @@ from content_store import MAX_NOTE_ASSET_BYTES, _active_conversion_root, _atomic
 from content_store import MAX_MEDIA_LAYOUT_ITEMS, _write_content_manifest, _write_english_snapshot  # noqa: F401
 from job_store import JOB_ID_RE, RENDER_GENERATION_RE, JobStore, ReflowCancelledError, ReflowConflictError, _read_json_file, set_artifact_migrator
 from library_store import LibraryStore, LibraryValidationError
+from vocabulary_store import VocabularyStore, VocabularyValidationError, source_snapshot
+from vocabulary_ai import explain as explain_vocabulary
 from layout_pipeline import (
     LayoutPipelineError,
     MathRenderer,
@@ -71,6 +75,9 @@ from layout_pipeline import (
 from parsing_providers import ProviderError, ParsingRequest, create_default_registry
 from pipeline import PipelineError, process_pdf, utc_now
 from runtime import METADATA_PENDING, METADATA_STATE_LOCK
+from zotero_import import ZoteroClient, ZoteroError
+from zotero_merge import apply_import as apply_zotero_import, stage_import as stage_zotero_import
+from zotero_service import ZoteroImports, merge_import_warnings, validate_import_request, write_json as write_zotero_json
 
 
 PROJECT_ROOT = Path(os.environ.get("MY_SCHOLAR_PROJECT_ROOT", str(Path(__file__).resolve().parent))).expanduser().resolve()
@@ -91,6 +98,7 @@ MATH_RENDERER_LOCK = threading.Lock()
 ANNOTATION_LOCK = threading.RLock()
 MEDIA_LAYOUT_LOCK = threading.RLock()
 SETTINGS_LOCK = threading.RLock()
+ANNOTATION_STYLE_RECOVERY_REQUIRED = False
 AI_STATUS_HISTORY_LOCK = threading.RLock()
 PARALLEL_IMPORT = _parallel_import_env = str(os.environ.get("MY_SCHOLAR_PARALLEL_IMPORT", "1")).strip().lower() not in {"", "0", "false", "no", "off"}
 CONVERSION_WORKERS = max(1, min(2, int(os.environ.get("MY_SCHOLAR_CONVERSION_WORKERS", "2" if PARALLEL_IMPORT else "1"))))
@@ -128,11 +136,17 @@ def _job_mutation_lock(job_id: str) -> threading.RLock:
         return JOB_MUTATION_LOCKS.setdefault(canonical_id, threading.RLock())
 
 
+def _assert_annotation_style_writable() -> None:
+    if ANNOTATION_STYLE_RECOVERY_REQUIRED:
+        raise PipelineError("语义标记同步尚待恢复，已暂停写入和文献库迁移。请重启服务以恢复备份。")
+
+
 @contextmanager
 def _job_mutation(job_id: str):
     """Serialize destructive and document-owned artifact writes per job."""
     lock = _job_mutation_lock(job_id)
     with lock:
+        _assert_annotation_style_writable()
         yield
 
 
@@ -641,7 +655,15 @@ def _annotation_action_snapshot(value: Dict[str, Any]) -> Dict[str, str]:
         return {}
     if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", action_id) or not 0 < len(label) <= 40:
         raise PipelineError("自定义标记的 ID 或名称无效。")
+    current = next((item for item in _annotation_actions(_stored_settings().get("annotation_actions"))["custom"]
+                    if item["id"] == action_id), None)
+    if current:
+        return {"action_id": action_id, **{field: current[field] for field in ("label", "kind", "color")}}
     return {"action_id": action_id, "label": label}
+
+
+def _annotation_payload(annotations: list, **fields: Any) -> Dict[str, Any]:
+    return {"annotations": annotations, "annotation_style_revision": int(_stored_settings().get("annotation_style_revision", 0)), **fields}
 
 
 APPEARANCE_DEFAULTS = {
@@ -676,7 +698,7 @@ def _appearance_settings(value: Any, *, base: Optional[Dict[str, str]] = None) -
 AI_PROFILE_LIMITS = {"base_url": 2048, "model": 256, "api_key": 4096}
 
 
-def _normalize_ai_profile(value: Any, current: Any = None, *, service: str = "chat") -> Dict[str, str]:
+def _normalize_ai_profile(value: Any, current: Any = None, *, service: str = "chat") -> Dict[str, Any]:
     """Validate one user-owned OpenAI-compatible profile.
 
     API keys are write-only from the UI: an empty key keeps the existing one,
@@ -685,11 +707,15 @@ def _normalize_ai_profile(value: Any, current: Any = None, *, service: str = "ch
     """
     incoming = value if isinstance(value, dict) else {}
     existing = current if isinstance(current, dict) else {}
-    result: Dict[str, str] = {
+    result: Dict[str, Any] = {
         "base_url": str(incoming.get("base_url", existing.get("base_url", "")) or "").strip().rstrip("/"),
         "model": str(incoming.get("model", existing.get("model", "")) or "").strip(),
         "api_key": str(existing.get("api_key", "") or "").strip(),
     }
+    try:
+        result.update(normalize_ai_options({**existing, **incoming}, strict=True))
+    except ValueError as exc:
+        raise PipelineError(str(exc)) from exc
     if service == "translation":
         provider = str(incoming.get("provider", existing.get("provider", "openai-compatible")) or "openai-compatible").strip().lower()
         if provider not in TRANSLATION_PROVIDERS:
@@ -734,7 +760,7 @@ def _normalize_ai_profile(value: Any, current: Any = None, *, service: str = "ch
     return result
 
 
-def _normalize_ai_settings(value: Any, current: Any = None) -> Dict[str, Dict[str, str]]:
+def _normalize_ai_settings(value: Any, current: Any = None) -> Dict[str, Dict[str, Any]]:
     incoming = value if isinstance(value, dict) else {}
     existing = current if isinstance(current, dict) else {}
     return {
@@ -750,6 +776,8 @@ def _public_ai_settings(value: Any) -> Dict[str, Dict[str, Any]]:
             "base_url": profile["base_url"],
             "model": profile["model"],
             "api_key_configured": bool(profile["api_key"]),
+            **normalize_ai_options(profile),
+            "capabilities": get_model_capabilities(profile),
             **({
                 "mode": profile["mode"], "provider": profile["provider"],
                 "source_language": profile["source_language"], "target_language": profile["target_language"],
@@ -763,6 +791,7 @@ def _public_ai_settings(value: Any) -> Dict[str, Dict[str, Any]]:
 
 
 def _persist_settings(data: Dict[str, Any]) -> None:
+    _assert_annotation_style_writable()
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     temporary = _atomic_temp_path(SETTINGS_PATH)
     try:
@@ -782,12 +811,27 @@ def _persist_settings(data: Dict[str, Any]) -> None:
 AI_PROFILE_NAMES = frozenset({"translation", "chat"})
 
 
+def _chat_options(value: Any) -> Dict[str, Any]:
+    if value is None:
+        return {}
+    allowed = {"reasoning_effort", "thinking_budget", "context_window"}
+    if not isinstance(value, dict) or set(value) - allowed:
+        raise PipelineError("会话设置仅支持推理强度、思考预算和上下文窗口。")
+    overrides = {key: item for key, item in value.items() if item is not None}
+    try:
+        normalized = normalize_ai_options(overrides, strict=True)
+    except ValueError as exc:
+        raise PipelineError(str(exc)) from exc
+    return {key: normalized[key] for key in overrides}
+
+
 def _copy_ai_profile(source: str, target: str) -> Dict[str, Any]:
     source_name = str(source or "").strip().lower()
     target_name = str(target or "").strip().lower()
     if source_name not in AI_PROFILE_NAMES or target_name not in AI_PROFILE_NAMES or source_name == target_name:
         raise PipelineError("AI 服务复用目标无效。")
     with SETTINGS_LOCK:
+        _assert_annotation_style_writable()
         current = _stored_settings()
         profiles = _normalize_ai_settings(current.get("ai"), current.get("ai"))
         source_profile = profiles[source_name]
@@ -803,6 +847,7 @@ def _copy_ai_profile(source: str, target: str) -> Dict[str, Any]:
             "base_url": source_profile["base_url"],
             "model": source_profile["model"],
             "api_key": source_profile["api_key"],
+            **normalize_ai_options(source_profile),
         }
         if target_name == "translation":
             copied["provider"] = "openai-compatible"
@@ -861,14 +906,19 @@ def _public_settings() -> Dict[str, Any]:
 
 
 def _write_settings(data: Dict[str, Any]) -> Dict[str, Any]:
+    global ANNOTATION_STYLE_RECOVERY_REQUIRED
     if runtime.READONLY_MODE:
         raise PipelineError("只读演示模式，暂不支持修改。")
     forbidden = {"base_url", "model", "api_key", "server_preset", "translation", "chat"}
     blocked = sorted(forbidden.intersection(data))
     if blocked:
         raise PipelineError(f"AI 服务配置只能在项目私有配置文件中修改：{', '.join(blocked)}")
-    with SETTINGS_LOCK:
-        current = _stored_settings()
+    jobs = STORE.list() if "annotation_actions" in data and STORE is not None else []
+    style_sync = None
+    with _job_mutations(record["job_id"] for record in jobs), ANNOTATION_LOCK, SETTINGS_LOCK:
+        _assert_annotation_style_writable()
+        previous = _stored_settings()
+        current = dict(previous)
         for key in ("shortcuts", "metadata", "highlight_color", "annotation_colors", "annotation_actions", "appearance", "ai", "parsing"):
             if key in data:
                 if key == "metadata" and isinstance(data[key], dict):
@@ -902,13 +952,32 @@ def _write_settings(data: Dict[str, Any]) -> Dict[str, Any]:
                     )
                 else:
                     current[key] = data[key]
-        _persist_settings(current)
-    return _public_settings()
+        changes = changed_action_fields(_annotation_actions(previous.get("annotation_actions")),
+                                        _annotation_actions(current.get("annotation_actions")))
+        if changes:
+            current["annotation_style_revision"] = int(previous.get("annotation_style_revision", 0)) + 1
+            try:
+                style_sync = commit_style_sync(SETTINGS_PATH, LIBRARY_ROOT,
+                                               [(record["job_id"], Path(record["job_dir"])) for record in jobs],
+                                               current, changes, _is_ai_annotation)
+                style_sync["revision"] = current["annotation_style_revision"]
+            except AnnotationStyleRecoveryRequiredError as exc:
+                ANNOTATION_STYLE_RECOVERY_REQUIRED = True
+                raise PipelineError(str(exc)) from exc
+            except AnnotationStyleSyncError as exc:
+                raise PipelineError(str(exc)) from exc
+        else:
+            _persist_settings(current)
+        public = _public_settings()
+        if style_sync:
+            public["annotation_style_sync"] = style_sync
+    return public
 
 
 def _job_context(job_dir: Path, limit: int = 14000) -> str:
     data = _read_json_file(_active_conversion_root(job_dir) / "document.json", {})
     chunks: List[str] = []
+    chars = 0
     if isinstance(data, dict) and isinstance(data.get("pages"), list):
         for page in data["pages"]:
             for item in page.get("elements", []) if isinstance(page, dict) else []:
@@ -916,8 +985,10 @@ def _job_context(job_dir: Path, limit: int = 14000) -> str:
                     continue
                 text = str(item.get("text", "")).strip()
                 if text:
-                    chunks.append(f"[p{page.get('page')}/{item.get('block_id')}] {text}")
-                if sum(len(x) for x in chunks) >= limit:
+                    chunk = f"[p{page.get('page')}/{item.get('block_id')}] {text}"
+                    chunks.append(chunk)
+                    chars += len(chunk) + 2
+                if chars >= limit:
                     return "\n\n".join(chunks)[:limit]
     return "\n\n".join(chunks)[:limit]
 
@@ -1257,6 +1328,7 @@ def _migrate_reader_html(job_dir: Path) -> bool:
 
 
 def _sync_ai_annotations(job_dir: Path, result: Dict[str, Any]) -> None:
+    _assert_annotation_style_writable()
     suggestions = result.get("highlights") if isinstance(result, dict) else None
     if not isinstance(suggestions, list):
         return
@@ -1340,6 +1412,7 @@ def _is_ai_annotation(item: Dict[str, Any]) -> bool:
 
 
 def _migrate_job_artifacts(job_dir: Path, manifest: Dict[str, Any]) -> Dict[str, Any]:
+    _assert_annotation_style_writable()
     if runtime.READONLY_MODE:
         # A showcase deployment serves a synced snapshot; migrating it would
         # delete and rewrite artifacts the operator pushed deliberately.
@@ -1405,10 +1478,134 @@ set_artifact_migrator(_migrate_job_artifacts)
 # initialized only after the library-root process lock is held.
 STORE: Any = None
 LIBRARY: Any = None
+VOCABULARY: Any = None
+ZOTERO_IMPORTS: Optional[ZoteroImports] = None
+ZOTERO_IMPORTS_LOCK = threading.RLock()
+
+
+def _zotero_imports() -> ZoteroImports:
+    global ZOTERO_IMPORTS
+    with ZOTERO_IMPORTS_LOCK:
+        if ZOTERO_IMPORTS is None:
+            ZOTERO_IMPORTS = ZoteroImports(DATA_ROOT / "integrations" / "zotero" / "batches")
+        return ZOTERO_IMPORTS
+
+
+def _apply_zotero_pending(job_id: str) -> Dict[str, Any]:
+    with _job_mutation(job_id), ANNOTATION_LOCK:
+        _assert_annotation_style_writable()
+        record = STORE.get(job_id)
+        if not record:
+            return {}
+        job_dir = Path(record["job_dir"])
+        if not (job_dir / "zotero-import.json").is_file():
+            return {}
+        if record.get("status") != "completed":
+            return {"pending": True}
+        try:
+            merged = apply_zotero_import(job_dir, LIBRARY, job_id)
+            pending = merged.pop("status", "pending") != "applied"
+            previous = _read_json_file(job_dir / "zotero-status.json", {})
+            if not merged.get("source_count") and isinstance(previous, dict) and not previous.get("pending"):
+                current_unanchored = merged.get("current_unanchored_count", previous.get("unanchored_count", 0))
+                warnings = merge_import_warnings(previous.get("warnings", []), merged.get("warnings", []))
+                merged = {**previous, "unanchored_count": current_unanchored, "warnings": warnings,
+                          "resolved_annotations_count": merged.get("resolved_annotations_count", 0),
+                          "removed_fallback_notes_count": merged.get("removed_fallback_notes_count", 0)}
+            result = {**merged, "pending": pending}
+        except Exception as exc:
+            # PDF publication has already succeeded. Retain the sidecar so a
+            # failed annotation merge can be retried after restart/reimport.
+            result = {"pending": True, "error": f"Zotero 笔记与批注暂未合并，可重新导入重试：{exc}"}
+            print(f"[zotero] {job_id}: {result['error']}", flush=True)
+        try:
+            write_zotero_json(job_dir / "zotero-status.json", result)
+        except OSError as exc:
+            result.update(pending=True, error=f"Zotero 导入状态暂未保存，可重新导入重试：{exc}")
+            print(f"[zotero] {job_id}: {result['error']}", flush=True)
+        return result
+
+
+def _import_zotero_document(library: str, item: Dict[str, str], folder_id: str) -> Dict[str, Any]:
+    client = ZoteroClient()
+    package = client.fetch_document(library, item["item_key"], item["attachment_key"])
+    existing_id = LIBRARY.find_zotero_source(package["source_id"])
+    record = STORE.get(existing_id) if existing_id else None
+    deduplicated = bool(record)
+    incoming_dir = None
+    try:
+        incoming_dir = STORE.new_incoming_directory()
+        pdf = client.download_pdf(library, item["attachment_key"], incoming_dir / "upload.pdf.part")
+        if record is not None and record.get("source_sha256") != pdf["sha256"]:
+            return {**item, "title": package["title"], "status": "skipped", "job_id": str(record["job_id"]),
+                    "pending": False, "error": "同一 Zotero 来源的 PDF 已变化。已保留本地文献，本次未导入新版笔记或批注，以免对应到错误正文。"}
+        # This sidecar moves atomically with a newly committed job; it must
+        # exist before startup or a conversion worker can discover the PDF.
+        # Existing jobs also use the upload transaction to repair a missing
+        # source or requeue an earlier failed conversion.
+        stage_zotero_import(incoming_dir, package)
+        record, reused = STORE.commit_staged_upload(
+            incoming_dir, pdf["filename"], pdf["byte_size"], pdf["sha256"], folder_id,
+        )
+        deduplicated = deduplicated or reused
+        incoming_dir = None
+    finally:
+        if incoming_dir is not None:
+            shutil.rmtree(incoming_dir, ignore_errors=True)
+    job_id = str(record["job_id"])
+    with _job_mutation(job_id), ANNOTATION_LOCK:
+        record = STORE.get(job_id)
+        _assert_annotation_style_writable()
+        if record is None:
+            raise ValueError("文献已被删除，请重新导入。")
+        job_dir = Path(record["job_dir"])
+        stage_zotero_import(job_dir, package)
+        warnings = []
+        try:
+            LIBRARY.sync_jobs([record])
+            LIBRARY.restore_item(job_id)
+            LIBRARY.import_zotero_metadata(job_id, package)
+            if folder_id:
+                LIBRARY.add_to_folder(job_id, folder_id)
+            warnings.extend(_apply_requested_folders(record))
+            result = _apply_zotero_pending(job_id)
+        except (OSError, LibraryValidationError) as exc:
+            result = {"pending": True, "error": f"PDF 已接收，Zotero 附属信息暂未合并，可重新导入重试：{exc}"}
+        if record.get("status") == "queued":
+            CONVERSION_QUEUE.put((job_id, str(record.get("source_filename") or "document.pdf")))
+        if record.get("status") == "failed":
+            result.update(pending=False, error="PDF 解析失败；请在“从 Zotero 导入”中重新选择该文献并导入以重试，会复用当前文献。")
+        return {**item, "title": package["title"], "status": "existing" if deduplicated else "imported",
+                "job_id": job_id, **result, "warnings": [*warnings, *result.get("warnings", [])]}
+
+
+def _zotero_batch_status(batch_id: str) -> Dict[str, Any]:
+    batch = _zotero_imports().get(batch_id)
+    for result in batch["results"]:
+        job_id = result.get("job_id")
+        if not job_id or result.get("status") == "skipped":
+            continue
+        record = STORE.get(job_id)
+        if not record:
+            result.update(pending=False, error="导入的文献已被删除。")
+        elif record.get("status") == "failed":
+            result.update(pending=False, error="PDF 解析失败；请在“从 Zotero 导入”中重新选择该文献并导入以重试，会复用当前文献。")
+        elif record.get("status") == "completed":
+            saved = _read_json_file(Path(record["job_dir"]) / "zotero-status.json", {})
+            if isinstance(saved, dict):
+                if saved.get("pending") is False and not saved.get("error"):
+                    result.pop("error", None)
+                result.update(saved)
+    return batch
 
 
 def _initialize_runtime_stores() -> None:
-    global STORE, LIBRARY
+    global STORE, LIBRARY, VOCABULARY, ANNOTATION_STYLE_RECOVERY_REQUIRED
+    if not runtime.READONLY_MODE:
+        recover_pending_transactions(SETTINGS_PATH, LIBRARY_ROOT)
+        ANNOTATION_STYLE_RECOVERY_REQUIRED = False
+    if VOCABULARY is None:
+        VOCABULARY = VocabularyStore(LIBRARY_ROOT)
     if STORE is not None and LIBRARY is not None:
         return
     STORE = JobStore(JOBS_ROOT)
@@ -1422,6 +1619,8 @@ def _initialize_runtime_stores() -> None:
 def _migration_request_enter(*, mutation: bool = False) -> bool:
     global MIGRATION_ACTIVE_REQUESTS, MIGRATION_ACTIVE_MUTATIONS
     with MIGRATION_REQUEST_CONDITION:
+        if mutation and ANNOTATION_STYLE_RECOVERY_REQUIRED:
+            return False
         if MIGRATION_QUIESCING:
             return False
         MIGRATION_ACTIVE_REQUESTS += 1
@@ -1470,7 +1669,7 @@ def _library_migration_status() -> Dict[str, Any]:
         active_requests = MIGRATION_ACTIVE_REQUESTS
         active_mutations = MIGRATION_ACTIVE_MUTATIONS
         quiescing = MIGRATION_QUIESCING
-    ready = not busy_jobs and not conversion_pending and not metadata_queued and not metadata_pending and not incoming and not active_mutations
+    ready = not ANNOTATION_STYLE_RECOVERY_REQUIRED and not busy_jobs and not conversion_pending and not metadata_queued and not metadata_pending and not incoming and not active_mutations
     return {
         "ready": ready,
         "busy_jobs": busy_jobs,
@@ -1487,6 +1686,8 @@ def _quiesce_library_requests(timeout: float = 30.0) -> Dict[str, Any]:
     global MIGRATION_QUIESCING
     deadline = time.monotonic() + max(0.1, float(timeout))
     with MIGRATION_REQUEST_CONDITION:
+        if ANNOTATION_STYLE_RECOVERY_REQUIRED:
+            return {"ready": False, "reason": "语义标记同步尚待恢复，请重启服务后再迁移文献库。"}
         if MIGRATION_QUIESCING:
             return {"ready": False, "reason": "文献库已经在准备迁移。"}
         MIGRATION_QUIESCING = True
@@ -1773,6 +1974,7 @@ def _run_conversion_job(job_id: str, source_name: str) -> None:
             completed = STORE.get(job_id)
             if completed:
                 LIBRARY.sync_jobs([completed])
+                _apply_zotero_pending(job_id)
                 settings = _metadata_settings()
                 if _setting_bool(settings.get("auto_retrieve", True), True):
                     _enqueue_metadata(job_id, _setting_bool(settings.get("online_lookup", True), True), "refine")
@@ -2082,6 +2284,8 @@ def _start_background_workers() -> None:
     metadata_enabled = _setting_bool(settings.get("auto_retrieve", True), True)
     metadata_online = _setting_bool(settings.get("online_lookup", True), True)
     for record in STORE.list():
+        if record.get("status") == "completed":
+            _apply_zotero_pending(str(record["job_id"]))
         if record.get("status") == "queued" and Path(record.get("job_dir", "")).joinpath("upload.pdf").is_file():
             CONVERSION_QUEUE.put((str(record["job_id"]), str(record.get("source_filename") or "document.pdf")))
         try:
@@ -2240,6 +2444,12 @@ class ScholarHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
+        if path == "/api/vocabulary":
+            self._vocabulary_request("list")
+            return
+        if path.startswith("/api/integrations/zotero/"):
+            self._get_zotero(path, parse_qs(parsed.query))
+            return
         if runtime.READONLY_MODE and path == "/" and LANDING_FILE and LANDING_FILE.is_file():
             self._send_bytes(LANDING_FILE.read_bytes(), "text/html; charset=utf-8")
             return
@@ -2266,7 +2476,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._send_json({
                 "ok": True,
                 "service": "my-scholar",
-                "version": "0.4.0",
+                "version": "0.5.0",
                 "readonly": runtime.READONLY_MODE,
                 "shell": os.environ.get("MY_SCHOLAR_SHELL", "reference"),
                 "ai": ai,
@@ -2337,8 +2547,11 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
                 return
             if match.group(2) == "annotations":
-                _ensure_content_layout(job_dir)
-                self._send_json({"annotations": _read_json_file(job_dir / "annotations.json", [])})
+                with ANNOTATION_LOCK:
+                    if not ANNOTATION_STYLE_RECOVERY_REQUIRED:
+                        _ensure_content_layout(job_dir)
+                    payload = _annotation_payload(_read_json_file(job_dir / "annotations.json", []))
+                self._send_json(payload)
             else:
                 notes_path = job_dir / "notes.md"
                 _ensure_content_layout(job_dir)
@@ -2466,6 +2679,22 @@ class ScholarHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
+        if path == "/api/vocabulary":
+            self._vocabulary_request("add")
+            return
+        match = re.fullmatch(r"/api/vocabulary/([a-f0-9]{32})/review", path)
+        if match:
+            self._vocabulary_request("review", match.group(1))
+            return
+        match = re.fullmatch(r"/api/vocabulary/([a-f0-9]{32})/explain", path)
+        if match:
+            if not self._require_ai_entitlement():
+                return
+            self._explain_vocabulary(match.group(1))
+            return
+        if path == "/api/integrations/zotero/imports":
+            self._start_zotero_import()
+            return
         if path == "/api/migration/prepare":
             self._prepare_library_migration()
             return
@@ -2626,10 +2855,69 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 raise PipelineError("专用机器翻译不使用模型列表。")
             if not profile["base_url"]:
                 raise PipelineError("请先填写 Base URL。")
-            models = ai_list_models(profile["base_url"], profile["api_key"])
-            self._send_json({"service": service, "models": models})
+            models = discover_models(profile)
+            self._send_json({"service": service, "models": [item["id"] for item in models],
+                             "model_capabilities": {item["id"]: item["capabilities"] for item in models}})
         except (PipelineError, RuntimeError, OSError, ValueError) as exc:
             self._send_error_json(str(exc), HTTPStatus.BAD_GATEWAY)
+
+    def _vocabulary_request(self, action: str, entry_id: str = "") -> None:
+        if action != "list" and runtime.READONLY_MODE:
+            self._send_error_json("只读演示模式，暂不支持修改。", HTTPStatus.FORBIDDEN)
+            return
+        vocabulary = VOCABULARY if VOCABULARY is not None else VocabularyStore(LIBRARY_ROOT)
+        try:
+            if action == "list":
+                self._send_json({"entries": vocabulary.list()})
+            elif action == "delete":
+                vocabulary.delete(entry_id)
+                self._send_json({"ok": True})
+            else:
+                payload = self._read_json_body(max_bytes=256 * 1024)
+                if action == "add":
+                    source = payload.get("source")
+                    if not isinstance(source, dict) or not isinstance(source.get("job_id"), str):
+                        raise VocabularyValidationError("请提供生词所在文献。")
+                    job_id = source["job_id"]
+                    if not JOB_ID_RE.fullmatch(job_id):
+                        raise VocabularyValidationError("文献标识无效。")
+                    with _job_mutation(job_id):
+                        record = STORE.get(job_id) if STORE is not None else None
+                        if record is None:
+                            self._send_error_json("生词来源文献不存在。", HTTPStatus.NOT_FOUND)
+                            return
+                        metadata = LIBRARY.get_metadata(job_id) if LIBRARY is not None else {}
+                        title = str(metadata.get("fields", {}).get("title") or "")
+                        snapshot = source_snapshot(source, record, payload.get("term"), title)
+                        entry, created = vocabulary.add(payload, snapshot)
+                    self._send_json({"entry": entry, "created": created})
+                elif action == "update":
+                    self._send_json({"entry": vocabulary.update(entry_id, payload)})
+                elif action == "review":
+                    self._send_json({"entry": vocabulary.review(entry_id, payload)})
+        except KeyError:
+            self._send_error_json("生词不存在。", HTTPStatus.NOT_FOUND)
+        except (VocabularyValidationError, LibraryValidationError, PipelineError) as exc:
+            self._send_error_json(str(exc))
+        except OSError as exc:
+            self._send_error_json(f"生词本读写失败：{exc}", HTTPStatus.INTERNAL_SERVER_ERROR)
+
+    def _explain_vocabulary(self, entry_id: str) -> None:
+        if runtime.READONLY_MODE:
+            self._send_error_json("只读演示模式，暂不支持生成释义。", HTTPStatus.FORBIDDEN)
+            return
+        vocabulary = VOCABULARY if VOCABULARY is not None else VocabularyStore(LIBRARY_ROOT)
+        try:
+            if self._read_json_body(max_bytes=1024) != {}:
+                raise VocabularyValidationError("生成释义使用已保存的词条，无需其他参数。")
+            entry = vocabulary.get(entry_id)
+            self._send_json(explain_vocabulary(entry))
+        except KeyError:
+            self._send_error_json("生词不存在。", HTTPStatus.NOT_FOUND)
+        except VocabularyValidationError as exc:
+            self._send_error_json(str(exc))
+        except (RuntimeError, ValueError, OSError) as exc:
+            self._send_error_json(_safe_connection_error(exc), HTTPStatus.BAD_GATEWAY)
 
     def _library_payload(self) -> Dict[str, Any]:
         return {"library": LIBRARY.snapshot([_public_job(item) for item in STORE.list()])}
@@ -2901,6 +3189,10 @@ class ScholarHandler(BaseHTTPRequestHandler):
     def do_PATCH(self) -> None:  # noqa: N802 - stdlib handler API
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
+        match = re.fullmatch(r"/api/vocabulary/([a-f0-9]{32})", path)
+        if match:
+            self._vocabulary_request("update", match.group(1))
+            return
         match = re.fullmatch(r"/api/library/folders/([^/]+)", path)
         if match:
             self._update_library_folder(match.group(1))
@@ -2937,6 +3229,10 @@ class ScholarHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
+        match = re.fullmatch(r"/api/vocabulary/([a-f0-9]{32})", path)
+        if match:
+            self._vocabulary_request("delete", match.group(1))
+            return
         match = re.fullmatch(r"/api/jobs/([a-f0-9]{12,40})/reflow", path)
         if match:
             self._cancel_reflow(match.group(1))
@@ -2969,6 +3265,57 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._delete_annotation(match.group(1), match.group(2))
             return
         self._send_error_json("未找到接口。", HTTPStatus.NOT_FOUND)
+
+    def _get_zotero(self, path: str, query: Dict[str, List[str]]) -> None:
+        if runtime.READONLY_MODE:
+            self._send_error_json("只读演示模式不读取本机 Zotero 文库。", HTTPStatus.FORBIDDEN)
+            return
+        try:
+            if path == "/api/integrations/zotero/status":
+                try:
+                    self._send_json(ZoteroClient().status())
+                except ZoteroError as exc:
+                    self._send_json({"available": False, "libraries": [], "error": str(exc)})
+                return
+            match = re.fullmatch(r"/api/integrations/zotero/imports/([a-f0-9]{32})", path)
+            if match:
+                self._send_json({"import": _zotero_batch_status(match.group(1))})
+                return
+            library = query.get("library", ["user:0"])[0]
+            if path == "/api/integrations/zotero/collections":
+                self._send_json({"collections": ZoteroClient().collections(library)})
+                return
+            if path == "/api/integrations/zotero/items":
+                self._send_json(ZoteroClient().items(library, query.get("collection", [""])[0], query.get("q", [""])[0], int(query.get("start", ["0"])[0])))
+                return
+            self._send_error_json("未找到 Zotero 接口。", HTTPStatus.NOT_FOUND)
+        except KeyError:
+            self._send_error_json("导入批次不存在。", HTTPStatus.NOT_FOUND)
+        except (ZoteroError, ValueError) as exc:
+            self._send_error_json(str(exc), HTTPStatus.BAD_REQUEST)
+
+    def _start_zotero_import(self) -> None:
+        if runtime.READONLY_MODE:
+            self._send_error_json("只读演示模式，暂不支持导入。", HTTPStatus.FORBIDDEN)
+            return
+        entered = False
+        try:
+            request = validate_import_request(self._read_json_body(max_bytes=64 * 1024))
+            if request["folder_id"]:
+                LIBRARY.validate_user_folder(request["folder_id"])
+            # The worker outlives this HTTP request. Keep library migration
+            # blocked until every selected attachment has been committed.
+            entered = _migration_request_enter(mutation=True)
+            if not entered:
+                raise PipelineError("文献库正在切换，请稍后导入。")
+            batch = _zotero_imports().submit(request, _import_zotero_document, on_finish=lambda: _migration_request_leave(mutation=True))
+            entered = False
+            self._send_json({"import": batch}, HTTPStatus.ACCEPTED)
+        except (PipelineError, LibraryValidationError, ValueError, OSError) as exc:
+            self._send_error_json(str(exc))
+        finally:
+            if entered:
+                _migration_request_leave(mutation=True)
 
     def _read_json_body(self, max_bytes: int = 2 * 1024 * 1024) -> Dict[str, Any]:
         try:
@@ -3067,6 +3414,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             if not quote:
                 raise PipelineError("划线内容不能为空。")
             with ANNOTATION_LOCK:
+                _assert_annotation_style_writable()
                 annotations = _read_json_file(job_dir / "annotations.json", [])
                 if not isinstance(annotations, list):
                     annotations = []
@@ -3074,6 +3422,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 block_id = payload.get("block_id")
                 source = "ai" if str(payload.get("source", "")).strip().lower() == "ai" else "manual"
                 action_snapshot = _annotation_action_snapshot(payload) if source == "manual" else {}
+                kind = action_snapshot.get("kind", kind)
                 surface = payload.get("surface") if payload.get("surface") in {"paper", "translation"} else None
                 source_block_id = str(payload["source_block_id"]) if payload.get("source_block_id") else None
                 start = payload.get("start")
@@ -3107,7 +3456,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                             and existing.get("end") == end
                         )
                     if same_annotation:
-                        self._send_json({"annotation": existing, "annotations": annotations})
+                        self._send_json(_annotation_payload(annotations, annotation=existing))
                         return
                 render_generation = str(payload.get("render_generation") or "")
                 if render_generation != "base" and not RENDER_GENERATION_RE.fullmatch(render_generation):
@@ -3140,7 +3489,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 annotations.append(item)
                 (job_dir / "annotations.json").write_text(json.dumps(annotations, ensure_ascii=False, indent=2), encoding="utf-8")
                 _sync_content_file(job_dir, "annotations/annotations.json", annotations)
-                self._send_json({"annotation": item, "annotations": annotations}, HTTPStatus.CREATED)
+                self._send_json(_annotation_payload(annotations, annotation=item), HTTPStatus.CREATED)
         except (PipelineError, OSError) as exc:
             self._send_error_json(str(exc))
 
@@ -3150,11 +3499,13 @@ class ScholarHandler(BaseHTTPRequestHandler):
         if not job_dir:
             return
         with ANNOTATION_LOCK:
+            _assert_annotation_style_writable()
             annotations = _read_json_file(job_dir / "annotations.json", [])
             annotations = [item for item in annotations if isinstance(item, dict) and item.get("id") != annotation_id]
             (job_dir / "annotations.json").write_text(json.dumps(annotations, ensure_ascii=False, indent=2), encoding="utf-8")
             _sync_content_file(job_dir, "annotations/annotations.json", annotations)
-        self._send_json({"annotations": annotations})
+            payload = _annotation_payload(annotations)
+        self._send_json(payload)
 
     @_locked_job_method
     def _delete_manual_annotations(self, job_id: str) -> None:
@@ -3162,6 +3513,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         if not job_dir:
             return
         with ANNOTATION_LOCK:
+            _assert_annotation_style_writable()
             annotations = _read_json_file(job_dir / "annotations.json", [])
             if not isinstance(annotations, list):
                 annotations = []
@@ -3169,7 +3521,8 @@ class ScholarHandler(BaseHTTPRequestHandler):
             deleted = sum(1 for item in annotations if isinstance(item, dict) and not _is_ai_annotation(item))
             (job_dir / "annotations.json").write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
             _sync_content_file(job_dir, "annotations/annotations.json", kept)
-        self._send_json({"annotations": kept, "deleted": deleted})
+            payload = _annotation_payload(kept, deleted=deleted)
+        self._send_json(payload)
 
     @_locked_job_method
     def _update_annotation(self, job_id: str, annotation_id: str) -> None:
@@ -3179,6 +3532,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json_body(max_bytes=256 * 1024)
             with ANNOTATION_LOCK:
+                _assert_annotation_style_writable()
                 annotations = _read_json_file(job_dir / "annotations.json", [])
                 if not isinstance(annotations, list):
                     annotations = []
@@ -3193,6 +3547,8 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 action_snapshot = _annotation_action_snapshot({**updated, **payload}) if (
                     "action_id" in payload or "label" in payload
                 ) else None
+                if action_snapshot:
+                    payload = {**payload, **action_snapshot}
                 next_kind = None
                 if "kind" in payload:
                     next_kind = str(payload.get("kind") or "").strip().lower()
@@ -3238,7 +3594,8 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     updated.update(action_snapshot)
                 (job_dir / "annotations.json").write_text(json.dumps(annotations, ensure_ascii=False, indent=2), encoding="utf-8")
                 _sync_content_file(job_dir, "annotations/annotations.json", annotations)
-            self._send_json({"annotation": updated, "annotations": annotations})
+                result = _annotation_payload(annotations, annotation=updated)
+            self._send_json(result)
         except (PipelineError, OSError) as exc:
             self._send_error_json(str(exc))
 
@@ -3613,22 +3970,23 @@ class ScholarHandler(BaseHTTPRequestHandler):
             if not isinstance(messages, list):
                 raise PipelineError("messages 必须是数组。")
             selected = str(payload.get("selected_text", "")).strip()
-            # Chat gets the whole paper (block-tagged) instead of a preview so
-            # the assistant can ground answers anywhere in the document.
-            context = _job_context(job_dir, 120000)
-            if selected:
-                context = (
-                    "用户当前在正文中选中了以下段落，请优先结合它作答：\n«选中开始»\n"
-                    + selected[:6000]
-                    + "\n«选中结束»\n\n论文全文（带页码与块编号）：\n"
-                    + context
-                )
+            options = _chat_options(payload.get("options"))
+            context = _job_context(job_dir, 4_000_001)
+            source_truncated = len(context) > 4_000_000
+            context = context[:4_000_000]
             image = _chat_image_context(job_dir, payload.get("selected_image"))
+            context_info = chat_context_info(context=context, messages=messages, selected_text=selected,
+                                             selected_image=image, options=options)
+            if source_truncated:
+                context_info = {**context_info, "truncated": True, "source_truncated": True}
             if payload.get("stream"):
-                self._chat_stream_response(messages, context=context, image=image)
+                self._chat_stream_response(messages, context=context, image=image, selected_text=selected,
+                                           options=options, context_info=context_info)
                 return
-            result = ai_chat(messages, context=context, image=image)
-            self._send_json({"result": result})
+            result = ai_chat(messages, context=context, image=image, selected_text=selected, options=options)
+            self._send_json({"result": result, "context": context_info})
+        except (PipelineError, ValueError) as exc:
+            self._send_error_json(str(exc), HTTPStatus.BAD_REQUEST)
         except Exception as exc:
             self._send_error_json(f"AI 对话失败：{exc}", HTTPStatus.BAD_GATEWAY)
 
@@ -3667,7 +4025,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_error_json(f"参考文献 AI 速读失败：{exc}", HTTPStatus.BAD_GATEWAY)
 
-    def _chat_stream_response(self, messages: List[dict], *, context: str, image: Optional[dict]) -> None:
+    def _chat_stream_response(self, messages: List[dict], *, context: str, image: Optional[dict],
+                              selected_text: str = "", options: Optional[dict] = None,
+                              context_info: Optional[dict] = None) -> None:
         try:
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -3681,8 +4041,11 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return
         parts: List[str] = []
         try:
+            if context_info is not None and not self._send_sse_event({"context": context_info}):
+                return
             try:
-                for delta in ai_chat_stream(messages, context=context, image=image):
+                for delta in ai_chat_stream(messages, context=context, image=image,
+                                            selected_text=selected_text, options=options):
                     parts.append(delta)
                     if not self._send_sse_event({"delta": delta}):
                         return
@@ -3696,8 +4059,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     return
                 # A gateway that cannot stream fails before the first delta;
                 # retry once with the plain request so chat still works there.
-                result = ai_chat(messages, context=context, image=image)
-            self._send_sse_event({"result": result})
+                result = ai_chat(messages, context=context, image=image,
+                                 selected_text=selected_text, options=options)
+            self._send_sse_event({"result": result, **({"context": context_info} if context_info is not None else {})})
         except Exception as exc:
             self._send_sse_event({"error": f"AI 对话失败：{exc}"})
 
@@ -4182,7 +4546,8 @@ def _install_migration_request_guard(handler: type) -> None:
                 _original(self)
                 return
             if not _migration_request_enter(mutation=_mutation):
-                self._send_error_json("文献库正在安全切换，请稍候。", HTTPStatus.SERVICE_UNAVAILABLE)
+                message = "语义标记同步尚待恢复，已暂停写入。请重启服务以恢复备份。" if ANNOTATION_STYLE_RECOVERY_REQUIRED else "文献库正在安全切换，请稍候。"
+                self._send_error_json(message, HTTPStatus.SERVICE_UNAVAILABLE)
                 return
             try:
                 _original(self)
@@ -4227,6 +4592,7 @@ def main() -> None:
         import sqlite3
         import ssl
         import urllib.request
+        from pymupdf_runtime import verify_pdf_glyph_extraction
 
         connection = sqlite3.connect(":memory:")
         try:
@@ -4235,11 +4601,13 @@ def main() -> None:
             connection.close()
         ssl.create_default_context()
         urllib.request.Request("https://example.invalid/")
+        pdf_glyph_extraction = verify_pdf_glyph_extraction()
         print(json.dumps({
             "ok": True,
             "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
             "arch": platform.machine(),
             "hashlib_scrypt": hasattr(hashlib, "scrypt"),
+            "pdf_glyph_extraction": pdf_glyph_extraction,
             "providers": _parsing_provider_registry().list_capabilities(),
         }, ensure_ascii=False))
         return

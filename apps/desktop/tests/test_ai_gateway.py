@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT))
 from ai_gateway import (  # noqa: E402
     RequestLimiter,
     _SameOriginRedirectHandler,
+    _open_provider,
     _sanitize_messages,
     _sanitize_request_body,
     build_handler,
@@ -180,6 +181,8 @@ class AIGatewayTest(unittest.TestCase):
         self.assertEqual(upstream["body"]["model"], "chat-model")
         self.assertNotIn("n", upstream["body"])
         self.assertEqual(upstream["body"]["max_tokens"], 4096)
+        self.assertNotIn("thinking", upstream["body"])
+        self.assertNotIn("chat_template_kwargs", upstream["body"])
         self.assertEqual(upstream["timeout"], 120)
         self.assertEqual(StoreStub.reservations[0][:3], (7, "chat", 100))
         self.assertGreater(StoreStub.reservations[0][3], 5)
@@ -219,6 +222,89 @@ class AIGatewayTest(unittest.TestCase):
         )
         self.assertEqual(clean["max_tokens"], 8192)
 
+    def test_explicit_reasoning_controls_are_preserved_and_counted(self) -> None:
+        controls = [
+            {"reasoning_effort": "high"},
+            {"reasoning": {"effort": "none"}},
+            {"reasoning": {"max_tokens": 1024, "exclude": True}},
+            {"reasoning": {"enabled": True}},
+            {"thinking": {"type": "enabled", "budget_tokens": 1024}},
+            {"thinking": {"type": "adaptive"}, "output_config": {"effort": "xhigh"}},
+            {"thinking": {"type": "disabled"}},
+            {"enable_thinking": True, "thinking_budget": 2048},
+            {"chat_template_kwargs": {"enable_thinking": False}},
+        ]
+        for options in controls:
+            with self.subTest(options=options):
+                clean, units = _sanitize_request_body("chat", {"messages": [{"role": "user", "content": "hello"}], **options})
+                for key, value in options.items():
+                    self.assertEqual(clean[key], value)
+                self.assertEqual(units, len(json.dumps(clean, ensure_ascii=False, separators=(",", ":")).encode("utf-8")))
+
+    def test_invalid_reasoning_controls_and_clamped_budget_conflicts_are_rejected(self) -> None:
+        invalid = [
+            {"reasoning_effort": "high\ninvalid"}, {"reasoning_effort": "x" * 33},
+            {"thinking": {"type": "enabled", "budget_tokens": True}},
+            {"thinking": {"type": "adaptive", "budget_tokens": 1024}},
+            {"thinking": {"type": "disabled", "budget_tokens": 1024}},
+            {"thinking": {"type": "enabled", "budget_tokens": 4096}, "max_tokens": 99999},
+            {"thinking_budget": 4097}, {"thinking_budget": 0},
+            {"enable_thinking": "false"}, {"enable_thinking": False, "thinking_budget": 1024},
+            {"reasoning": {"effort": "none", "max_tokens": 1024}},
+            {"reasoning": {"max_tokens": 1024}, "max_completion_tokens": 1024},
+            {"reasoning": {"enabled": "yes"}}, {"reasoning": {"unknown": {"x": 1}}},
+            {"chat_template_kwargs": {"enable_thinking": False, "arbitrary": "ignored?"}},
+            {"output_config": {"effort": "high", "unknown": True}},
+            {"max_tokens": 1000, "max_completion_tokens": 1000},
+        ]
+        for options in invalid:
+            with self.subTest(options=options), self.assertRaises(AccountError):
+                _sanitize_request_body("chat", {"messages": [{"role": "user", "content": "hello"}], **options})
+        clean, _ = _sanitize_request_body("chat", {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 128, "enable_thinking": True, "thinking_budget": 2048})
+        self.assertEqual(clean["thinking_budget"], 2048)
+
+    def test_proxy_preserves_explicit_thinking_instead_of_disabling_it(self) -> None:
+        sent = []
+
+        def opener(request: urllib.request.Request, *, timeout: int) -> ResponseStub:
+            sent.append(json.loads(request.data.decode("utf-8")))
+            return ResponseStub(b'{"choices":[{"message":{"content":"ok"}}]}')
+
+        with GatewayServer(opener) as gateway:
+            self._post(gateway, "valid-session", {"messages": [{"role": "user", "content": "hello"}], "enable_thinking": True, "thinking_budget": 2048})
+        self.assertTrue(sent[0]["enable_thinking"])
+        self.assertEqual(sent[0]["thinking_budget"], 2048)
+        self.assertNotIn("chat_template_kwargs", sent[0])
+
+    def test_provider_retries_only_response_format_and_preserves_thinking_controls(self) -> None:
+        sent = []
+
+        def opener(request: urllib.request.Request, *, timeout: int) -> ResponseStub:
+            sent.append(json.loads(request.data.decode("utf-8")))
+            if len(sent) == 1:
+                raise urllib.error.HTTPError(request.full_url, 400, "Unsupported format", {}, None)
+            return ResponseStub(b'{"choices":[{"message":{"content":"ok"}}]}')
+
+        outbound = {"messages": [{"role": "user", "content": "hello"}], "response_format": {"type": "json_object"},
+                    "chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "none"}
+        with _open_provider("chat", PROFILES["chat"], outbound, opener, timeout=7):
+            pass
+        self.assertEqual(len(sent), 2)
+        self.assertNotIn("response_format", sent[1])
+        self.assertEqual(sent[1]["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertEqual(sent[1]["reasoning_effort"], "none")
+
+    def test_rejected_explicit_thinking_is_not_removed_and_retried(self) -> None:
+        sent = []
+
+        def opener(request: urllib.request.Request, *, timeout: int) -> ResponseStub:
+            sent.append(json.loads(request.data.decode("utf-8")))
+            raise urllib.error.HTTPError(request.full_url, 422, "Unsupported thinking", {}, None)
+
+        with self.assertRaises(urllib.error.HTTPError):
+            _open_provider("chat", PROFILES["chat"], {"messages": [{"role": "user", "content": "hello"}], "chat_template_kwargs": {"enable_thinking": False}}, opener, timeout=7)
+        self.assertEqual(len(sent), 1)
+
     def test_oversized_or_nested_provider_controls_are_rejected(self) -> None:
         with self.assertRaisesRegex(AccountError, "response_format"):
             _sanitize_request_body("chat", {
@@ -251,6 +337,9 @@ class AIGatewayTest(unittest.TestCase):
         def opener(request: urllib.request.Request, *, timeout: int) -> ResponseStub:
             calls.append(request.full_url)
             self.assertEqual(timeout, 7)
+            body = json.loads(request.data.decode("utf-8"))
+            self.assertNotIn("chat_template_kwargs", body)
+            self.assertNotIn("thinking", body)
             return ResponseStub(b'{"choices":[{"message":{"content":"OK"}}]}')
 
         result = probe_profiles(PROFILES, opener=opener, timeout=7)

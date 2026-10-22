@@ -14,6 +14,8 @@ import os
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from ai_capabilities import normalize_ai_options
+
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEVELOPER_TOKENS_PATH = PROJECT_ROOT / "developer.tokens.json"
@@ -74,7 +76,7 @@ def _profile_id(base_url: str, model: str, mode: str = "") -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def _normalize_profile(value: Any, *, service: str = "chat") -> dict[str, str]:
+def _normalize_profile(value: Any, *, service: str = "chat") -> dict[str, Any]:
     if not isinstance(value, Mapping):
         value = {}
     base_url = str(value.get("base_url", "") or "").strip().rstrip("/")
@@ -90,6 +92,7 @@ def _normalize_profile(value: Any, *, service: str = "chat") -> dict[str, str]:
         "model": model,
         **({"mode": mode} if service == "translation" else {}),
         "profile_id": _profile_id(base_url, model, mode),
+        **normalize_ai_options(value),
     }
     if service == "translation":
         provider = str(value.get("provider") or "openai-compatible").strip().lower()
@@ -113,10 +116,14 @@ def _normalize_profile(value: Any, *, service: str = "chat") -> dict[str, str]:
                 # Old machine translations could drop styling placeholders.
                 identity.append(MACHINE_TRANSLATION_FORMAT_VERSION)
             result["profile_id"] = hashlib.sha256(json.dumps(identity).encode("utf-8")).hexdigest()
+    options = normalize_ai_options(value)
+    if options != normalize_ai_options({}) and result["profile_id"]:
+        identity = [result["profile_id"], options]
+        result["profile_id"] = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
     return result
 
 
-def _user_profile(name: str, environ: Mapping[str, Any]) -> Optional[dict[str, str]]:
+def _user_profile(name: str, environ: Mapping[str, Any]) -> Optional[dict[str, Any]]:
     raw = _read_json(settings_path(environ))
     profiles = raw.get("ai") if isinstance(raw.get("ai"), Mapping) else {}
     if not isinstance(profiles, Mapping) or name not in profiles:
@@ -125,7 +132,7 @@ def _user_profile(name: str, environ: Mapping[str, Any]) -> Optional[dict[str, s
     return _normalize_profile(profiles.get(name), service=name)
 
 
-def _explicit_gateway_profile(name: str, environ: Mapping[str, Any]) -> Optional[dict[str, str]]:
+def _explicit_gateway_profile(name: str, environ: Mapping[str, Any]) -> Optional[dict[str, Any]]:
     base = str(environ.get(AI_GATEWAY_URL_ENV, "") or "").strip().rstrip("/")
     if not base:
         return None
@@ -143,7 +150,7 @@ def resolve_ai_profile(
     service: str,
     *,
     environ: Optional[Mapping[str, Any]] = None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Resolve one AI profile from local user settings or developer config."""
     name = str(service or "").strip().lower()
     if name not in AI_SERVICES:
