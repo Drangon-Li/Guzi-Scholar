@@ -73,7 +73,7 @@ assert.strictEqual(manifest.build?.productName, '谷子学术');
 assert.strictEqual(manifest.build?.directories?.output, 'dist/mac.noindex');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleDisplayName, '谷子学术');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleName, '谷子学术');
-assert.strictEqual(manifest.version, '0.4.0');
+assert.strictEqual(manifest.version, '0.5.0');
 assert.strictEqual(manifest.build?.afterPack, 'scripts/after-pack.cjs');
 assert.match(manifest.scripts?.['pack:mac'] || '', /prepare:mac/u);
 assert.match(manifest.scripts?.['dist:mac'] || '', /prepare:mac/u);
@@ -137,8 +137,41 @@ assert.match(prepareMacSource, /my-scholar-server\/\$\{CA_BUNDLE_NAME\}/u);
 assert.match(prepareMacSource, /test -s "\$\{RUNTIME_DIR\}\/my-scholar-server\/\$\{CA_BUNDLE_NAME\}"/u);
 assert.match(prepareMacSource, /正式发布固定使用 arm64 Python 3\.11/u);
 assert.match(prepareMacSource, /正式发布固定使用 JDK 21/u);
-assert.match(prepareMacSource, /--exclude-module fitz/u);
-assert.match(prepareMacSource, /--exclude-module pymupdf/u);
+assert.match(prepareMacSource, /'PyMuPDF==1\.28\.2'/u);
+assert.match(prepareMacSource, /"PyMuPDF": "1\.28\.2"/u);
+assert.doesNotMatch(prepareMacSource, /--exclude-module (?:fitz|pymupdf)\b/u);
+assert.match(prepareMacSource, /--collect-binaries pymupdf/u);
+assert.match(prepareMacSource, /--copy-metadata pymupdf/u);
+assert.match(prepareMacSource, /--add-data "\$\{PROJECT_DIR\}\/resources\/licenses\/pdf-runtime:licenses\/pdf-runtime"/u);
+const pdfRuntimeLicenses = path.join(root, 'resources', 'licenses', 'pdf-runtime');
+const pdfRuntimeLicenseFiles = [
+  'AGPL-3.0.txt', 'GPL-3.0.txt', 'MuPDF-NOTICE.txt', 'PyMuPDF-BUILD.txt',
+  'PyMuPDF-COPYING.txt', 'SOURCES.txt', 'THIRD-PARTY-NOTICES.txt',
+];
+for (const relative of pdfRuntimeLicenseFiles) {
+  assert.ok(fs.statSync(path.join(pdfRuntimeLicenses, relative)).isFile(), `PDF runtime license material is missing: ${relative}`);
+}
+const pdfAgpl = fs.readFileSync(path.join(pdfRuntimeLicenses, 'AGPL-3.0.txt'), 'utf8');
+const pdfGpl = fs.readFileSync(path.join(pdfRuntimeLicenses, 'GPL-3.0.txt'), 'utf8');
+assert.match(pdfAgpl, /GNU AFFERO GENERAL PUBLIC LICENSE/u);
+assert.match(pdfAgpl, /13\. Remote Network Interaction/u);
+assert.match(pdfAgpl, /END OF TERMS AND CONDITIONS/u);
+assert.match(pdfGpl, /GNU GENERAL PUBLIC LICENSE/u);
+assert.match(pdfGpl, /Version 3, 29 June 2007/u);
+assert.match(pdfGpl, /END OF TERMS AND CONDITIONS/u);
+assert.strictEqual(fs.readFileSync(path.join(pdfRuntimeLicenses, 'PyMuPDF-COPYING.txt'), 'utf8'), 'Dual Licensed - GNU AFFERO GPL 3.0 or Artifex Commercial License');
+const pdfSources = fs.readFileSync(path.join(pdfRuntimeLicenses, 'SOURCES.txt'), 'utf8');
+assert.match(pdfSources, /12786d12b2962a1d77fd13b103162eddf749644c/u);
+assert.match(pdfSources, /5e0be7908a715aa20333caddd73f1d6f01e4cd0c26e869fa2dd0b7f344da2249/u);
+assert.match(pdfSources, /44075a84e329db55b9bef5f342a70fd26d69e48ad1d33cb89d9664581c641156/u);
+for (const asset of ['pymupdf-1.28.2.tar.gz', 'mupdf-1.28.2-source.tar.gz']) {
+  assert.ok(pdfSources.includes(`https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v${manifest.version}/${asset}`), `PDF source archive must accompany this exact release: ${asset}`);
+}
+assert.ok(pdfSources.includes(`/blob/v${manifest.version}/apps/desktop/scripts/prepare-mac-release.sh`));
+const pdfThirdParty = fs.readFileSync(path.join(pdfRuntimeLicenses, 'THIRD-PARTY-NOTICES.txt'), 'utf8');
+for (const upstreamNotice of ['thirdparty/freetype/docs/FTL.TXT', 'thirdparty/libjpeg/README', 'resources/fonts/droid/NOTICE']) {
+  assert.ok(pdfThirdParty.includes(upstreamNotice), `MuPDF upstream notice must be preserved: ${upstreamNotice}`);
+}
 assert.match(prepareMacSource, /--release 11/u);
 assert.match(prepareMacSource, /--dependency-smoke/u);
 assert.match(prepareMacSource, /fetch-pandoc\.sh/u);
@@ -176,6 +209,12 @@ if (packagedApp) {
   const packagedAppRoot = path.resolve(packagedApp);
   const resourcesRoot = path.join(packagedAppRoot, 'Contents', 'Resources');
   assert.ok(fs.statSync(resourcesRoot).isDirectory(), 'the packaged app Resources directory must exist');
+  const packagedManifest = JSON.parse(fs.readFileSync(path.join(resourcesRoot, 'app', 'package.json'), 'utf8'));
+  const localTestBuild = typeof packagedManifest.localTestBuild === 'string' && packagedManifest.localTestBuild.trim();
+  const expectedExecutable = localTestBuild ? '谷子学术测试版' : manifest.build.productName;
+  const bundleExecutable = runChecked('/usr/libexec/PlistBuddy', ['-c', 'Print :CFBundleExecutable', path.join(packagedAppRoot, 'Contents', 'Info.plist')]).stdout.trim();
+  assert.strictEqual(bundleExecutable, expectedExecutable, 'CFBundleExecutable must match the formal or local-test product name');
+  const appExecutable = path.join(packagedAppRoot, 'Contents', 'MacOS', bundleExecutable);
   assert.strictEqual(fs.existsSync(path.join(resourcesRoot, 'components')), false, 'managed components must stay in userData, outside the app bundle');
   for (const relative of ['app/component_manager.py', 'app/mineru_discovery.py', 'app/parsing_providers.py']) {
     assert.ok(fs.statSync(path.join(resourcesRoot, relative)).isFile(), `${relative} is missing from the packaged app`);
@@ -197,7 +236,11 @@ if (packagedApp) {
   assert.strictEqual(actualOdlSha, '104a5523c812ba3a43a3c7dd6156e33f23d0e32f03ef1ac629009ef96d7a79e1');
   assert.ok(fs.statSync(pandoc).isFile(), 'bundled Pandoc must be present');
   assert.ok(fs.statSync(path.join(resourcesRoot, 'licenses', 'pandoc', 'COPYING.md')).isFile(), 'Pandoc license must be present');
-  for (const executable of [path.join(packagedAppRoot, 'Contents', 'MacOS', '谷子学术'), server, java, pandoc]) {
+  for (const relative of pdfRuntimeLicenseFiles) {
+    const packagedLicense = path.join(resourcesRoot, 'python-server', '_internal', 'licenses', 'pdf-runtime', relative);
+    assert.deepStrictEqual(fs.readFileSync(packagedLicense), fs.readFileSync(path.join(pdfRuntimeLicenses, relative)), `packaged PDF runtime license material differs: ${relative}`);
+  }
+  for (const executable of [appExecutable, server, java, pandoc]) {
     assert.match(runChecked('/usr/bin/file', [executable]).stdout, /arm64/u, `${executable} is not arm64`);
   }
   const pandocRun = runChecked(pandoc, ['--from=markdown+tex_math_dollars+tex_math_single_backslash', '--to=html5', '--mathml'], {
@@ -230,6 +273,7 @@ if (packagedApp) {
     const dependencyStatus = JSON.parse(dependency.stdout.trim().split(/\r?\n/u).at(-1));
     assert.strictEqual(dependencyStatus.ok, true);
     assert.strictEqual(dependencyStatus.hashlib_scrypt, true);
+    assert.strictEqual(dependencyStatus.pdf_glyph_extraction, true, 'packaged PDF glyph extraction must work, including rawdict text and character geometry');
     assert.deepStrictEqual(dependencyStatus.providers.map((provider) => provider.id), ['local-mineru', 'remote-guzi']);
 
     const sourcePdf = path.join(temporary, 'runtime-smoke.pdf');

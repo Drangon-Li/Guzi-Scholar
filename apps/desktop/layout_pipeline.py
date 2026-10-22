@@ -1227,10 +1227,8 @@ def _stop_mineru_process(process: subprocess.Popen) -> None:
 MINERU_PROGRESS_RE = re.compile(
     r"^(?P<stage>[A-Za-z][A-Za-z0-9 ()/_-]{0,48}):\s+\d{1,3}%\|.*\|\s*(?P<done>\d+)/(?P<total>\d+)\b"
 )
-# PyMuPDF is not part of the packaged runtime, so _page_count() there always
-# reports 1 and the budget would silently collapse to its floor. MinerU states
-# the page count on stdout within seconds of starting, which is the one source
-# available wherever it actually runs.
+# MinerU reports page count even when the local PDF reader cannot inspect
+# the file, keeping the progress budget from collapsing to its floor.
 MINERU_PAGES_RE = re.compile(r"(?:(\d+)\s+pages\s+total|total_pages=(\d+)|page_count=(\d+))")
 
 

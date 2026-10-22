@@ -2,7 +2,7 @@
 
 My Scholar 是一个本地优先的跨平台学术 PDF 阅读器。它把 PDF 转成连续阅读的 HTML，并在同一个桌面应用中提供文献管理、元数据检索、翻译、标注、笔记和文章问答。
 
-当前版本为 `0.4.0`，是一个面向单用户本地部署的开源版本。PDF、译文、笔记、标注、设置和 AI 配置默认保存在本机，不需要注册账号或连接远程用户服务。
+当前版本为 `0.5.0`，是一个面向单用户本地部署的开源版本。PDF、译文、笔记、标注、设置和 AI 配置默认保存在本机，不需要注册账号或连接远程用户服务。
 
 ## 主要功能
 
@@ -34,7 +34,7 @@ My Scholar 是一个本地优先的跨平台学术 PDF 阅读器。它把 PDF �
 | Java 11+ 与 OpenDataLoader PDF CLI | MinerU 不可用时的转换回退 | 可选 |
 | Pandoc | LaTeX 转 MathML | 可选（macOS 安装版内置） |
 | KaTeX（vendor 于 `web/vendor/katex/`） | 阅读器公式前端重渲染 | 已内置 |
-| PyMuPDF (`fitz`) | PDF 元数据和视觉裁剪 | 可选 |
+| PyMuPDF (`fitz`) | PDF 元数据和视觉裁剪 | 源码开发可选；macOS 安装版内置 1.28.2 |
 | Playwright | 浏览器交互回归测试 | 仅测试需要 |
 
 核心 Python 服务主要使用标准库。执行完整的 `npm run check` 时，Python 构建还必须提供 `hashlib.scrypt`；可运行 `python3 -c "import hashlib; assert hasattr(hashlib, 'scrypt')"` 检查。导入新 PDF 至少要有匹配的 content-list sidecar、MinerU 或 OpenDataLoader 中的一条可用路径；这些路径都不可用时，应用仍可阅读已有文献，但不能完成新文献的语义转换。
@@ -372,4 +372,4 @@ MY_SCHOLAR_DATA_DIR="$QA_DATA" ./run.sh --host 127.0.0.1 --port 8766
 
 My Scholar 采用独立实现，不包含第三方私有源码、品牌资源或私有 API。仓库包含自有的本地服务和平台脚本；它们同样需要独立完成安全、隐私与运维审计。二次开发和再发布必须遵守根目录 `NOTICE.md` 中的来源说明要求。
 
-应用代码与外部转换器属于不同许可单元。发布或商业化前，应分别核对 Electron、MinerU、OpenDataLoader、Poppler、Pandoc、PyMuPDF 及其他依赖的版本和许可证。
+macOS 安装版内置 PyMuPDF 1.28.2 及其他运行时；发布或商业化前，应结合实际打包和调用方式，核对 Electron、MinerU、OpenDataLoader、Poppler、Pandoc、PyMuPDF 及其他依赖的许可证与分发义务，参阅根目录 `NOTICE.md` 和随包许可材料。

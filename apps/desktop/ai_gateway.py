@@ -194,6 +194,79 @@ def _sanitize_response_format(value: Any) -> dict[str, str]:
     return {"type": "json_object"}
 
 
+def _sanitize_effort(value: Any) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", value):
+        raise AccountError("推理强度参数无效。")
+    return value
+
+
+def _sanitize_thinking_controls(body: Mapping[str, Any], output_limit: int, thinking_limit: int) -> dict[str, Any]:
+    clean: dict[str, Any] = {}
+
+    def budget(value: Any, field: str, *, combined: bool = False) -> int:
+        maximum = output_limit - 1 if combined else thinking_limit
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+            raise AccountError(f"{field} 必须是正整数，且不能超过网关输出预算。")
+        return value
+
+    if "reasoning_effort" in body:
+        clean["reasoning_effort"] = _sanitize_effort(body["reasoning_effort"])
+    if "enable_thinking" in body:
+        if not isinstance(body["enable_thinking"], bool):
+            raise AccountError("enable_thinking 必须是布尔值。")
+        clean["enable_thinking"] = body["enable_thinking"]
+    if "thinking_budget" in body:
+        clean["thinking_budget"] = budget(body["thinking_budget"], "thinking_budget")
+    if "chat_template_kwargs" in body:
+        value = body["chat_template_kwargs"]
+        if not isinstance(value, dict) or set(value) != {"enable_thinking"} or not isinstance(value["enable_thinking"], bool):
+            raise AccountError("chat_template_kwargs 仅支持布尔值 enable_thinking。")
+        clean["chat_template_kwargs"] = dict(value)
+    if "thinking" in body:
+        value = body["thinking"]
+        if (not isinstance(value, dict) or not set(value) <= {"type", "budget_tokens"}
+                or value.get("type") not in {"enabled", "disabled", "adaptive", "between_tools"}):
+            raise AccountError("thinking 参数格式无效。")
+        thinking = {"type": value["type"]}
+        if "budget_tokens" in value:
+            if value["type"] != "enabled":
+                raise AccountError("仅手动启用思考时可以设置 budget_tokens。")
+            thinking["budget_tokens"] = budget(value["budget_tokens"], "thinking.budget_tokens", combined=True)
+        clean["thinking"] = thinking
+    if "reasoning" in body:
+        value = body["reasoning"]
+        if not isinstance(value, dict) or not value or not set(value) <= {"effort", "max_tokens", "enabled", "exclude"}:
+            raise AccountError("reasoning 参数格式无效。")
+        reasoning: dict[str, Any] = {}
+        if "effort" in value:
+            reasoning["effort"] = _sanitize_effort(value["effort"])
+        if "max_tokens" in value:
+            if "effort" in value:
+                raise AccountError("reasoning 不能同时设置 effort 和 max_tokens。")
+            reasoning["max_tokens"] = budget(value["max_tokens"], "reasoning.max_tokens", combined=True)
+        for field in ("enabled", "exclude"):
+            if field in value:
+                if not isinstance(value[field], bool):
+                    raise AccountError(f"reasoning.{field} 必须是布尔值。")
+                reasoning[field] = value[field]
+        clean["reasoning"] = reasoning
+    if "output_config" in body:
+        value = body["output_config"]
+        if not isinstance(value, dict) or set(value) != {"effort"}:
+            raise AccountError("output_config 仅支持 effort。")
+        clean["output_config"] = {"effort": _sanitize_effort(value["effort"])}
+    disabled = (clean.get("reasoning_effort") == "none" or clean.get("enable_thinking") is False
+                or clean.get("chat_template_kwargs", {}).get("enable_thinking") is False
+                or clean.get("thinking", {}).get("type") == "disabled"
+                or clean.get("reasoning", {}).get("effort") == "none"
+                or clean.get("reasoning", {}).get("enabled") is False)
+    has_budget = ("thinking_budget" in clean or "budget_tokens" in clean.get("thinking", {})
+                  or "max_tokens" in clean.get("reasoning", {}))
+    if disabled and has_budget:
+        raise AccountError("关闭思考时不能同时设置思考预算。")
+    return clean
+
+
 def _sanitize_request_body(service: str, body: Any, *, translation_mode: str = DEFAULT_TRANSLATION_MODE) -> tuple[dict[str, Any], int]:
     if not isinstance(body, dict):
         raise AccountError("AI 请求必须是 JSON 对象。")
@@ -225,6 +298,10 @@ def _sanitize_request_body(service: str, body: Any, *, translation_mode: str = D
                 clean[token_field] = max(1, min(_output_token_limit(service, translation_mode), int(value)))
             except (TypeError, ValueError) as exc:
                 raise AccountError(f"{token_field} 参数无效。") from exc
+    if "max_tokens" in clean and "max_completion_tokens" in clean:
+        raise AccountError("max_tokens 和 max_completion_tokens 不能同时设置。")
+    output_limit = clean.get("max_completion_tokens", clean.get("max_tokens", _output_token_limit(service, translation_mode)))
+    clean.update(_sanitize_thinking_controls(body, output_limit, _output_token_limit(service, translation_mode)))
     if "response_format" in body:
         clean["response_format"] = _sanitize_response_format(body["response_format"])
     if "stop" in body:
@@ -319,15 +396,12 @@ def _open_provider(
     try:
         return open_body(outbound)
     except urllib.error.HTTPError as exc:
-        retryable = exc.code in {400, 422} and (
-            "response_format" in outbound or "chat_template_kwargs" in outbound
-        )
+        retryable = exc.code in {400, 422} and "response_format" in outbound
         exc.close()
         if not retryable:
             raise
         retry_body = dict(outbound)
         retry_body.pop("response_format", None)
-        retry_body.pop("chat_template_kwargs", None)
         return open_body(retry_body)
 
 
@@ -358,12 +432,10 @@ def probe_profiles(
             "model": str(profile["model"]),
             "messages": messages,
             "stream": False,
-            "max_tokens": 8,
+            "max_tokens": 512,
         }
         if service == "translation" and _translation_mode(profile) == "qwen-mt":
             outbound["translation_options"] = {"source_lang": "auto", "target_lang": "Chinese"}
-        else:
-            outbound["chat_template_kwargs"] = {"enable_thinking": False}
         try:
             with _open_provider(service, profile, outbound, open_request, timeout=timeout) as response:
                 status = int(getattr(response, "status", HTTPStatus.OK))
@@ -500,9 +572,6 @@ def build_handler(
                     upstream_body["stream"] = body.get("stream") is True
                     if "max_tokens" not in upstream_body and "max_completion_tokens" not in upstream_body:
                         upstream_body["max_tokens"] = _output_token_limit(service, _translation_mode(profile))
-                    if service == "chat" or (service == "translation" and _translation_mode(profile) == "chat"):
-                        upstream_body["chat_template_kwargs"] = {"enable_thinking": False}
-
                     response = _open_provider(
                         service,
                         profile,

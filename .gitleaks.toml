@@ -9,6 +9,8 @@ paths = [
 ]
 regexes = [
   '''^my-scholar-[a-z0-9-]+$''',
+  # Public tokenizer strategy identifier, not a credential.
+  '''^utf8-weighted-estimate$''',
   # Public signing test vector from https://www.volcengine.com/docs/6369/67269.
   '''^WkRZeE1EQmxPVGhsWWpWak5HVmtNbUUxTXpZeU9UVXlOMlE1TmpZeVlqTQ==$'''
 ]

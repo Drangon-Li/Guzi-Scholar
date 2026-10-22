@@ -29,6 +29,7 @@ const annotation = { id: 'saved', block_id: 'old-block', quote: 'retained quote'
 const original = JSON.stringify(annotation);
 blocks = [block('new-block', 'New layout: retained quote and more.')];
 assert.equal(context.resolve(annotation).root.dataset.blockId, 'new-block');
+assert.equal(context.resolve({ ...annotation, import_anchor_disabled: true }), null, 'Unsupported Zotero anchors must never relocate even when their quote is unique.');
 assert.equal(context.resolve(annotation).range.text, annotation.quote);
 assert.equal(JSON.stringify(annotation), original, 'Locating an annotation must not overwrite its saved anchor.');
 blocks.push(block('other-block', 'Another retained quote instance.'));

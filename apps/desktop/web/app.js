@@ -62,9 +62,10 @@
     pageMargin: Object.freeze({ min: 0, max: 250 }),
   });
   const state = {
+    aiProfiles: {}, aiModelCapabilities: {},
     jobs: [], activeJob: null, selection: null, chatSelection: null, annotations: [], aiHighlights: [], chat: [], chatSessions: new Map(),
     openDocuments: [], translationCache: [], translationCaches: new Map(), translationRun: null, translationRuns: new Map(),
-    hiddenTranslationJobs: new Set(),
+    translationPreferences: { hoverEnabled: true, displayMode: 'bilingual' },
     annotationActions: { hidden_builtin: [], custom: [] },
     mediaLayouts: new Map(),
     health: null, library: null, activeFolderId: 'system-all', activeViewId: 'view-all', librarySort: 'updated_at-desc', libraryStatusFilter: '', libraryMode: 'list', primaryView: 'library-view',
@@ -83,6 +84,10 @@
   const readerJobIdPattern = /^[a-f0-9]{16}$/u;
   const readerBlockIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,159}$/u;
   const articleNoteDraftStorageKey = 'my-scholar-article-note-drafts-v1';
+  const translationPreferencesStorageKey = 'my-scholar-translation-preferences-v1';
+  try {
+    state.translationPreferences = normalizedTranslationPreferences(JSON.parse(persistentStateGet(translationPreferencesStorageKey) || 'null'));
+  } catch (_) { /* Ignore malformed local display preferences. */ }
   const graphPreferencesStorageKey = 'my-scholar-graph-preferences-v2';
   const legacyGraphPreferencesStorageKey = 'my-scholar-graph-preferences-v1';
   try {
@@ -179,6 +184,9 @@
     doc: null,
     pairs: [],
     activePairId: '',
+    activePair: null,
+    annotation: null,
+    revision: 0,
     usingCustomHighlight: false,
     pointerFrame: 0,
     pendingPoint: null,
@@ -283,6 +291,8 @@
   if (window.myScholarDesktop?.platform === 'darwin') document.documentElement.classList.add('desktop-macos');
 
   const escapeHTML = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+  const annotationStyleSyncs = [];
+  const annotationResponseRevisions = new WeakMap();
   const api = async (url, options = {}) => {
     const response = await fetch(url, options);
     const payload = await response.json().catch(() => ({}));
@@ -294,11 +304,34 @@
       error.status = response.status;
       throw error;
     }
+    const currentAnnotation = (annotation) => {
+      annotationResponseRevisions.set(annotation, Number(payload.annotation_style_revision) || 0);
+      for (const sync of annotationStyleSyncs) annotation = applyAnnotationActionFields(annotation, sync.updates, sync.revision);
+      return annotation;
+    };
+    if (Array.isArray(payload.annotations)) payload.annotations = payload.annotations.map(currentAnnotation);
+    if (payload.annotation) payload.annotation = currentAnnotation(payload.annotation);
     return payload;
   };
   const jsonOptions = (body, method = 'POST') => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const vocabulary = window.MyScholarVocabulary.create({
+    api, jsonOptions, escapeHTML, toast: showToast, confirm: requestConfirmation,
+    openSource: async (source) => {
+      try { await openVocabularySource(source); }
+      catch (error) { showToast(error.message, true); throw error; }
+    },
+    translate: async (term, jobId) => {
+      if (!aiServiceEnabled('translation')) throw new Error('翻译服务当前不可用，词条已保留，可稍后重试。');
+      return (await requestTranslation(term, null, [], { jobId })).text;
+    },
+  });
 
   const onboarding = window.MyScholarOnboarding.create({ reducedMotionQuery });
+  window.MyScholarZoteroImport.create({
+    dialog: $('#zotero-import-dialog'), request: api,
+    getTargetFolder: () => { const folder = folderById(state.activeFolderId); return folder && !folder.system ? { id: folder.id, name: folder.name } : null; },
+    onComplete: async () => { await loadLibrary(); },
+  });
 
   function healthAIService(service) {
     return state.health?.ai?.services?.[service] || null;
@@ -329,7 +362,10 @@
     readerMounts.forEach((mount) => {
       const mountedDoc = mount.frame.contentDocument;
       mountedDoc?.querySelectorAll('.my-scholar-translation').forEach((node) => node.remove());
-      if (mountedDoc) delete readerDocumentState(mountedDoc).annotationsKey;
+      if (mountedDoc) {
+        delete readerDocumentState(mountedDoc).annotationsKey;
+        applyTranslationVisibility(mountedDoc);
+      }
     });
     rebuildReaderSentencePairs(doc);
     refreshReaderSearch();
@@ -363,7 +399,7 @@
   }
 
   function isEditableAppSurface(element) {
-    return Boolean(element?.closest?.('input, textarea, select, [contenteditable="true"], .chat-bubble, .copyable-data, .library-details'));
+    return Boolean(element?.closest?.('input, textarea, select, [contenteditable="true"], .chat-bubble, .copyable-data, .library-details, .vocabulary-card, .vocabulary-review'));
   }
 
   function guardAppSelection(event) {
@@ -466,6 +502,7 @@
     }
     if (viewId === 'library-view') renderLibrary(state.jobs, { reuse: true });
     if (viewId === 'views-view') renderViews();
+    if (viewId === 'vocabulary-view') void vocabulary.load();
     if (viewId === 'settings-view') {
       loadSettings();
       window.requestAnimationFrame(updateSettingsNavigation);
@@ -505,7 +542,7 @@
     setActiveSettingsNavigation(target.id);
     if (target.id === 'settings-parsing') void loadParsingProviders();
     if (updateHash && location.hash !== `#${target.id}`) history.replaceState(null, '', `#${target.id}`);
-    if (scroll) window.scrollTo({ top: 0, behavior: reducedMotionQuery.matches ? 'auto' : 'smooth' });
+    if (scroll) window.scrollTo({ top: 0, behavior: 'auto' });
   }
   function updateSettingsNavigation() {
     if (!$('#settings-view')?.classList.contains('active-view')) return;
@@ -3461,7 +3498,20 @@
   function readerSearchRoots(doc = frameDocument()) {
     if (!doc) return [];
     const roots = [...doc.querySelectorAll('.reader-content h1[data-block-id], .reader-content h2[data-block-id], .reader-content h3[data-block-id], .reader-content h4[data-block-id], .reader-content h5[data-block-id], .reader-content h6[data-block-id], .reader-content p[data-block-id], .reader-content ul[data-block-id], .reader-content ol[data-block-id], .reader-content figcaption[data-translate-block-id], .reader-content .my-scholar-translation')];
-    return roots.filter((root) => !root.closest('.annotation-note-popover'));
+    return roots.filter((root) => !root.closest('.annotation-note-popover') && root.getClientRects().length > 0);
+  }
+
+  function readerVisibleTarget(node, doc = frameDocument()) {
+    if (!node || !doc) return null;
+    if (node.getClientRects().length) return node;
+    const block = node.closest('[data-block-id],[data-translate-block-id],[data-translation-placeholder-for]');
+    if (!block) return null;
+    const sourceId = block.dataset.translationPlaceholderFor || block.dataset.translationFor
+      || block.dataset.for || block.dataset.translateBlockId || block.dataset.blockId;
+    if (!sourceId) return null;
+    const id = cssEscape(sourceId);
+    return [...doc.querySelectorAll(`[data-block-id="${id}"],[data-translate-block-id="${id}"],.my-scholar-translation[data-for="${id}"],.my-scholar-translation-placeholder[data-translation-placeholder-for="${id}"]`)]
+      .find((candidate) => candidate.getClientRects().length > 0) || null;
   }
 
   function readerSearchMap(root, doc = frameDocument()) {
@@ -3709,10 +3759,14 @@
     window.clearTimeout(readerSentenceState.hoverTimer);
     window.clearTimeout(readerSentenceState.closeTimer);
     readerSentenceState.pendingPoint = null;
+    readerSentenceState.pendingAnnotation = null;
     readerHighlightRegistry(doc)?.delete(readerSentenceHighlightName);
     doc?.querySelectorAll('.reader-sentence-hover-fallback').forEach((node) => node.classList.remove('reader-sentence-hover-fallback'));
     doc?.querySelector('.reader-sentence-tooltip')?.remove();
     readerSentenceState.activePairId = '';
+    readerSentenceState.activePair = null;
+    readerSentenceState.annotation = null;
+    readerSentenceState.revision += 1;
     readerSentenceState.usingCustomHighlight = false;
   }
 
@@ -3764,7 +3818,8 @@
 
   function paintReaderSentenceTooltip(pair, text, { status = '', formulas = [], markers = [], emphasis = [] } = {}) {
     const doc = readerSentenceState.doc;
-    if (!doc || doc !== frameDocument() || readerSentenceState.activePairId !== pair.id) return;
+    const annotation = readerSentenceState.annotation;
+    if (!doc || doc !== frameDocument() || (!readerHoverTranslationEnabled() && !annotation) || doc.querySelector('.annotation-note-popover') || readerSentenceState.activePairId !== pair.id) return;
     const registry = readerHighlightRegistry(doc);
     const highlight = readerHighlightForRanges(doc, [pair.sourceRange]);
     if (registry && highlight) {
@@ -3776,44 +3831,80 @@
       tooltip = doc.createElement('div');
       tooltip.className = 'reader-sentence-tooltip';
       tooltip.setAttribute('role', 'tooltip');
-      tooltip.innerHTML = '<strong class="reader-sentence-tooltip-label"></strong><div class="reader-sentence-tooltip-text"></div>';
+      tooltip.innerHTML = '<section class="reader-sentence-tooltip-note" hidden><strong class="reader-sentence-tooltip-note-label"></strong><div class="annotation-note-popover-body reader-sentence-tooltip-note-body"></div></section><section class="reader-sentence-tooltip-translation"><strong class="reader-sentence-tooltip-label"></strong><div class="reader-sentence-tooltip-text"></div></section>';
       tooltip.addEventListener('pointerenter', () => window.clearTimeout(readerSentenceState.closeTimer));
       tooltip.addEventListener('pointerleave', () => clearReaderSentenceHover(doc));
       doc.body.append(tooltip);
     }
+    const note = tooltip.querySelector('.reader-sentence-tooltip-note');
+    note.hidden = !annotation;
+    if (annotation) {
+      tooltip.querySelector('.reader-sentence-tooltip-note-label').textContent = annotation.label || '笔记';
+      tooltip.querySelector('.reader-sentence-tooltip-note-body').innerHTML = renderMarkdown(annotation.note);
+      applyAnnotationTheme(tooltip, annotation);
+    }
+    tooltip.querySelector('.reader-sentence-tooltip-translation').hidden = !readerHoverTranslationEnabled();
     tooltip.querySelector('.reader-sentence-tooltip-label').textContent = status || '当前句译文';
     tooltip.querySelector('.reader-sentence-tooltip-text').replaceChildren(status
       ? doc.createTextNode(text || '')
       : renderTranslationText(text, formulas, doc, markers, emphasis));
+    positionReaderSentenceTooltip(doc);
+  }
+
+  function positionReaderSentenceTooltip(doc = frameDocument()) {
+    if (doc !== readerSentenceState.doc || doc !== frameDocument()) return;
+    const pair = readerSentenceState.activePair;
+    const tooltip = doc.querySelector('.reader-sentence-tooltip');
+    if (!pair || !tooltip) return;
+    const sentenceRects = [...pair.sourceRange.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0 && Number.isFinite(rect.top) && Number.isFinite(rect.bottom));
+    if (!sentenceRects.length) { tooltip.remove(); return; }
     const point = readerSentenceState.hoverPoint;
     const viewportWidth = doc.documentElement.clientWidth;
     const viewportHeight = doc.documentElement.clientHeight;
-    tooltip.style.maxHeight = `${Math.max(80, viewportHeight - 24)}px`;
-    const rect = tooltip.getBoundingClientRect();
+    const sentenceTop = Math.min(...sentenceRects.map((rect) => rect.top));
+    const sentenceBottom = Math.max(...sentenceRects.map((rect) => rect.bottom));
+    const belowTop = Math.ceil(sentenceBottom + 10);
+    const aboveBottom = Math.floor(sentenceTop - 10);
+    const below = Math.max(0, viewportHeight - 12 - belowTop);
+    const above = Math.max(0, aboveBottom - 12);
+    tooltip.style.maxHeight = `${Math.max(0, viewportHeight - 24)}px`;
+    const rect = { width: tooltip.offsetWidth, height: tooltip.offsetHeight };
+    if (Math.max(below, above) < Math.min(80, rect.height)) { tooltip.remove(); return; }
     const left = Math.max(12, Math.min((point?.x || 12) + 10, viewportWidth - rect.width - 12));
-    let top = (point?.y || 12) + 18;
-    if (top + rect.height > viewportHeight - 12) top = Math.max(12, (point?.y || 12) - rect.height - 12);
+    const placeBelow = rect.height <= below || (rect.height > above && below >= above);
+    tooltip.style.maxHeight = `${placeBelow ? below : above}px`;
+    const height = tooltip.offsetHeight;
+    const top = placeBelow ? belowTop : Math.floor(aboveBottom - height);
     tooltip.style.left = `${Math.round(left)}px`;
-    tooltip.style.top = `${Math.round(top)}px`;
+    tooltip.style.top = `${top}px`;
   }
 
-  function setReaderSentenceHover(pair) {
+  function setReaderSentenceHover(pair, annotation = null) {
     const doc = readerSentenceState.doc || frameDocument();
     if (!doc) return;
+    if (!readerHoverTranslationEnabled() && !annotation) { clearReaderSentenceHover(doc); return; }
     if (!pair) {
       window.clearTimeout(readerSentenceState.closeTimer);
       readerSentenceState.closeTimer = window.setTimeout(() => clearReaderSentenceHover(doc), 180);
       return;
     }
     window.clearTimeout(readerSentenceState.closeTimer);
-    if (readerSentenceState.activePairId === pair.id) return;
+    if (readerSentenceState.activePairId === pair.id && readerSentenceState.annotation?.id === annotation?.id) return;
     clearReaderSentenceHover(doc);
     readerSentenceState.activePairId = pair.id;
+    readerSentenceState.activePair = pair;
+    readerSentenceState.annotation = annotation;
+    const revision = readerSentenceState.revision;
+    const paint = (text, options) => {
+      if (readerSentenceState.revision === revision) paintReaderSentenceTooltip(pair, text, options);
+    };
     const jobId = state.activeJob?.job_id;
     const profileId = translationProfileId();
     const hoverMount = readerMount;
     readerSentenceState.hoverTimer = window.setTimeout(async () => {
-      if (!readerMountMatches(hoverMount, doc)) return;
+      if (!readerMountMatches(hoverMount, doc) || readerSentenceState.revision !== revision || doc.querySelector('.annotation-note-popover')) return;
+      if (annotation) paint('', { status: '正在翻译当前句…' });
+      if (!readerHoverTranslationEnabled()) return;
       const fragment = doc.createElement('div');
       fragment.append(pair.sourceRange.cloneContents());
       fragment.querySelectorAll('.paragraph-translate-trigger,.annotation-note-trigger').forEach((node) => node.remove());
@@ -3821,7 +3912,7 @@
       if (!source.text.trim()) return;
       const cached = cachedTranslationForSource(null, source);
       if (!cached?.text && !aiServiceEnabled('translation')) {
-        paintReaderSentenceTooltip(pair, '请在设置 → AI 服务中配置翻译提供商。', { status: '尚未配置翻译服务' });
+        paint('请在设置 → AI 服务中配置翻译提供商。', { status: '尚未配置翻译服务' });
         return;
       }
       const key = JSON.stringify([jobId, profileId, translationTargetLanguage(), translationSourceIdentity(source)]);
@@ -3832,15 +3923,15 @@
         readerSentenceState.pendingTranslations.set(key, pending);
         if (readerSentenceState.pendingTranslations.size > 256) readerSentenceState.pendingTranslations.delete(readerSentenceState.pendingTranslations.keys().next().value);
       }
-      if (!cached?.text) paintReaderSentenceTooltip(pair, '', { status: '正在翻译当前句…' });
+      if (!cached?.text) paint('', { status: '正在翻译当前句…' });
       const result = await pending;
       if (result.error) readerSentenceState.pendingTranslations.delete(key);
-      if (!readerMountMatches(hoverMount, doc) || state.activeJob?.job_id !== jobId || translationProfileId() !== profileId) return;
-      paintReaderSentenceTooltip(pair, result.text || result.error, {
+      if (!readerMountMatches(hoverMount, doc) || !readerHoverTranslationEnabled() || state.activeJob?.job_id !== jobId || translationProfileId() !== profileId) return;
+      paint(result.text || result.error, {
         formulas: result.formulas, markers: result.markers, emphasis: result.emphasis,
         status: result.error ? '此句翻译失败 · 点击段落“译”可翻译整段' : '',
       });
-    }, 500);
+    }, annotation ? NOTE_HOVER_OPEN_DELAY : 500);
   }
 
   function installReaderSentenceHover(doc = frameDocument()) {
@@ -3848,26 +3939,84 @@
     doc.documentElement.dataset.sentenceHoverReady = 'true';
     const schedule = (event) => {
       if (doc !== frameDocument()) return;
-      if (event.target?.closest?.('.reader-sentence-tooltip')) return;
-      if (event.target?.closest?.('.annotation-note-popover,[data-annotation-id],button,input,textarea,select,summary') || doc.getSelection()?.toString().trim()) {
+      if (event.target?.closest?.('.annotation-note-popover')) {
+        cancelNoteHoverOpen();
+        cancelNoteHoverClose();
+        clearReaderSentenceHover(doc);
+        return;
+      }
+      if (event.buttons || doc.getSelection()?.toString().trim()) {
+        cancelNoteHoverOpen();
+        clearReaderSentenceHover(doc);
+        if (!notePopoverHover.pinned) closeInlineAnnotation(doc);
+        return;
+      }
+      if (notePopoverHover.pinned) { clearReaderSentenceHover(doc); return; }
+      if (event.target?.closest?.('.reader-sentence-tooltip')) {
+        window.clearTimeout(readerSentenceState.closeTimer);
+        return;
+      }
+      const noteTrigger = event.target?.closest?.('.annotation-note-trigger');
+      if (noteTrigger) { scheduleNoteHoverOpen(noteTrigger); return; }
+      let noteAnnotation = null;
+      if (event.pointerType === 'mouse') {
+        let mark = event.target?.closest?.(':is(mark, mrow)[data-annotation-id]');
+        while (mark) {
+          const annotation = state.annotations.find((item) => item.id === mark.dataset.annotationId);
+          if (annotation && !isAIAnnotation(annotation) && hasAnnotationNote(annotation)) {
+            noteAnnotation = annotation;
+            break;
+          }
+          mark = mark.parentElement?.closest(':is(mark, mrow)[data-annotation-id]');
+        }
+      }
+      cancelNoteHoverOpen();
+      scheduleNoteHoverClose();
+      if (!readerHoverTranslationEnabled() && !noteAnnotation) { clearReaderSentenceHover(doc); return; }
+      if (isAnnotationInteraction(event.target) || event.target?.closest?.('button,input,textarea,select,summary') || doc.getSelection()?.toString().trim()) {
         clearReaderSentenceHover(doc);
         return;
       }
       readerSentenceState.hoverPoint = { x: event.clientX, y: event.clientY };
       readerSentenceState.pendingPoint = readerSentenceState.hoverPoint;
+      readerSentenceState.pendingAnnotation = noteAnnotation;
       if (readerSentenceState.pointerFrame) return;
       readerSentenceState.pointerFrame = doc.defaultView.requestAnimationFrame(() => {
         readerSentenceState.pointerFrame = 0;
         const point = readerSentenceState.pendingPoint;
         readerSentenceState.pendingPoint = null;
-        setReaderSentenceHover(point ? readerSentencePairAtPoint(doc, point.x, point.y) : null);
+        setReaderSentenceHover(point ? readerSentencePairAtPoint(doc, point.x, point.y) : null, readerSentenceState.pendingAnnotation);
       });
     };
+    const dismissHover = () => {
+      clearReaderSentenceHover(doc);
+      cancelNoteHoverOpen();
+      cancelNoteHoverClose();
+      if (!notePopoverHover.pinned) closeInlineAnnotation(doc);
+    };
     doc.addEventListener('pointermove', schedule, { passive: true });
-    doc.addEventListener('mouseleave', () => { if (doc === frameDocument()) setReaderSentenceHover(null); }, { passive: true });
-    doc.addEventListener('scroll', (event) => { if (doc === frameDocument() && !event.target?.closest?.('.reader-sentence-tooltip')) clearReaderSentenceHover(doc); }, { passive: true, capture: true });
-    doc.addEventListener('keydown', (event) => { if (doc === frameDocument() && event.key === 'Escape') clearReaderSentenceHover(doc); });
-    doc.defaultView?.addEventListener('blur', () => { if (doc === frameDocument()) clearReaderSentenceHover(doc); }, { passive: true });
+    doc.addEventListener('mouseleave', () => {
+      if (doc !== frameDocument()) return;
+      setReaderSentenceHover(null);
+      cancelNoteHoverOpen();
+      scheduleNoteHoverClose();
+    }, { passive: true });
+    doc.addEventListener('pointerdown', (event) => {
+      if (doc !== frameDocument() || isAnnotationInteraction(event.target) || event.target?.closest?.('.reader-sentence-tooltip')) return;
+      dismissHover();
+    }, { passive: true, capture: true });
+    doc.addEventListener('selectionchange', () => { if (doc === frameDocument() && doc.getSelection()?.toString().trim()) dismissHover(); });
+    doc.addEventListener('scroll', (event) => {
+      if (doc !== frameDocument() || event.target?.closest?.('.reader-sentence-tooltip,.annotation-note-popover')) return;
+      if (readerDocumentState(doc).translationLayoutPending) positionReaderSentenceTooltip(doc);
+      else dismissHover();
+    }, { passive: true, capture: true });
+    doc.addEventListener('keydown', (event) => {
+      if (doc !== frameDocument() || event.key !== 'Escape') return;
+      dismissHover();
+      if (!event.defaultPrevented) closeInlineAnnotation(doc);
+    });
+    doc.defaultView?.addEventListener('blur', () => { if (doc === frameDocument()) dismissHover(); }, { passive: true });
   }
   function readerURLIdentity(value) {
     try {
@@ -4058,7 +4207,7 @@
     const probeX = Math.max(1, Math.min((doc.documentElement?.clientWidth || 1) - 1, (doc.documentElement?.clientWidth || 1) / 2));
     let anchor = doc.elementFromPoint?.(probeX, probeY)?.closest?.('[data-block-id]') || null;
     if (!anchor) {
-      const blocks = [...doc.querySelectorAll('[data-block-id]')];
+      const blocks = [...doc.querySelectorAll('[data-block-id]')].filter((block) => block.getClientRects().length > 0);
       anchor = blocks.find((block) => {
         const rect = block.getBoundingClientRect();
         return rect.top <= probeY && rect.bottom > probeY;
@@ -4694,14 +4843,19 @@
   let selectionTranslationToken = 0;
   let selectionTranslationKey = '';
   let selectionTranslationAbortController = null;
+  let selectionTranslationRecord = null;
 
   function clearSelectionPopover({ clearState = false, immediate = false } = {}) {
-    window.clearTimeout(selectionTranslationTimer);
+    if (!selectionTranslationRecord?.keepForVocabulary) window.clearTimeout(selectionTranslationRecord?.timer ?? selectionTranslationTimer);
     selectionTranslationTimer = null;
-    selectionTranslationAbortController?.abort();
+    if (!selectionTranslationRecord?.keepForVocabulary) {
+      selectionTranslationAbortController?.abort();
+      selectionTranslationRecord?.resolve?.('');
+    }
     selectionTranslationAbortController = null;
     selectionTranslationToken += 1;
     selectionTranslationKey = '';
+    selectionTranslationRecord = null;
     const popover = $('#selection-popover');
     const result = $('#selection-translation-result');
     const resetResult = () => {
@@ -4774,8 +4928,13 @@
   function beginSelectionTranslation(selection, { immediate = false } = {}) {
     const key = selectionRequestKey(selection);
     if (!key) return;
+    if (!selectionTranslationRecord?.keepForVocabulary) {
+      window.clearTimeout(selectionTranslationRecord?.timer ?? selectionTranslationTimer);
+      selectionTranslationAbortController?.abort();
+      selectionTranslationRecord?.resolve?.('');
+    }
+    selectionTranslationRecord = null;
     selectionTranslationKey = key;
-    window.clearTimeout(selectionTranslationTimer);
     const token = ++selectionTranslationToken;
     if (selection.surface === 'translation') {
       renderSelectionTranslation('ready', { text: '当前选区已是译文，可直接高亮、划线、记录笔记或加入 Chat。' });
@@ -4787,9 +4946,11 @@
     }
     renderSelectionTranslation('loading');
     const jobId = state.activeJob?.job_id;
-    selectionTranslationAbortController?.abort();
     const abortController = new AbortController();
     selectionTranslationAbortController = abortController;
+    const record = { key, jobId, text: '', keepForVocabulary: false, resolve: null, promise: null };
+    record.promise = new Promise((resolve) => { record.resolve = resolve; });
+    selectionTranslationRecord = record;
     // Collapse whitespace only in the translation copy; the persisted
     // annotation anchor already uses the canonical block text and offsets.
     const quote = String(selection.quote || '').replace(/\s+/g, ' ').trim();
@@ -4798,22 +4959,26 @@
     const cachedHit = cachedTranslation(null, hashText(quote), translationTargetLanguage(), jobId);
     const stale = () => token !== selectionTranslationToken || key !== selectionTranslationKey || key !== selectionRequestKey(state.selection) || $('#selection-popover')?.hidden;
     selectionTranslationTimer = window.setTimeout(async () => {
-      selectionTranslationTimer = null;
+      if (selectionTranslationRecord === record) selectionTranslationTimer = null;
       try {
         const translated = await requestTranslation(quote, null, [], {
           jobId,
           onDelta: (partial) => { if (!stale()) renderSelectionTranslation('streaming', { text: partial }); },
           signal: abortController.signal,
         });
+        record.text = translated.text;
+        record.resolve(translated.text);
         if (stale()) return;
         renderSelectionTranslation('ready', { text: translated.text, formulas: translated.formulas });
       } catch (error) {
+        record.resolve('');
         if (stale()) return;
         renderSelectionTranslation('error', { message: translationErrorMessage(error) });
       } finally {
         if (selectionTranslationAbortController === abortController) selectionTranslationAbortController = null;
       }
     }, immediate || cachedHit ? 0 : 180);
+    record.timer = selectionTranslationTimer;
   }
 
   function isAnnotationInteraction(target) {
@@ -4939,6 +5104,7 @@
     const translation = block?.closest?.('.my-scholar-translation') || (block?.classList?.contains('my-scholar-translation') ? block : null);
     const nextSelection = {
       quote: text.slice(0, 10000),
+      sentence: window.MyScholarVocabulary.sentenceContext(canonicalText, start, end),
       block_id: block?.dataset.blockId || null,
       source_block_id: translation?.dataset.translationFor || null,
       surface: translation ? 'translation' : 'paper',
@@ -5321,7 +5487,7 @@
     jump.type = 'button';
     jump.className = 'secondary-button';
     jump.textContent = '跳转到参考文献';
-    jump.addEventListener('click', () => frameDocument()?.getElementById(`ref-${details.number}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
+    jump.addEventListener('click', () => readerVisibleTarget(frameDocument()?.getElementById(`ref-${details.number}`))?.scrollIntoView({ behavior: 'smooth', block: 'center' }));
     actions.append(jump);
     const quickRead = document.createElement('button');
     quickRead.type = 'button';
@@ -5436,6 +5602,7 @@
   function markReaderUserInteraction(mount, event) {
     if (!readerMountMatches(mount)) return;
     if (event?.type === 'keydown' && !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar'].includes(event.key)) return;
+    if (['wheel', 'touchstart', 'keydown'].includes(event?.type) && !event.target?.closest?.('.reader-sentence-tooltip,.annotation-note-popover')) clearReaderSentenceHover(mount.frame.contentDocument);
     cancelReadingLocationRestore(mount);
   }
 
@@ -5619,8 +5786,10 @@
       updateActiveReaderSection(mount);
       return false;
     }
-    const blocks = [...doc.querySelectorAll('[data-block-id]')];
-    let target = readerBlockById(location.blockId, doc);
+    const blocks = [...doc.querySelectorAll('[data-block-id]')].filter((block) => block.getClientRects().length > 0);
+    const savedBlock = readerBlockById(location.blockId, doc)
+      || (location.blockId.startsWith('translation-') ? readerBlockById(location.blockId.slice('translation-'.length), doc) : null);
+    let target = readerVisibleTarget(savedBlock, doc);
     const exactBlock = Boolean(target);
     if (!target) target = blocks.find((block) => Number(block.dataset.page || block.closest('[data-page]')?.dataset?.page) === location.page) || null;
     let top;
@@ -5870,34 +6039,98 @@
 
   const translationVisibilityStyleId = 'my-scholar-translation-visibility';
 
-  function translationsHidden(jobId = state.activeJob?.job_id) {
-    return Boolean(jobId) && state.hiddenTranslationJobs.has(jobId);
+  function normalizedTranslationPreferences(value) {
+    return {
+      hoverEnabled: value?.hoverEnabled !== false,
+      displayMode: ['original', 'bilingual', 'translation'].includes(value?.displayMode) ? value.displayMode : 'bilingual',
+    };
+  }
+
+  function readerHoverTranslationEnabled() {
+    return state.translationPreferences.hoverEnabled;
+  }
+
+  function setTranslationPreferences(values) {
+    state.translationPreferences = normalizedTranslationPreferences({ ...state.translationPreferences, ...values });
+    persistentStateSet(translationPreferencesStorageKey, JSON.stringify(state.translationPreferences));
+    clearReaderSentenceHover(readerSentenceState.doc || frameDocument());
+    readerMounts.forEach((mount) => applyTranslationVisibility(mount.frame.contentDocument));
+    applyTranslationVisibility();
+    syncTranslationVisibilityButton();
+    refreshReaderSearch();
+  }
+
+  function translationStatusAction(blockId, doc, label, refresh = false) {
+    const button = doc.createElement('button');
+    button.type = 'button';
+    button.className = 'translation-status-action';
+    button.textContent = label;
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (doc === frameDocument()) void translateBlock(blockId, null, { doc, refresh });
+    });
+    return button;
+  }
+
+  function syncTranslationBlockVisibility(block, node) {
+    if (!block) return;
+    const preserve = !block.matches('figcaption') && Boolean(block.closest('.pdf-equation, .equation, .display-math, .pdf-table, table'));
+    block.classList.toggle('my-scholar-translation-original', !preserve);
+    if (preserve) return;
+    const doc = block.ownerDocument;
+    const blockId = block.dataset.translateBlockId || block.dataset.blockId;
+    const placeholder = doc.querySelector(`[data-translation-placeholder-for="${cssEscape(blockId)}"]`);
+    if (node || state.translationPreferences.displayMode !== 'translation') placeholder?.remove();
+    else if (!placeholder) {
+      const status = doc.createElement('div');
+      status.className = 'my-scholar-translation-placeholder';
+      status.dataset.translationPlaceholderFor = blockId;
+      status.dataset.blockId = `translation-${blockId}`;
+      status.dataset.page = block.dataset.page || block.closest('[data-page]')?.dataset.page || '';
+      const label = doc.createElement('span');
+      label.textContent = '待翻译';
+      status.append(label, translationStatusAction(blockId, doc, '翻译本段'));
+      block.insertAdjacentElement('afterend', status);
+    }
+    if (node?.classList.contains('is-error') && !node.querySelector('.translation-status-action')) {
+      node.append(translationStatusAction(blockId, doc, '重试', true));
+    }
   }
 
   function applyTranslationVisibility(doc = frameDocument()) {
     if (!doc?.head) return;
-    const existing = doc.querySelector(`#${translationVisibilityStyleId}`);
-    if (translationsHidden()) {
-      if (existing) return;
-      const style = doc.createElement('style');
+    let style = doc.getElementById(translationVisibilityStyleId);
+    if (!style) {
+      style = doc.createElement('style');
       style.id = translationVisibilityStyleId;
-      // Hidden translations stay in the DOM so sentence pairing, search and
-      // selection keep working; they simply stop taking up visual space.
-      style.textContent = '.my-scholar-translation{display:none!important}';
+      style.textContent = `
+        :root[data-translation-display="original"] .my-scholar-translation { display:none!important; }
+        :root[data-translation-display="translation"] .my-scholar-translation-original { display:none!important; }
+        :root:not([data-translation-display="translation"]) .my-scholar-translation-placeholder { display:none!important; }
+        .my-scholar-translation-placeholder { display:flex; align-items:center; gap:12px; margin:.6em 0; padding:8px 0; color:var(--muted,#756b60); font:13px/1.6 system-ui,sans-serif; }
+        .translation-status-action { padding:3px 9px; border:1px solid var(--line,#d5d9df); border-radius:5px; background:var(--paper,#fff); color:var(--accent,#b45309); font:12px/1.5 system-ui,sans-serif; cursor:pointer; }
+        .my-scholar-translation.is-error .translation-status-action { margin-top:6px; }
+      `;
       doc.head.append(style);
-    } else {
-      existing?.remove();
+    }
+    doc.documentElement.dataset.translationDisplay = state.translationPreferences.displayMode;
+    if (state.translationPreferences.displayMode !== 'translation') {
+      doc.querySelectorAll('.my-scholar-translation-placeholder').forEach((node) => node.remove());
+      return;
+    }
+    for (const block of translatableBlocks(doc, 'all')) {
+      const blockId = block.dataset.translateBlockId || block.dataset.blockId;
+      const node = doc.querySelector(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`);
+      syncTranslationBlockVisibility(block, node);
     }
   }
 
   function syncTranslationVisibilityButton() {
-    const button = $('#toggle-translations-button');
-    if (!button) return;
-    const hidden = translationsHidden();
-    button.classList.toggle('active', hidden);
-    button.setAttribute('aria-pressed', hidden ? 'true' : 'false');
-    const label = $('#toggle-translations-label');
-    if (label) label.textContent = hidden ? '显示翻译' : '隐藏翻译';
+    $$('#translation-scope-menu [data-translation-display]').forEach((item) => {
+      item.setAttribute('aria-checked', String(item.dataset.translationDisplay === state.translationPreferences.displayMode));
+    });
+    $('#translation-hover-toggle')?.setAttribute('aria-checked', String(readerHoverTranslationEnabled()));
   }
 
   function scheduleReaderIdle(fn) {
@@ -6017,6 +6250,20 @@
           text-decoration:underline 2px var(--highlight-orange,#f59e0b);
           text-underline-offset:3px;
         }
+        /* Saved documents can contain fixed annotation colors with !important. */
+        body.reader-embedded .my-scholar-underline[data-user-color="true"] {
+          text-decoration-color:var(--user-highlight,#f59e0b)!important;
+        }
+        body.reader-embedded .my-scholar-highlight[data-user-color="true"] {
+          background:color-mix(in srgb,var(--user-highlight,#f59e0b) 32%,transparent)!important;
+          box-shadow:inset 0 -.09em 0 color-mix(in srgb,var(--user-highlight,#f59e0b) 62%,transparent)!important;
+        }
+        @media (prefers-color-scheme:dark) {
+          body.reader-embedded .my-scholar-highlight[data-user-color="true"] {
+            background:color-mix(in srgb,var(--user-highlight,#f59e0b) 42%,transparent)!important;
+            box-shadow:inset 0 -.09em 0 color-mix(in srgb,var(--user-highlight,#f59e0b) 72%,transparent)!important;
+          }
+        }
         :is(p,ul,ol)[data-block-id] { position:relative; }
         .paragraph-translate-trigger {
           position:absolute;
@@ -6064,6 +6311,11 @@
         .reader-sentence-tooltip { position:fixed; z-index:1100; width:min(460px,calc(100vw - 24px)); box-sizing:border-box; padding:12px 14px; overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; border:1px solid var(--line,#d5d9df); border-radius:10px; background:var(--paper,var(--reader-ui-paper,#fff)); color:var(--ink,var(--reader-ui-ink,#222)); box-shadow:0 8px 30px #0002; font:14px/1.65 system-ui,sans-serif; text-align:left; white-space:normal; overflow-wrap:anywhere; user-select:text; }
         .reader-sentence-tooltip-label { display:block; margin-bottom:6px; color:var(--muted,var(--reader-ui-muted,#666)); font-size:11px; font-weight:600; }
         .reader-sentence-tooltip-text { white-space:pre-wrap; }
+        .reader-sentence-tooltip-note:not([hidden]) + .reader-sentence-tooltip-translation:not([hidden]) { margin-top:12px; padding-top:10px; border-top:1px solid var(--line,#d5d9df); }
+        .reader-sentence-tooltip-note-label { color:var(--annotation-color,var(--muted,#666)); font-size:11px; font-weight:600; }
+        .reader-sentence-tooltip-note-body { margin-top:6px; }
+        .reader-sentence-tooltip { animation:reader-sentence-tooltip-in 160ms cubic-bezier(.22,1,.36,1) both; }
+        @keyframes reader-sentence-tooltip-in { from { opacity:0; translate:0 3px; } to { opacity:1; translate:0 0; } }
         .annotation-note-editor[contenteditable="true"],
         .annotation-note-editor[contenteditable="true"] * {
           -webkit-user-select:text!important;
@@ -6500,9 +6752,10 @@
         @media (prefers-reduced-motion:reduce) {
           .reader-content .my-scholar-media-resizable,
           .reader-content .my-scholar-media-resize-handle,
-          .annotation-note-popover { transition:none; animation:none; }
+          .annotation-note-popover,
+          .reader-sentence-tooltip { transition:none; animation:none; }
         }
-        .reader-content :is(
+        :root:not([data-translation-display="original"]) .reader-content :is(
           h1.paper-title[data-block-id],
           h1[data-translate-block-id],
           p[data-block-id],
@@ -6561,13 +6814,16 @@
     ['wheel', 'touchstart', 'pointerdown'].forEach((eventName) => doc.defaultView?.addEventListener(eventName, (event) => markReaderUserInteraction(mount, event), { passive: true, capture: true }));
     doc.defaultView?.addEventListener('scroll', () => {
       if (!readerMountMatches(mount, doc)) return;
-      clearReaderSentenceHover(doc);
+      if (readerDocumentState(doc).translationLayoutPending) positionReaderSentenceTooltip(doc);
+      else clearReaderSentenceHover(doc);
       closeImageContextMenu();
       if (doc.getSelection()?.toString().trim()) showSelection();
       else clearSelectionPopover({ clearState: true });
       const popover = doc.querySelector('.annotation-note-popover');
-      if (popover?.dataset.annotationId) {
-        const anchor = annotationAnchor(doc, popover.dataset.annotationId);
+      if (popover?.dataset.annotationId && notePopoverHover.pinned && !popover.classList.contains('is-closing')) {
+        const originalAnchor = notePopoverHover.anchor;
+        const anchor = originalAnchor?.isConnected && originalAnchor.ownerDocument === doc
+          ? originalAnchor : annotationAnchor(doc, popover.dataset.annotationId);
         if (anchor) positionInlineAnnotation(doc, popover, anchor);
       }
       scheduleReaderViewportUpdate(mount);
@@ -6631,12 +6887,12 @@
         const targetId = href.startsWith('#') ? href.slice(1) : '';
         const target = targetId && /^[a-z0-9_-]{1,128}$/iu.test(targetId) ? doc.getElementById(targetId) : null;
         if (event.metaKey) {
-          target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          readerVisibleTarget(target, doc)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         } else if (link.classList.contains('citation')) {
           openReferenceQuickPreview(link);
-          target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          readerVisibleTarget(target, doc)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         } else if (!openMediaQuickPreview(target, link)) {
-          target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          readerVisibleTarget(target, doc)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
         return;
       }
@@ -6707,6 +6963,7 @@
         applyAppearance();
         applyHighlightColor();
         applyTranslationVisibility(doc);
+        syncTranslationVisibilityButton();
         renderCachedTranslations({ reconcile: false });
         buildReaderIndexes();
         renderFrameAnnotations();
@@ -6858,7 +7115,7 @@
   }
 
   function resolveAnnotationAnchor(annotation, doc = frameDocument()) {
-    if (!doc || !annotation.quote) return null;
+    if (!doc || !annotation.quote || annotation.import_anchor_disabled === true) return null;
     const root = doc.querySelector(`[data-block-id="${cssEscape(annotation.block_id || '')}"]`);
     const generation = normalizeChatSourceGeneration(annotation.render_generation) || 'base';
     if (generation === activeChatSourceGeneration() && root) {
@@ -6907,15 +7164,62 @@
     return { root: found.root, range: rangeAtOffsets(found.root, found.start, found.end, doc) };
   }
 
+  function prepareMathAnnotationRange(range, doc) {
+    const mathFor = (node) => (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement)?.closest('math');
+    const startMath = mathFor(range.startContainer);
+    const endMath = mathFor(range.endContainer);
+    if (!startMath && !endMath) return { range, math: null };
+    const boundary = (node, offset, container, end) => {
+      if (node.nodeType === Node.TEXT_NODE && offset === (end ? 0 : node.nodeValue.length)) {
+        const nodes = textNodes(container, doc);
+        node = nodes[nodes.indexOf(node) + (end ? -1 : 1)];
+        if (!node) return null;
+        offset = end ? node.nodeValue.length : 0;
+      }
+      if (node.nodeType !== Node.TEXT_NODE || offset !== (end ? node.nodeValue.length : 0)) return null;
+      while (node.parentNode !== container) {
+        if (!node.parentNode || (end ? node.nextSibling : node.previousSibling)) return null;
+        node = node.parentNode;
+      }
+      return node;
+    };
+    const prepared = range.cloneRange();
+    if (startMath && startMath === endMath) {
+      let container = range.commonAncestorContainer;
+      if (container.nodeType !== Node.ELEMENT_NODE) container = container.parentElement;
+      while (container !== startMath && !['math', 'mrow'].includes(container.localName)) container = container.parentElement;
+      const first = boundary(range.startContainer, range.startOffset, container, false);
+      const last = boundary(range.endContainer, range.endOffset, container, true);
+      if (!first || !last) return null;
+      prepared.setStartBefore(first);
+      prepared.setEndAfter(last);
+      return { range: prepared, math: startMath };
+    }
+    // A text mark may contain a complete formula, but must not split its tree.
+    if (startMath) {
+      const first = boundary(range.startContainer, range.startOffset, startMath, false);
+      if (!first || first.previousSibling) return null;
+      prepared.setStartBefore(startMath);
+    }
+    if (endMath) {
+      const last = boundary(range.endContainer, range.endOffset, endMath, true);
+      if (!last || last.nextSibling) return null;
+      prepared.setEndAfter(endMath);
+    }
+    return { range: prepared, math: null };
+  }
+
   function applyMark(annotation) {
     const doc = frameDocument();
     if (!annotation.quote || !annotation.id) return false;
     if (doc?.querySelector(`[data-annotation-id="${cssEscape(annotation.id)}"]`)) return true;
     const anchor = resolveAnnotationAnchor(annotation, doc);
     const root = anchor?.root;
-    const range = anchor?.range;
-    if (!root || !range || range.collapsed) return false;
-    const mark = doc.createElement('mark');
+    if (!root || !anchor.range || anchor.range.collapsed) return false;
+    const prepared = prepareMathAnnotationRange(anchor.range, doc);
+    if (!prepared) return false;
+    const { range, math } = prepared;
+    const mark = math ? doc.createElementNS('http://www.w3.org/1998/Math/MathML', 'mrow') : doc.createElement('mark');
     mark.dataset.annotationId = annotation.id;
     if (annotation.kind === 'underline') {
       mark.className = 'my-scholar-underline';
@@ -6951,8 +7255,7 @@
         trigger.setAttribute('aria-label', trigger.title);
         trigger.textContent = annotation.note ? '✎' : '＋';
         trigger.addEventListener('pointerenter', (event) => {
-          if (event.pointerType !== 'mouse') return;
-          cancelNoteHoverClose();
+          if (event.pointerType !== 'mouse' || event.buttons) return;
           scheduleNoteHoverOpen(trigger);
         });
         trigger.addEventListener('pointerleave', (event) => {
@@ -6961,7 +7264,7 @@
           scheduleNoteHoverClose();
         });
         applyAnnotationTheme(trigger, annotation);
-        mark.insertAdjacentElement('afterend', trigger);
+        (math || mark).insertAdjacentElement('afterend', trigger);
       }
       root.normalize();
       return true;
@@ -6970,16 +7273,15 @@
     }
   }
 
-  // Hovering the inline marker previews the note; the popover itself is
-  // interactive, so it stays while the pointer travels to it and pins as soon
-  // as the reader clicks or edits.
   const NOTE_HOVER_OPEN_DELAY = 120;
   const NOTE_HOVER_CLOSE_DELAY = 260;
-  const notePopoverHover = { openTimer: null, closeTimer: null, pinned: false };
+  const notePopoverHover = { openTimer: null, closeTimer: null, pendingAnnotationId: '', pendingDoc: null, pinned: false, anchor: null };
 
   function cancelNoteHoverOpen() {
     window.clearTimeout(notePopoverHover.openTimer);
     notePopoverHover.openTimer = null;
+    notePopoverHover.pendingAnnotationId = '';
+    notePopoverHover.pendingDoc = null;
   }
   function cancelNoteHoverClose() {
     window.clearTimeout(notePopoverHover.closeTimer);
@@ -6987,25 +7289,28 @@
   }
   function scheduleNoteHoverOpen(trigger) {
     if (notePopoverHover.pinned) return;
-    const doc = frameDocument(); if (!doc) return;
-    const annotationId = trigger.dataset.annotationId;
-    const shown = doc.querySelector('.annotation-note-popover');
-    if (shown && shown.dataset.annotationId === annotationId && !shown.classList.contains('is-closing')) return;
+    const doc = frameDocument();
+    if (!doc || trigger.ownerDocument !== doc || !trigger.isConnected || doc.getSelection()?.toString().trim()) return;
+    const annotation = state.annotations.find((item) => item.id === trigger.dataset.annotationId);
+    if (!annotation || isAIAnnotation(annotation)) return;
+    const mark = trigger.matches(':is(mark, mrow)[data-annotation-id]') ? trigger : doc.querySelector(`:is(mark, mrow)[data-annotation-id="${cssEscape(annotation.id)}"]`);
+    const pair = readerSentenceState.pairs.findLast((item) => item.source.contains(mark) && item.sourceRange.intersectsNode(mark));
+    if (!pair) return;
+    const rect = trigger.getBoundingClientRect();
+    readerSentenceState.hoverPoint = { x: rect.left, y: rect.top };
+    cancelNoteHoverClose();
     cancelNoteHoverOpen();
-    notePopoverHover.openTimer = window.setTimeout(() => {
-      notePopoverHover.openTimer = null;
-      if (notePopoverHover.pinned) return;
-      const annotation = state.annotations.find((item) => item.id === annotationId);
-      const anchor = annotationAnchor(frameDocument(), annotationId);
-      if (annotation && anchor) showInlineAnnotation(annotation, anchor, { pinned: false });
-    }, NOTE_HOVER_OPEN_DELAY);
+    setReaderSentenceHover(pair, hasAnnotationNote(annotation) ? annotation : null);
   }
   function scheduleNoteHoverClose() {
-    if (notePopoverHover.pinned) return;
-    cancelNoteHoverClose();
+    if (notePopoverHover.pinned || notePopoverHover.closeTimer) return;
+    const doc = frameDocument();
+    const mount = readerMount;
+    const popover = doc?.querySelector('.annotation-note-popover');
+    if (!popover) return;
     notePopoverHover.closeTimer = window.setTimeout(() => {
       notePopoverHover.closeTimer = null;
-      if (!notePopoverHover.pinned) closeInlineAnnotation();
+      if (!notePopoverHover.pinned && readerMountMatches(mount, doc) && popover.isConnected) closeInlineAnnotation(doc);
     }, NOTE_HOVER_CLOSE_DELAY);
   }
 
@@ -7013,6 +7318,7 @@
     cancelNoteHoverOpen();
     cancelNoteHoverClose();
     notePopoverHover.pinned = false;
+    notePopoverHover.anchor = null;
     const popover = doc?.querySelector('.annotation-note-popover');
     if (!popover) return;
     const trigger = annotationAnchor(doc, popover.dataset.annotationId);
@@ -7027,12 +7333,22 @@
   function annotationAnchor(doc, annotationId) {
     if (!doc || !annotationId) return null;
     const selector = `[data-annotation-id="${cssEscape(annotationId)}"]`;
-    return doc.querySelector(`.annotation-note-trigger${selector}`) || doc.querySelector(`mark${selector}`);
+    return doc.querySelector(`.annotation-note-trigger${selector}`) || doc.querySelector(`:is(mark, mrow)${selector}`);
   }
 
   function positionInlineAnnotation(doc, popover, trigger) {
     if (!doc || !popover || !trigger) return;
-    const rect = trigger.getBoundingClientRect();
+    const target = readerVisibleTarget(trigger, doc);
+    if (!target) return;
+    const markPreview = !notePopoverHover.pinned && trigger.matches(':is(mark, mrow)[data-annotation-id]');
+    let rect = target.getBoundingClientRect();
+    if (markPreview) {
+      const selector = `:is(mark, mrow)[data-annotation-id="${cssEscape(trigger.dataset.annotationId)}"]`;
+      const lines = [...doc.querySelectorAll(selector)].flatMap((mark) => [...mark.getClientRects()]).filter((line) => line.width > 0 && line.height > 0);
+      if (!lines.length) { popover.remove(); return; }
+      rect = { left: Math.min(...lines.map((line) => line.left)), top: Math.min(...lines.map((line) => line.top)), bottom: Math.max(...lines.map((line) => line.bottom)) };
+      popover.style.boxSizing = 'border-box';
+    }
     const viewportWidth = doc.documentElement.clientWidth;
     const viewportHeight = doc.documentElement.clientHeight;
     const scale = state.typography.fontSize / 100;
@@ -7047,6 +7363,18 @@
     popover.style.overflowY = 'auto';
     popover.style.left = `${Math.max(scrollX + 12, Math.min(scrollX + doc.documentElement.clientWidth - width - 12, scrollX + rect.left))}px`;
     const height = Math.min(popover.offsetHeight || popover.scrollHeight || maximumHeight, maximumHeight);
+    if (markPreview) {
+      const belowTop = Math.ceil(rect.bottom + 8);
+      const aboveBottom = Math.floor(rect.top - 8);
+      const belowSpace = Math.max(0, viewportHeight - 12 - belowTop);
+      const aboveSpace = Math.max(0, aboveBottom - 12);
+      if (Math.max(belowSpace, aboveSpace) < Math.min(80, height)) { popover.remove(); return; }
+      const placeBelow = height <= belowSpace || (height > aboveSpace && belowSpace >= aboveSpace);
+      popover.style.maxHeight = `${placeBelow ? belowSpace : aboveSpace}px`;
+      const top = placeBelow ? belowTop : Math.floor(aboveBottom - popover.offsetHeight);
+      popover.style.top = `${scrollY + top}px`;
+      return;
+    }
     const below = rect.bottom + 8;
     const above = rect.top - height - 8;
     const viewportTop = below + height <= viewportHeight - 12 ? below : (above >= 12 ? above : 12);
@@ -7166,7 +7494,10 @@
   function showAISuggestion(annotation, trigger) {
     const doc = frameDocument();
     if (!doc || !trigger || isIgnoredAISuggestion(annotation)) return;
+    clearReaderSentenceHover(doc);
     closeInlineAnnotation(doc, { immediate: true });
+    notePopoverHover.pinned = true;
+    notePopoverHover.anchor = trigger;
     const category = normalizeHighlightCategory(annotation.category);
     const color = highlightCategoryColorValues[category] || highlightCategoryColorValues.method;
     const currentSuggestion = state.aiHighlights.find((suggestion) => sameAnnotationTarget(annotation, suggestion));
@@ -7209,8 +7540,10 @@
 
   function showInlineAnnotation(annotation, trigger, { pinned = true } = {}) {
     const doc = frameDocument(); if (!doc || !trigger) return;
+    clearReaderSentenceHover(doc);
     closeInlineAnnotation(doc, { immediate: true });
     notePopoverHover.pinned = pinned;
+    notePopoverHover.anchor = trigger;
     const popover = doc.createElement('div');
     popover.className = 'annotation-note-popover';
     popover.dataset.annotationId = annotation.id;
@@ -7220,7 +7553,12 @@
     const conversionLabel = annotation.kind === 'underline' ? '转为高亮' : '转为划线';
     popover.addEventListener('pointerenter', cancelNoteHoverClose);
     popover.addEventListener('pointerleave', (event) => { if (event.pointerType === 'mouse') scheduleNoteHoverClose(); });
-    popover.addEventListener('click', () => { notePopoverHover.pinned = true; });
+    popover.addEventListener('pointerdown', () => { notePopoverHover.pinned = true; cancelNoteHoverClose(); });
+    popover.addEventListener('click', () => {
+      if (!popover.isConnected || popover.classList.contains('is-closing')) return;
+      notePopoverHover.pinned = true;
+      cancelNoteHoverClose();
+    });
     popover.innerHTML = `<div class="annotation-note-popover-head"><strong>${escapeHTML(annotation.label || (annotation.kind === 'underline' ? '划线笔记' : '重点笔记'))}</strong><span>第 ${escapeHTML(annotation.page || '—')} 页</span></div>${annotationPaletteHTML(annotation)}<div class="annotation-note-popover-quote">${escapeHTML(annotation.quote)}</div><div class="annotation-note-popover-body">${annotation.note ? renderMarkdown(annotation.note) : '<span class="annotation-note-empty">还没有笔记，点击“添加笔记”。</span>'}</div><div class="annotation-note-popover-actions"><button type="button" data-action="convert">${conversionLabel}</button><button type="button" data-action="edit">${annotation.note ? '编辑笔记' : '添加笔记'}</button><button type="button" data-action="sidebar">打开高亮笔记</button><button type="button" data-action="delete">删除</button><button type="button" data-action="close">关闭</button></div>`;
     popover.addEventListener('click', (event) => event.stopPropagation());
     popover.addEventListener('mouseup', (event) => event.stopPropagation());
@@ -7275,10 +7613,9 @@
       state.annotations = payload.annotations || state.annotations;
       const updated = state.annotations.find((item) => item.id === annotation.id) || { ...annotation, color: nextColor };
       Object.assign(annotation, updated);
-      const mark = frameDocument()?.querySelector(`mark[data-annotation-id="${cssEscape(annotation.id)}"]`);
-      applyAnnotationColor(mark, annotation);
+      frameDocument()?.querySelectorAll(`:is(mark, mrow)[data-annotation-id="${cssEscape(annotation.id)}"]`).forEach((mark) => applyAnnotationColor(mark, annotation));
       applyAnnotationTheme(popover, annotation);
-      applyAnnotationTheme(frameDocument()?.querySelector(`.annotation-note-trigger[data-annotation-id="${cssEscape(annotation.id)}"]`), annotation);
+      frameDocument()?.querySelectorAll(`.annotation-note-trigger[data-annotation-id="${cssEscape(annotation.id)}"]`).forEach((trigger) => applyAnnotationTheme(trigger, annotation));
       buttons.forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.annotationColor === normalizeAnnotationColor(annotation.color))));
       rememberAnnotationColor(annotation.kind, nextColor);
       renderAnnotations();
@@ -7300,7 +7637,7 @@
       return;
     }
     closeInlineAnnotation(doc, { immediate: true });
-    doc.querySelectorAll('.annotation-note-trigger, mark[data-annotation-id]').forEach((node) => {
+    doc.querySelectorAll('.annotation-note-trigger, :is(mark, mrow)[data-annotation-id]').forEach((node) => {
       if (node.classList.contains('annotation-note-trigger')) node.remove();
       else removeMark(node.dataset.annotationId);
     });
@@ -7320,13 +7657,14 @@
         : `${isAIAnnotation(annotation) ? 'ai' : 'manual'}\u0000${target}\u0000${annotation.kind || ''}\u0000${annotation.action_id || ''}`;
       visualAnnotations.set(key, annotation);
     });
-    let unresolved = 0;
+    const unresolvedIds = new Set();
     visualAnnotations.forEach((annotation) => {
-      if (!applyMark(annotation) && !isAIAnnotation(annotation)) unresolved += 1;
+      if (!applyMark(annotation) && !isAIAnnotation(annotation)) unresolvedIds.add(annotation.id);
     });
     documentState.annotationsKey = annotationsKey;
-    documentState.unresolvedAnnotations = unresolved;
-    updateAnnotationAnchorStatus(unresolved);
+    documentState.unresolvedAnnotationIds = unresolvedIds;
+    documentState.unresolvedAnnotations = unresolvedIds.size;
+    updateAnnotationAnchorStatus(unresolvedIds.size);
     rebuildReaderSentencePairs(doc);
     if (readerSearchState.open && doc === frameDocument()) refreshReaderSearch();
   }
@@ -7386,6 +7724,26 @@
       setPanelStatus(error.message, true);
     }
   }
+  function applyAnnotationActionFields(annotation, updates, revision = 0) {
+    if (revision && (annotationResponseRevisions.get(annotation) || 0) >= revision) return annotation;
+    const fields = updates[annotation?.action_id];
+    const updated = fields && !isAIAnnotation(annotation) ? { ...annotation, ...fields } : annotation;
+    if (revision) annotationResponseRevisions.set(updated, revision);
+    return updated;
+  }
+
+  function applyAnnotationActionSync(sync) {
+    if (!sync?.updates || !Object.keys(sync.updates).length) return;
+    const revision = Number(sync.revision) || annotationStyleSyncs.length + 1;
+    annotationStyleSyncs.push({ updates: sync.updates, revision });
+    readerMounts.forEach((mount) => {
+      mount.annotations = mount.annotations.map((annotation) => applyAnnotationActionFields(annotation, sync.updates, revision));
+    });
+    state.annotations = readerMount?.annotations || state.annotations.map((annotation) => applyAnnotationActionFields(annotation, sync.updates, revision));
+    renderAnnotations();
+    renderFrameAnnotations();
+  }
+
   const builtinAnnotationActions = { highlight: '高亮', highlight_note: '高亮笔记', underline: '划线', underline_note: '划线随笔', copy: '复制', chat: '加入 Chat' };
   function normalizeAnnotationActions(value) {
     return {
@@ -7395,6 +7753,12 @@
   }
   function renderSelectionActions() {
     $$('[data-builtin-action]').forEach((button) => { button.hidden = state.annotationActions.hidden_builtin.includes(button.dataset.builtinAction); });
+    const vocabularyButton = $('#selection-add-vocabulary');
+    if (vocabularyButton) {
+      const source = state.selection?.surface !== 'translation';
+      vocabularyButton.disabled = !source || !window.MyScholarVocabulary.validTerm(state.selection?.quote);
+      vocabularyButton.title = !source ? '请在原文中选择单词或短语。' : '保存词条、原句及来源；支持不超过 120 字符且无换行的短语。';
+    }
     const container = $('#selection-custom-actions');
     if (!container) return;
     const actions = state.annotationActions.custom.filter((item) => item.enabled && item.label);
@@ -7476,6 +7840,13 @@
       .replace(/^(\s*\d+)([.)])(?=\s)/gmu, '$1\\$2');
   }
 
+  const zoteroNoteMarkerPattern = /^<!-- (zotero-(?:note|unanchored):[a-f0-9]{32}) -->$/;
+  function zoteroNoteMarkerMarkdown(node) {
+    if (node.nodeType !== Node.COMMENT_NODE) return '';
+    const marker = `<!--${node.nodeValue}-->`;
+    return zoteroNoteMarkerPattern.test(marker) ? marker : '';
+  }
+
   // Colour names rather than hex: the renderer whitelist stays a finite enum,
   // and each token maps to a CSS variable that follows the light/dark theme.
   const NOTE_COLOR_TOKENS = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'gray'];
@@ -7500,6 +7871,10 @@
 
   function annotationInlineMarkdown(node) {
     if (node.nodeType === Node.TEXT_NODE) return escapeAnnotationMarkdownText(node.nodeValue);
+    if (node.nodeType === Node.COMMENT_NODE) {
+      const marker = zoteroNoteMarkerMarkdown(node);
+      return marker ? `\n\n${marker}\n\n` : '';
+    }
     if (node.nodeType !== Node.ELEMENT_NODE) return '';
     const tag = node.tagName.toLowerCase();
     const tex = noteInlineTex(node);
@@ -7540,6 +7915,7 @@
 
   function annotationBlockMarkdown(node) {
     if (node.nodeType === Node.TEXT_NODE) return escapeAnnotationMarkdownBlockStart(escapeAnnotationMarkdownText(node.nodeValue).trim());
+    if (node.nodeType === Node.COMMENT_NODE) return zoteroNoteMarkerMarkdown(node);
     if (node.nodeType !== Node.ELEMENT_NODE) return '';
     const tag = node.tagName.toLowerCase();
     const tex = noteInlineTex(node);
@@ -7907,7 +8283,7 @@
     const markers = [];
     const emphasis = [];
     clone.querySelectorAll('.paragraph-translate-trigger, .annotation-note-trigger, .annotation-note-popover').forEach((node) => node.remove());
-    clone.querySelectorAll('mark[data-annotation-id]').forEach((mark) => mark.replaceWith(...mark.childNodes));
+    clone.querySelectorAll(':is(mark, mrow)[data-annotation-id]').forEach((mark) => mark.replaceWith(...mark.childNodes));
     clone.querySelectorAll('.inline-legend-marker').forEach((marker) => {
       const spec = inlineLegendMarkerSpec(marker);
       if (!spec) { marker.remove(); return; }
@@ -8144,13 +8520,15 @@
     return translationCacheFor(jobId).find((item) => item.block_id === (blockId || '') && item.source_hash === sourceHash && normalizedLanguage(item.target_language) === normalizedLanguage(targetLanguage) && String(item.profile_id || '') === profileId);
   }
 
-  async function streamApiRequest(url, body, onDelta, signal = null) {
+  async function streamApiRequest(url, body, onDelta, signal = null, onMetadata = null) {
     const response = await fetch(url, { ...jsonOptions({ ...body, stream: true }), ...(signal ? { signal } : {}) });
     const contentType = response.headers.get('Content-Type') || '';
     if (!response.ok || !response.body || !contentType.includes('text/event-stream')) {
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(payload.error || `请求失败（${response.status}）`);
-      return payload.result || {};
+      const context = payload.context || payload.result?.context;
+      if (context && onMetadata) onMetadata(context);
+      return { ...(payload.result || {}), ...(context ? { context } : {}) };
     }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -8177,7 +8555,8 @@
           try { event = JSON.parse(data); } catch (_) { continue; }
           if (event.error) throw new Error(event.error);
           if (typeof event.delta === 'string' && event.delta) onDelta(event.delta);
-          if (event.result) result = event.result;
+          if (onMetadata && (event.context || event.result?.context)) onMetadata(event.context || event.result.context);
+          if (event.result) result = { ...event.result, ...(event.context ? { context: event.context } : {}) };
         }
       }
     } catch (error) {
@@ -8254,11 +8633,45 @@
     };
   }
 
+  function preserveReaderHoverThroughTranslationLayout(doc) {
+    const documentState = readerDocumentState(doc);
+    documentState.translationLayoutPending = true;
+    if (documentState.translationLayoutFrame) doc.defaultView.cancelAnimationFrame(documentState.translationLayoutFrame);
+    documentState.translationLayoutFrame = doc.defaultView.requestAnimationFrame(() => {
+      positionReaderSentenceTooltip(doc);
+      documentState.translationLayoutFrame = doc.defaultView.requestAnimationFrame(() => {
+        documentState.translationLayoutPending = false;
+        documentState.translationLayoutFrame = 0;
+      });
+    });
+  }
+
+  function reconcileTranslationAnnotations(blockId, previousIds, { pending = false, error = false } = {}) {
+    const doc = frameDocument();
+    const documentState = readerDocumentState(doc);
+    const unresolvedIds = documentState.unresolvedAnnotationIds || new Set();
+    for (const annotation of state.annotations) {
+      if (!previousIds.has(annotation.id) && annotation.block_id !== `translation-${blockId}` && !(annotation.surface === 'translation' && annotation.source_block_id === blockId)) continue;
+      if (!pending && !error && applyMark(annotation)) unresolvedIds.delete(annotation.id);
+      else if (!isAIAnnotation(annotation)) unresolvedIds.add(annotation.id);
+    }
+    documentState.unresolvedAnnotationIds = unresolvedIds;
+    documentState.unresolvedAnnotations = unresolvedIds.size;
+    updateAnnotationAnchorStatus(unresolvedIds.size);
+  }
+
   function insertTranslation(blockId, text, { pending = false, error = false, cached = false, sourceHash = '', role = '', formulas = [], markers = [], emphasis = [], doc = frameDocument(), batch = false } = {}) {
     const block = translationTarget(blockId, doc);
     if (!block) return null;
-    delete readerDocumentState(doc).annotationsKey;
-    doc.querySelectorAll(`.my-scholar-translation[data-for="${cssEscape(blockId || '')}"]`).forEach((node) => node.remove());
+    preserveReaderHoverThroughTranslationLayout(doc);
+    const documentState = readerDocumentState(doc);
+    documentState.translationAnnotationIds ||= new Map();
+    const previousIds = new Set(documentState.translationAnnotationIds.get(blockId));
+    doc.querySelectorAll(`.my-scholar-translation[data-for="${cssEscape(blockId || '')}"]`).forEach((node) => {
+      node.querySelectorAll(':is(mark, mrow)[data-annotation-id]').forEach((mark) => previousIds.add(mark.dataset.annotationId));
+      node.remove();
+    });
+    documentState.translationAnnotationIds.set(blockId, previousIds);
     const node = doc.createElement('div');
     node.className = `my-scholar-translation${role ? ` ${role}-translation` : ''}${pending ? ' is-pending' : ''}${error ? ' is-error' : ''}${cached ? ' is-cached' : ''}`;
     node.dataset.for = blockId;
@@ -8281,12 +8694,12 @@
       decorateInlineSectionLabel(body, inlineKeywordsLabelPattern, 'paper-section-label paper-keywords-label');
     }
     block.insertAdjacentElement('afterend', node);
-    // Batch callers (cache replay) rebuild these indexes once after the loop.
+    syncTranslationBlockVisibility(block, node);
     if (!batch && doc === frameDocument()) {
-      if (state.annotations.length) renderFrameAnnotations();
-      else rebuildReaderSentencePairs(doc);
+      reconcileTranslationAnnotations(blockId, previousIds, { pending, error });
+      positionReaderSentenceTooltip(doc);
       refreshReaderSearch();
-    }
+    } else delete readerDocumentState(doc).annotationsKey;
     return node;
   }
 
@@ -8306,6 +8719,7 @@
       doc.querySelectorAll(`.my-scholar-translation[data-for="${cssEscape(blockId || '')}"]`).forEach((node) => {
         if (node.classList.contains('is-pending')) node.remove();
       });
+      syncTranslationBlockVisibility(block, doc.querySelector(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`));
     };
     try {
       const translated = await requestTranslation(text, blockId, source.formulas, { jobId, markers: source.markers, emphasis: source.emphasis, signal, refresh });
@@ -8511,6 +8925,7 @@
       current.querySelectorAll(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`).forEach((node) => {
         if (node.classList.contains('is-pending')) node.remove();
       });
+      syncTranslationBlockVisibility(translationTarget(blockId, current), current.querySelector(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`));
     };
     try {
       const translated = await requestTranslation(source.text, blockId, source.formulas, { jobId: run.jobId, markers: source.markers, emphasis: source.emphasis, signal: run.abortController.signal, refresh });
@@ -8559,6 +8974,7 @@
     const button = $('#full-translate-button');
     if (button) button.title = `${scope === 'body' ? '翻译正文（不含附录）' : '翻译全文（含附录）'}；按住 Option 点击可重新翻译已有译文的段落`;
     $$('#translation-scope-menu [data-translation-scope]').forEach((item) => item.setAttribute('aria-checked', String(item.dataset.translationScope === scope)));
+    syncTranslationVisibilityButton();
   }
   function closeTranslationScopeMenu() {
     const menu = $('#translation-scope-menu');
@@ -8701,6 +9117,66 @@
     beginSelectionTranslation({ ...state.selection }, { immediate: true });
   });
 
+  $('#selection-add-vocabulary')?.addEventListener('click', async (event) => {
+    const selection = state.selection;
+    if (!selection || selection.surface === 'translation' || !window.MyScholarVocabulary.validTerm(selection.quote)) return;
+    const jobId = state.activeJob?.job_id;
+    const record = selectionTranslationRecord?.key === selectionRequestKey(selection) ? selectionTranslationRecord : null;
+    const snapshot = {
+      term: selection.quote.trim(),
+      source: {
+        job_id: jobId, quote: selection.sentence || selection.quote, selected_text: selection.quote,
+        block_id: selection.block_id, source_block_id: selection.source_block_id, surface: 'source',
+        page: selection.page ? Number(selection.page) : null,
+        start: selection.start, end: selection.end,
+        quote_prefix: selection.quote_prefix, quote_suffix: selection.quote_suffix,
+        render_generation: String(selection.render_generation || 'base'),
+      },
+    };
+    if (record) record.keepForVocabulary = true;
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      await vocabulary.saveSelection(snapshot, { meaning: record?.text || '', translation: record?.promise || null });
+      if (!record?.text) showToast('词条与原句已保存，释义可稍后补全或重试。');
+    } catch (error) { showToast(`保存失败：${error.message}`, true); }
+    finally { renderSelectionActions(); }
+  });
+
+  async function openVocabularySource(source) {
+    const job = state.jobs.find((item) => item.job_id === source?.job_id);
+    if (!job || job.status !== 'completed' || state.library?.items?.[source.job_id]?.deleted_at) {
+      throw new Error('来源文献已删除、在回收站中或尚不可用，已保留原句快照。');
+    }
+    const generation = String(source.render_generation || 'base');
+    if (generation !== activeChatSourceGeneration(job)) throw new Error('来源属于另一版正文或 AI 重排结果，无法安全跳转。原句快照仍可查看。');
+    openReader(job);
+    const mount = readerMount;
+    const deadline = Date.now() + 10000;
+    while (readerMount === mount && !mount.ready && Date.now() < deadline) await new Promise((resolve) => window.setTimeout(resolve, 40));
+    if (readerMount !== mount || state.activeJob?.job_id !== job.job_id) return;
+    if (!mount.ready) throw new Error('来源正文尚未载入，请稍后重试。');
+    if (generation !== activeChatSourceGeneration()) throw new Error('正文版本已变化，无法安全跳转。');
+    const doc = frameDocument();
+    const block = doc?.querySelector(`[data-block-id="${cssEscape(source.block_id || '')}"]`);
+    const expected = String(source.selected_text || '');
+    const text = block ? canonicalBlockText(block, doc) : '';
+    const start = Number(source.start);
+    const end = Number(source.end);
+    const page = block?.dataset.page || block?.closest('[data-page]')?.dataset.page;
+    const prefixMatches = !source.quote_prefix || text.slice(Math.max(0, start - source.quote_prefix.length), start) === source.quote_prefix;
+    const suffixMatches = !source.quote_suffix || text.slice(end, end + source.quote_suffix.length) === source.quote_suffix;
+    if (!block || block.closest('.my-scholar-translation') || !expected || !Number.isInteger(start) || !Number.isInteger(end) || end <= start || text.slice(start, end) !== expected || !prefixMatches || !suffixMatches || (source.page && String(source.page) !== String(page))) {
+      showToast('未找到可确认的原文位置，正文可能已重排或更改。原句快照仍保留在生词本。', true);
+      return;
+    }
+    const range = rangeAtOffsets(block, start, end, doc);
+    if (!range) { showToast('这个来源位置已失效，无法安全跳转。', true); return; }
+    const selection = doc.getSelection();
+    selection.removeAllRanges(); selection.addRange(range);
+    block.scrollIntoView({ block: 'center', behavior: reducedMotionQuery.matches ? 'auto' : 'smooth' });
+  }
+
   let toastTimer;
   function hideToast() {
     const node = $('#toast');
@@ -8804,7 +9280,7 @@
     highlightList.querySelectorAll('[data-highlight-main]').forEach((button) => button.addEventListener('click', () => {
       const card = button.closest('.highlight-card');
       const target = readerBlockById(button.dataset.highlightBlock);
-      target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      readerVisibleTarget(target)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       window.setTimeout(() => {
         const manual = state.annotations.find((item) => item.id === card.dataset.manualAnnotationId);
         const aiAnnotation = state.annotations.find((item) => item.id === card.dataset.aiAnnotationId);
@@ -8825,7 +9301,7 @@
       const action = button.dataset.highlightAction;
       if (['note', 'adopt', 'open-personal'].includes(action)) {
         const blockId = card.querySelector('[data-highlight-main]')?.dataset.highlightBlock || '';
-        readerBlockById(blockId)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        readerVisibleTarget(readerBlockById(blockId))?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         await new Promise((resolve) => window.setTimeout(resolve, 180));
       }
       if (action === 'note' && aiAnnotation) adoptAISuggestion(aiAnnotation, { withNote: true });
@@ -8860,7 +9336,7 @@
       const item = state.annotations.find((annotation) => annotation.id === node.dataset.annotationId);
       node.querySelector('.annotation-quote').addEventListener('click', () => {
         const target = resolveAnnotationAnchor(item)?.root;
-        target?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        readerVisibleTarget(target)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         const trigger = frameDocument()?.querySelector(`.annotation-note-trigger[data-annotation-id="${cssEscape(item?.id || '')}"]`);
         if (trigger && item) showInlineAnnotation(item, trigger);
       });
@@ -8928,10 +9404,240 @@
       id: chatRecordId('session'),
       title: title || chatSessionTitle(normalized),
       titleMode: 'auto',
+      options: {},
       createdAt: now,
       updatedAt: now,
       messages: normalized,
     };
+  }
+
+  function normalizeChatOptions(value) {
+    const options = {};
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return options;
+    if (typeof value.reasoning_effort === 'string' && value.reasoning_effort.trim()) options.reasoning_effort = value.reasoning_effort.trim().slice(0, 80);
+    for (const key of ['thinking_budget', 'context_window']) {
+      if (Number.isSafeInteger(value[key]) && value[key] >= 0) options[key] = value[key];
+    }
+    return options;
+  }
+
+  function normalizeChatContext(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const context = {};
+    for (const key of ['window', 'estimated_input_tokens', 'output_tokens']) {
+      if (Number.isSafeInteger(value[key]) && value[key] >= 0) context[key] = value[key];
+    }
+    if (typeof value.truncated === 'boolean') context.truncated = value.truncated;
+    if (typeof value.source === 'string') context.source = value.source.slice(0, 120);
+    return Object.keys(context).length ? context : null;
+  }
+
+  function aiProfileIdentity(profile = {}) {
+    return JSON.stringify([profile.base_url || '', profile.api_format || 'auto']);
+  }
+
+  function aiCapabilities(service, profile = state.aiProfiles[service] || {}) {
+    const saved = state.aiProfiles[service] || {};
+    const cached = state.aiModelCapabilities[service];
+    if (cached?.identity === aiProfileIdentity(profile) && cached.models?.[profile.model]) return cached.models[profile.model];
+    if (profile.model === saved.model && aiProfileIdentity(profile) === aiProfileIdentity(saved)) return saved.capabilities || {};
+    return {};
+  }
+
+  function aiReasoningChoices(capabilities = {}) {
+    const values = Array.isArray(capabilities.reasoning_efforts) ? [...new Set(capabilities.reasoning_efforts.map(String))] : null;
+    if (capabilities.thinking_supported === true && capabilities.thinking_required === false) {
+      if (values && !values.includes('none')) values.unshift('none');
+    }
+    return values?.filter((value) => value !== 'auto' && (value !== 'none' || capabilities.thinking_required !== true));
+  }
+
+  function aiOptionWarning(options, capabilities = {}) {
+    const effort = options.reasoning_effort;
+    const choices = aiReasoningChoices(capabilities);
+    if (effort && effort !== 'auto') {
+      if (effort === 'none' && capabilities.thinking_required === true) return '当前模型要求开启思考；请更改推理强度。';
+      const canDisable = effort === 'none' && capabilities.thinking_supported === true && capabilities.thinking_required === false;
+      if (!canDisable && choices && !choices.includes(effort)) return `当前模型不支持推理档位“${effort}”；请重新选择或使用自动。`;
+      if (!canDisable && capabilities.thinking_supported === false) return '当前模型不支持思考选项；请使用自动或跟随设置。';
+    }
+    const budget = options.thinking_budget;
+    if (budget > 0) {
+      if (capabilities.thinking_supported === false || capabilities.thinking_budget_supported === false) return '当前模型不支持思考预算；请使用自动或跟随设置。';
+      if (effort === 'none') return '关闭思考时不能同时设置思考预算；请将预算改为自动。';
+      if (capabilities.thinking_budget_min > budget) return `思考预算至少为 ${capabilities.thinking_budget_min} tokens。`;
+      if (capabilities.thinking_budget_max > 0 && budget > capabilities.thinking_budget_max) return `思考预算最多为 ${capabilities.thinking_budget_max} tokens。`;
+    }
+    const context = options.context_window || capabilities.context_window || 0;
+    if (context && budget >= context) return '思考预算必须小于上下文窗口。';
+    return '';
+  }
+
+  function capabilityDescription(capabilities = {}) {
+    const parts = [];
+    if (capabilities.context_window > 0) parts.push(`上下文 ${Number(capabilities.context_window).toLocaleString()} tokens`);
+    if (capabilities.thinking_supported !== undefined && capabilities.thinking_supported !== null) {
+      parts.push(capabilities.thinking_required ? '必须开启思考' : capabilities.thinking_supported ? '支持思考' : '不支持思考');
+    }
+    if (capabilities.max_input_tokens > 0) parts.push(`最大输入 ${Number(capabilities.max_input_tokens).toLocaleString()}`);
+    if (capabilities.max_output_tokens > 0) parts.push(`最大输出 ${Number(capabilities.max_output_tokens).toLocaleString()}`);
+    if (typeof capabilities.thinking_supported !== 'boolean' && !Array.isArray(capabilities.reasoning_efforts)) parts.push('能力未知，可手动覆盖；请以服务商文档为准');
+    if (!parts.length) parts.push('能力未知，可手动覆盖；请以服务商文档为准');
+    if (capabilities.source && capabilities.source !== 'unknown') parts.push(`来源：${capabilities.source}`);
+    return parts.join(' · ');
+  }
+
+  const aiReasoningLabels = { auto: '自动（服务默认）', none: '关闭思考', minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最高' };
+  function renderReasoningControl(prefix, value, capabilities, { inherit = false } = {}) {
+    const select = $(`#${prefix}-reasoning-effort`);
+    if (!select) return;
+    const choices = aiReasoningChoices(capabilities);
+    const unknown = choices === null || choices === undefined;
+    const values = ['auto', ...(choices || [])];
+    if (capabilities.thinking_supported === true && capabilities.thinking_required === false && !values.includes('none')) values.push('none');
+    const canCustomize = unknown && capabilities.thinking_supported !== false;
+    const selected = value === undefined && inherit ? 'inherit' : value || 'auto';
+    const custom = canCustomize && !values.includes(selected) && selected !== 'inherit';
+    select.innerHTML = `${inherit ? '<option value="inherit">跟随设置</option>' : ''}${values.map((item) => `<option value="${escapeHTML(item)}">${escapeHTML(aiReasoningLabels[item] || item)}</option>`).join('')}${canCustomize ? '<option value="custom">自定义…</option>' : ''}${!custom && selected !== 'inherit' && !values.includes(selected) ? `<option value="${escapeHTML(selected)}">${escapeHTML(selected)}（当前模型不支持）</option>` : ''}`;
+    select.value = custom ? 'custom' : selected;
+    const input = $(`#${prefix}-reasoning-custom`);
+    if (input && custom) input.value = selected;
+    const customField = $(`#${prefix}-reasoning-custom-field`);
+    if (customField) customField.hidden = !custom;
+    const field = $(`#${prefix}-reasoning-field`);
+    if (field) field.hidden = capabilities.thinking_supported === false && (selected === 'auto' || selected === 'inherit') && (!choices || !choices.length);
+    const budgetField = $(`#${prefix}-thinking-field`);
+    if (budgetField) budgetField.hidden = capabilities.thinking_supported === false || capabilities.thinking_budget_supported === false;
+  }
+
+  function reasoningFromControl(prefix) {
+    const selected = $(`#${prefix}-reasoning-effort`)?.value;
+    return selected === 'custom' ? $(`#${prefix}-reasoning-custom`)?.value.trim() || 'auto' : selected || 'auto';
+  }
+
+  function renderAIInferenceControls(service) {
+    const profile = aiSettingsFromControls()[service];
+    const capabilities = aiCapabilities(service, profile);
+    const enabled = service !== 'translation' || profile.provider === 'openai-compatible' && profile.mode === 'chat';
+    const panel = $(`#setting-${service}-inference`);
+    if (panel) panel.hidden = !enabled;
+    const effort = reasoningFromControl(`setting-${service}`);
+    renderReasoningControl(`setting-${service}`, effort, capabilities);
+    $(`#setting-${service}-thinking-field`).hidden = (capabilities.thinking_supported === false || capabilities.thinking_budget_supported === false) && !(profile.thinking_budget > 0);
+    $(`#setting-${service}-capability-status`).textContent = capabilityDescription(capabilities);
+    const warning = enabled ? aiOptionWarning(profile, capabilities) : '';
+    const warningNode = $(`#setting-${service}-options-warning`);
+    warningNode.textContent = warning;
+    warningNode.hidden = !warning;
+  }
+
+  function validateAISettingsControls() {
+    for (const service of ['translation', 'chat']) {
+      const profile = aiSettingsFromControls()[service];
+      if (service === 'translation' && (profile.provider !== 'openai-compatible' || profile.mode !== 'chat')) continue;
+      for (const name of ['thinking-budget', 'context-window']) {
+        const input = $(`#setting-${service}-${name}`);
+        if (input) {
+          input.setCustomValidity(Number.isSafeInteger(Number(input.value || 0)) ? '' : '请输入有效的整数 token 数。');
+          if (!input.checkValidity()) {
+            showSettingsSection('settings-ai');
+            input.closest('details')?.setAttribute('open', '');
+            input.reportValidity();
+            return false;
+          }
+        }
+      }
+      renderAIInferenceControls(service);
+      if (aiOptionWarning(profile, aiCapabilities(service, profile))) {
+        showSettingsSection('settings-ai');
+        $(`#setting-${service}-advanced`)?.setAttribute('open', '');
+        $(`#setting-${service}-options-warning`)?.scrollIntoView({ block: 'nearest' });
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function chatEffectiveOptions(thread, profile = state.aiProfiles.chat || {}) {
+    return { ...normalizeChatOptions(profile), ...normalizeChatOptions(thread?.options) };
+  }
+
+  function renderChatContext(thread) {
+    const node = $('#chat-context-status');
+    if (!node) return;
+    const context = thread?.context;
+    if (!context) { node.hidden = true; return; }
+    const parts = [];
+    if (context.window) parts.push(`上下文 ${context.window.toLocaleString()} tokens`);
+    if (context.estimated_input_tokens !== undefined) parts.push(`预计输入 ${context.estimated_input_tokens.toLocaleString()}`);
+    if (context.output_tokens !== undefined) parts.push(`输出预留 ${context.output_tokens.toLocaleString()}`);
+    if (context.truncated) parts.push('已裁剪较早会话或正文以适应预算');
+    node.textContent = parts.join(' · ');
+    node.title = context.source ? `预算来源：${context.source}` : '';
+    node.hidden = !parts.length;
+  }
+
+  function renderChatOptions({ force = false } = {}) {
+    if (!state.activeJob) return;
+    const thread = activeChatThread();
+    const profile = state.aiProfiles.chat || {};
+    const capabilities = aiCapabilities('chat', profile);
+    const options = normalizeChatOptions(thread.options);
+    const panel = $('#chat-session-options');
+    if (!panel) return;
+    const renderKey = JSON.stringify([thread.id, options, profile]);
+    if (force || panel.dataset.renderKey !== renderKey) {
+      panel.dataset.renderKey = renderKey;
+      renderReasoningControl('chat', options.reasoning_effort, capabilities, { inherit: true });
+      const inheritedEffort = profile.reasoning_effort || 'auto';
+      $('#chat-reasoning-effort option[value="inherit"]').textContent = `跟随设置（${aiReasoningLabels[inheritedEffort] || inheritedEffort}）`;
+      const effective = chatEffectiveOptions(thread);
+      if (effective.reasoning_effort && effective.reasoning_effort !== 'auto' && aiOptionWarning(effective, capabilities)) $('#chat-reasoning-field').hidden = false;
+      $('#chat-thinking-field').hidden = (capabilities.thinking_supported === false || capabilities.thinking_budget_supported === false) && !(effective.thinking_budget > 0);
+      for (const [name, key] of [['thinking', 'thinking_budget'], ['context', 'context_window']]) {
+        const value = options[key];
+        $(`#chat-${name}-mode`).value = value === undefined ? 'inherit' : value === 0 ? 'auto' : 'custom';
+        const inheritedValue = profile[key] || 0;
+        $(`#chat-${name}-mode option[value="inherit"]`).textContent = `跟随设置（${inheritedValue ? `${inheritedValue.toLocaleString()} tokens` : '自动'}）`;
+        const input = $(`#chat-${key.replaceAll('_', '-')}`);
+        input.value = value > 0 ? value : '';
+        input.hidden = !(value > 0);
+      }
+      $('#chat-capability-status').textContent = capabilityDescription(capabilities);
+      const warning = aiOptionWarning(chatEffectiveOptions(thread), capabilities);
+      $('#chat-options-warning').textContent = warning;
+      $('#chat-options-warning').hidden = !warning;
+      const summary = [];
+      if (options.reasoning_effort !== undefined) summary.push(aiReasoningLabels[options.reasoning_effort] || options.reasoning_effort);
+      if (options.thinking_budget !== undefined) summary.push(options.thinking_budget ? `思考 ${options.thinking_budget}` : '思考自动');
+      if (options.context_window !== undefined) summary.push(options.context_window ? `上下文 ${options.context_window}` : '上下文自动');
+      $('#chat-options-summary').textContent = summary.join(' · ') || '跟随设置';
+    }
+    renderChatContext(thread);
+  }
+
+  function updateChatOptions() {
+    if (!state.activeJob) return;
+    const thread = activeChatThread();
+    const options = {};
+    const effort = reasoningFromControl('chat');
+    if (effort !== 'inherit') options.reasoning_effort = effort;
+    for (const [name, key] of [['thinking', 'thinking_budget'], ['context', 'context_window']]) {
+      const mode = $(`#chat-${name}-mode`).value;
+      const input = $(`#chat-${key.replaceAll('_', '-')}`);
+      input.hidden = mode !== 'custom';
+      if (mode === 'auto') options[key] = 0;
+      if (mode === 'custom') {
+        if (!input.value) { input.focus(); return; }
+        input.setCustomValidity(Number.isSafeInteger(Number(input.value)) ? '' : '请输入有效的整数 token 数。');
+        if (!input.checkValidity()) { input.reportValidity(); return; }
+        options[key] = Number(input.value);
+      }
+    }
+    thread.options = normalizeChatOptions(options);
+    touchChatThread(thread);
+    persistChatSession(state.activeJob.job_id);
+    renderChatOptions({ force: true });
   }
 
   function normalizeChatEnvelope(value, legacyMessages = []) {
@@ -8943,6 +9649,8 @@
           id: typeof session.id === 'string' && session.id ? session.id.slice(0, 160) : chatRecordId('session'),
           title: typeof session.title === 'string' && session.title.trim() ? session.title.trim().slice(0, 80) : chatSessionTitle(messages),
           titleMode: session.titleMode === 'manual' ? 'manual' : 'auto',
+          options: normalizeChatOptions(session.options),
+          ...(normalizeChatContext(session.context) ? { context: normalizeChatContext(session.context) } : {}),
           ...(normalizeChatPinnedAt(session.pinnedAt) ? { pinnedAt: normalizeChatPinnedAt(session.pinnedAt) } : {}),
           createdAt: typeof session.createdAt === 'string' ? session.createdAt.slice(0, 64) : new Date().toISOString(),
           updatedAt: typeof session.updatedAt === 'string' ? session.updatedAt.slice(0, 64) : new Date().toISOString(),
@@ -9029,6 +9737,8 @@
           id: String(session.id || chatRecordId('session')).slice(0, 160),
           title: String(session.title || chatSessionTitle(messages)).slice(0, 80),
           titleMode: session.titleMode === 'manual' ? 'manual' : 'auto',
+          options: normalizeChatOptions(session.options),
+          ...(normalizeChatContext(session.context) ? { context: normalizeChatContext(session.context) } : {}),
           ...(normalizeChatPinnedAt(session.pinnedAt) ? { pinnedAt: normalizeChatPinnedAt(session.pinnedAt) } : {}),
           createdAt: String(session.createdAt || new Date().toISOString()).slice(0, 64),
           updatedAt: String(session.updatedAt || new Date().toISOString()).slice(0, 64),
@@ -9439,7 +10149,7 @@
   function chatMarkdownInline(text, doc = document, depth = 0) {
     // Everything is built with createElement/textContent — model output never
     // reaches innerHTML, so malformed or hostile markup stays inert text.
-    const pattern = /`([^`\n]+)`|\*\*([^*\n]+)\*\*|\*([^\s*][^*\n]*?)\*|~~([^~\n]+)~~|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|\$([^\s$][^$\n]*?)\$|\\\((.+?)\\\)|\\\[(.+?)\\\]|\[p([1-9][0-9]{0,4})\/(block-[A-Za-z0-9][A-Za-z0-9._-]{0,143})\]/g;
+    const pattern = /`([^`\n]+)`|\*\*([^*\n]+)\*\*|\*([^\s*][^*\n]*?)\*|~~([^~\n]+)~~|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|\$([^\s$][^$\n]*?)\$|\\\((.+?)\\\)|\\\[(.+?)\\\]|\[p([1-9][0-9]{0,4})\/((?:block-[A-Za-z0-9][A-Za-z0-9._-]{0,143}|b-[a-f0-9]{24}))\]/g;
     const fragment = doc.createDocumentFragment();
     const value = String(text || '').slice(0, chatMaxMessageChars);
     if (depth >= chatMarkdownMaxDepth) {
@@ -9650,7 +10360,7 @@
     const doc = frameDocument();
     const canonicalPage = canonicalChatReferencePage(page);
     const requestedId = String(blockId || '');
-    if (!doc || !state.activeJob || !canonicalPage || !/^block-[A-Za-z0-9][A-Za-z0-9._-]{0,143}$/.test(requestedId)) return null;
+    if (!doc || !state.activeJob || !canonicalPage || !/^(?:block-[A-Za-z0-9][A-Za-z0-9._-]{0,143}|b-[a-f0-9]{24})$/.test(requestedId)) return null;
     const candidates = [...doc.querySelectorAll('[data-block-id],[data-translate-block-id]')].filter((candidate) => {
       const candidatePage = canonicalChatReferencePage(candidate.dataset.page || candidate.closest('[data-page]')?.dataset.page || '');
       return candidatePage === canonicalPage;
@@ -9676,7 +10386,7 @@
   function openChatBlockReference(button) {
     const page = String(button.dataset.chatBlockPage || '');
     const blockId = String(button.dataset.chatBlockId || '');
-    const target = chatReferenceTarget(page, blockId);
+    const target = readerVisibleTarget(chatReferenceTarget(page, blockId));
     const sourceGeneration = normalizeChatSourceGeneration(button.closest('.chat-bubble')?.dataset.chatSourceGeneration);
     if (!target?.isConnected) {
       if (sourceGeneration && sourceGeneration !== activeChatSourceGeneration()) {
@@ -9805,6 +10515,7 @@
     const container = $('#chat-messages');
     const messages = state.chat;
     renderChatSessionControls();
+    renderChatOptions();
     if (!messages.length) {
       chatMathPending.clear();
       if (!container.querySelector(':scope > .chat-empty')) container.innerHTML = '<div class="chat-empty">可以问我：这篇文章的贡献是什么？表格中的指标如何比较？</div>';
@@ -9905,6 +10616,22 @@
     const envelope = chatEnvelope(jobId);
     const thread = activeChatThread(jobId);
     const sessionId = thread.id;
+    for (const id of ['chat-thinking-budget', 'chat-context-window']) {
+      const optionInput = $(`#${id}`);
+      if (!optionInput.hidden && (!optionInput.value || !optionInput.checkValidity())) { optionInput.reportValidity(); optionInput.focus(); return; }
+    }
+    if ($('#chat-reasoning-effort').value === 'custom' && !$('#chat-reasoning-custom').value.trim()) {
+      setPanelStatus('请输入服务商支持的推理档位，或改为自动。', true);
+      $('#chat-reasoning-custom').focus();
+      return;
+    }
+    const optionWarning = aiOptionWarning(chatEffectiveOptions(thread), aiCapabilities('chat'));
+    if (optionWarning) {
+      setPanelStatus(optionWarning, true);
+      $('#chat-session-options').open = true;
+      return;
+    }
+    const requestOptions = normalizeChatOptions(thread.options);
     const chat = thread.messages;
     state.chat = chat;
     chat.push(normalizedChatMessage({ role: 'user', content, ...(selectedText ? { quote: selectedText } : {}) }));
@@ -9929,6 +10656,7 @@
     try {
       const result = await streamApiRequest(`/api/jobs/${jobId}/chat`, {
         messages: outgoing,
+        options: requestOptions,
         selected_text: selectedText,
         ...(selectedImage ? { selected_image: selectedImage } : {}),
       }, (delta) => {
@@ -9939,7 +10667,12 @@
         touchChatThread(thread);
         scheduleChatSessionPersist(jobId);
         if (state.activeJob?.job_id === jobId && envelope.activeSessionId === sessionId) renderChat();
+      }, null, (context) => {
+        thread.context = normalizeChatContext(context);
+        scheduleChatSessionPersist(jobId);
+        if (state.activeJob?.job_id === jobId && envelope.activeSessionId === sessionId) renderChatContext(thread);
       });
+      if (result.context) thread.context = normalizeChatContext(result.context);
       const completedText = String(result.text || '模型没有返回内容。');
       if (completedText.length > chatMaxMessageChars) throw new Error('模型回答超过安全上限。');
       reply.content = completedText;
@@ -10734,6 +11467,11 @@
         else mathBlock.push(line);
         continue;
       }
+      if (zoteroNoteMarkerPattern.test(line)) {
+        flushParagraph(); flushList();
+        html.push(line);
+        continue;
+      }
       const fenceOpen = line.match(/^```([\w+#.-]*)\s*$/);
       if (fenceOpen) { flushParagraph(); flushList(); fence = { language: fenceOpen[1] || '', lines: [] }; continue; }
       const mathInline = line.match(/^\s*\$\$(.+)\$\$\s*$/);
@@ -11353,11 +12091,18 @@
     return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date);
   }
 
+  let localTestBuild = false;
   function renderAppInfo(context = {}) {
     const info = context.app || {};
+    localTestBuild = Boolean(info.localTestBuild);
     if ($('#app-current-version')) $('#app-current-version').textContent = info.version ? `v${info.version}` : '未知';
     if ($('#app-platform-arch')) $('#app-platform-arch').textContent = info.arch === 'arm64' ? 'macOS · Apple Silicon' : `macOS · ${info.arch || '未知架构'}`;
-    if ($('#app-update-channel')) $('#app-update-channel').textContent = info.channel === 'beta' ? '测试版' : info.channel === 'internal' ? '开源发布版' : String(info.channel || '稳定版');
+    if ($('#app-update-channel')) $('#app-update-channel').textContent = localTestBuild ? '本地测试版' : info.channel === 'beta' ? '测试版' : info.channel === 'internal' ? '开源发布版' : String(info.channel || '稳定版');
+    if (localTestBuild) {
+      $('#check-updates')?.setAttribute('disabled', '');
+      if ($('#update-status-title')) $('#update-status-title').textContent = '本地测试版';
+      if ($('#update-status-detail')) $('#update-status-detail').textContent = '此版本仅用于本机验证，请使用单独提供的测试包更新。';
+    }
   }
 
   async function loadAppInfo() {
@@ -11409,7 +12154,7 @@
   $('#check-updates')?.addEventListener('click', async () => {
     const desktop = window.myScholarDesktop;
     const button = $('#check-updates');
-    if (typeof desktop?.checkForUpdates !== 'function') return;
+    if (localTestBuild || typeof desktop?.checkForUpdates !== 'function') return;
     button.disabled = true;
     button.textContent = '正在检查…';
     updateStatusClass('checking');
@@ -11426,7 +12171,7 @@
       if ($('#update-checked-time')) $('#update-checked-time').textContent = '';
       $('#download-update').hidden = true;
     } finally {
-      button.disabled = false;
+      button.disabled = localTestBuild;
       button.textContent = '检查更新';
     }
   });
@@ -11593,6 +12338,7 @@
   function renderAISettings(settings = {}) {
     Object.keys(aiServiceNames).forEach((service) => {
       const config = settings?.[service] || {};
+      state.aiProfiles[service] = { base_url: config.base_url || '', model: config.model || '', api_format: config.api_format || 'auto', ...normalizeChatOptions(config), capabilities: config.capabilities || {} };
       if (service === 'translation') {
         $('#setting-translation-provider').value = config.provider || 'openai-compatible';
         $('#setting-translation-deepl-tier').value = config.deepl_tier === 'pro' ? 'pro' : 'free';
@@ -11615,6 +12361,10 @@
       if (baseURL) baseURL.value = String(config.base_url || '');
       if (model) model.value = String(config.model || '');
       if (mode) mode.value = config.mode === 'chat' ? 'chat' : 'qwen-mt';
+      $(`#setting-${service}-api-format`).value = config.api_format || 'auto';
+      renderReasoningControl(`setting-${service}`, config.reasoning_effort || 'auto', config.capabilities || {});
+      $(`#setting-${service}-thinking-budget`).value = config.thinking_budget || 0;
+      $(`#setting-${service}-context-window`).value = config.context_window || 0;
       if (apiKey) {
         apiKey.value = '';
         apiKey.placeholder = config.api_key_configured ? '已配置；留空保持不变' : '输入服务密钥（可选）';
@@ -11635,11 +12385,17 @@
       if (modelStatus) modelStatus.textContent = '';
     });
     syncTranslationProviderControls();
+    for (const service of Object.keys(aiServiceNames)) renderAIInferenceControls(service);
+    renderChatOptions({ force: true });
   }
 
   function aiSettingsFromControls() {
     return Object.fromEntries(Object.keys(aiServiceNames).map((service) => [service, {
       base_url: $(`#setting-${service}-base-url`)?.value.trim() || '',
+      api_format: $(`#setting-${service}-api-format`)?.value || 'auto',
+      reasoning_effort: reasoningFromControl(`setting-${service}`),
+      thinking_budget: Number($(`#setting-${service}-thinking-budget`)?.value || 0),
+      context_window: Number($(`#setting-${service}-context-window`)?.value || 0),
       model: $(`#setting-${service}-model`)?.value.trim() || '',
       api_key: $(`#setting-${service}-api-key`)?.value || '',
       clear_api_key: $(`#setting-${service}-clear-key`)?.dataset.clearRequested === 'true',
@@ -11691,6 +12447,8 @@
       const models = Array.isArray(payload.models) ? payload.models.map((model) => String(model)).filter(Boolean) : [];
       if (!models.length) throw new Error('服务没有返回可用模型。');
       aiModelLists[service] = models;
+      state.aiModelCapabilities[service] = { identity: aiProfileIdentity(profile), models: payload.model_capabilities || {} };
+      renderAIInferenceControls(service);
       const filter = $(`#setting-${service}-model-filter`);
       if (filter) filter.value = '';
       renderAIModelList(service);
@@ -12620,12 +13378,14 @@
       return settingsSaveInFlight;
     }
     const revision = settingsSaveRevision;
+    if (!validateAISettingsControls()) { setSettingsSaveStatus('请检查 AI 选项', 'error'); return false; }
     const submitted = settingsPayload();
     settingsSaveRequested = false;
     setSettingsSaveStatus('正在保存…', 'saving');
     const operation = (async () => {
       try {
         const response = await api('/api/settings', jsonOptions(submitted));
+        applyAnnotationActionSync(response?.settings?.annotation_style_sync);
         settingsSavedRevision = Math.max(settingsSavedRevision, revision);
         if (revision === settingsSaveRevision) {
           settingsLoadedAt = Date.now();
@@ -12685,7 +13445,7 @@
   function flushSettingsOnExit() {
     if (settingsExitFlushedRevision === settingsSaveRevision || settingsSavedRevision >= settingsSaveRevision) return;
     const validation = validateShortcutInputs();
-    if (!validation.valid) return;
+    if (!validation.valid || !validateAISettingsControls()) return;
     window.clearTimeout(settingsSaveTimer);
     settingsSaveTimer = null;
     settingsExitFlushedRevision = settingsSaveRevision;
@@ -12694,12 +13454,13 @@
   $('#settings-form').addEventListener('submit', (event) => event.preventDefault());
   $('#settings-form').addEventListener('change', (event) => {
     if (event.target.closest('.shortcut-grid')) return;
+    if (event.target.id.endsWith('-reasoning-effort') && event.target.value === 'custom') return;
     if (event.target.id === 'setting-parsing-backend') syncParsingServerField();
     queueSettingsSave(true);
   });
   $('#settings-form').addEventListener('input', (event) => {
     if (event.target.closest('.shortcut-grid')) return;
-    if (event.target.matches('input[type="text"], input[type="email"], input[type="url"], input[type="password"]')) queueSettingsSave(false);
+    if (event.target.matches('input[type="text"], input[type="email"], input[type="url"], input[type="password"], input[type="number"]')) queueSettingsSave(false);
   });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'hidden' || settingsSavedRevision >= settingsSaveRevision) return;
@@ -12742,9 +13503,32 @@
       const model = $(`#setting-${service}-model`);
       if (model) {
         model.value = select.value;
+        renderAIInferenceControls(service);
       }
     });
   });
+  for (const service of ['translation', 'chat']) {
+    const prefix = `setting-${service}`;
+    for (const field of ['model', 'base-url', 'api-format', 'mode', 'provider', 'thinking-budget', 'context-window']) {
+      $(`#${prefix}-${field}`)?.addEventListener('change', () => renderAIInferenceControls(service));
+    }
+    $(`#${prefix}-reasoning-effort`)?.addEventListener('change', (event) => {
+      const custom = event.target.value === 'custom';
+      $(`#${prefix}-reasoning-custom-field`).hidden = !custom;
+      if (custom) $(`#${prefix}-reasoning-custom`).focus();
+      else renderAIInferenceControls(service);
+    });
+    $(`#${prefix}-reasoning-custom`)?.addEventListener('change', () => renderAIInferenceControls(service));
+  }
+  $('#chat-reasoning-effort')?.addEventListener('change', (event) => {
+    const custom = event.target.value === 'custom';
+    $('#chat-reasoning-custom-field').hidden = !custom;
+    if (custom) $('#chat-reasoning-custom').focus();
+    else updateChatOptions();
+  });
+  for (const id of ['chat-reasoning-custom', 'chat-thinking-mode', 'chat-thinking-budget', 'chat-context-mode', 'chat-context-window']) {
+    $(`#${id}`)?.addEventListener('change', updateChatOptions);
+  }
   $('#ai-status-history-prev')?.addEventListener('click', () => {
     aiStatusHistoryPage = Math.max(0, aiStatusHistoryPage - 1);
     renderAIStatusHistory();
@@ -12829,6 +13613,14 @@
     setTranslationScope(scope);
     runFullTranslation({ refresh: event.altKey, scope });
   }));
+  $$('#translation-scope-menu [data-translation-display]').forEach((item) => item.addEventListener('click', () => {
+    setTranslationPreferences({ displayMode: item.dataset.translationDisplay });
+    closeTranslationScopeMenu();
+    $('#full-translate-scope-button')?.focus({ preventScroll: true });
+  }));
+  $('#translation-hover-toggle')?.addEventListener('click', () => {
+    setTranslationPreferences({ hoverEnabled: !readerHoverTranslationEnabled() });
+  });
   document.addEventListener('pointerdown', (event) => {
     const menu = $('#translation-scope-menu');
     if (!menu || menu.hidden || menu.contains(event.target) || event.target.closest?.('#full-translate-scope-button')) return;
@@ -12851,14 +13643,7 @@
     if (source) window.open(source, '_blank', 'noopener');
     else showToast('原始文件不可用。', true);
   });
-  $('#toggle-translations-button')?.addEventListener('click', () => {
-    const jobId = state.activeJob?.job_id;
-    if (!jobId) { showToast('请先打开一篇文献。', true); return; }
-    if (state.hiddenTranslationJobs.has(jobId)) state.hiddenTranslationJobs.delete(jobId);
-    else state.hiddenTranslationJobs.add(jobId);
-    applyTranslationVisibility();
-    syncTranslationVisibilityButton();
-  });
+
 
   // One reflow per document; the server queues them, so several documents can
   // be pending at once and each keeps its own poll loop until it settles.
@@ -13342,6 +14127,11 @@
       const previousProfileId = translationProfileId();
       const payload = await api('/api/health');
       state.health = payload;
+      for (const service of ['translation', 'chat']) {
+        const profile = payload.ai?.services?.[service];
+        if (profile) state.aiProfiles[service] = { ...state.aiProfiles[service], model: profile.model || '', api_format: profile.api_format || 'auto', ...normalizeChatOptions(profile), capabilities: profile.capabilities || {} };
+      }
+      renderChatOptions({ force: true });
       const nextProfileId = translationProfileId();
       if (previousProfileId !== nextProfileId) {
         state.translationRuns.forEach((run) => { if (run?.running) cancelTranslationRun(run); });

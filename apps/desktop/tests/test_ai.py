@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import sys
@@ -308,7 +309,8 @@ class AIAdapterTest(unittest.TestCase):
         self.assertIn("只返回译文本身", body["messages"][0]["content"])
         self.assertIn("<source_text>", body["messages"][1]["content"])
         self.assertEqual(body["temperature"], 0)
-        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertNotIn("chat_template_kwargs", body)
+        self.assertNotIn("thinking", body)
         self.assertNotIn("translation_options", body)
 
     def test_translation_stream_normalizes_cumulative_and_incremental_chunks(self) -> None:
@@ -529,6 +531,247 @@ class AIAdapterTest(unittest.TestCase):
         prompt = complete.call_args.args[0][1]["content"]
         self.assertNotIn("Alice Example", prompt)
         self.assertIn("We propose", prompt)
+
+
+class TransportOptionsTest(unittest.TestCase):
+    class Response:
+        def __init__(self, payload=None, events=None):
+            self.payload = json.dumps(payload or {}).encode('utf-8')
+            self.lines = [b'data: ' + json.dumps(event).encode('utf-8') + b'\n' for event in (events or [])]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return False
+
+        def read(self, size=-1):
+            return self.payload if size < 0 else self.payload[:size]
+
+        def readline(self, size=-1):
+            return self.lines.pop(0) if self.lines else b''
+
+    def setUp(self):
+        self.caps = {
+            'context_window': None, 'max_input_tokens': None, 'max_output_tokens': None,
+            'reasoning_efforts': None, 'thinking_supported': None, 'thinking_required': None,
+            'thinking_budget_min': None, 'thinking_budget_max': None,
+            'temperature_supported': None, 'source': 'unknown', 'matched_model': None,
+        }
+        self.cap_patch = patch('ai_context.get_model_capabilities', side_effect=lambda _: self.caps)
+        self.cap_patch.start()
+        self.addCleanup(self.cap_patch.stop)
+
+    def profile(self, api_format='openai', **options):
+        return {'base_url': 'https://custom.test/v1', 'api_key': 'secret', 'model': 'custom-model',
+                'api_format': api_format, 'reasoning_effort': 'auto', 'thinking_budget': 0, 'context_window': 0, **options}
+
+    def test_auto_does_not_send_hidden_disable_switches_even_when_old_env_is_set(self):
+        with patch.dict(os.environ, {'MY_SCHOLAR_AI_DISABLE_THINKING': '1'}), patch('ai.urllib.request.urlopen', return_value=self.Response({'choices': [{'message': {'content': 'answer'}}]})) as request:
+            _complete([{'role': 'user', 'content': 'question'}], profile=self.profile())
+        body = json.loads(request.call_args.args[0].data)
+        for field in ('thinking', 'reasoning_effort', 'chat_template_kwargs', 'enable_thinking'):
+            self.assertNotIn(field, body)
+        self.assertEqual(body['max_tokens'], 4096)
+
+    def test_stream_and_sync_have_the_same_reasoning_fields_and_output_budget(self):
+        for protocol, expected in [
+            ('openai', {'reasoning_effort': 'none'}),
+            ('qwen', {'enable_thinking': False}),
+            ('deepseek', {'thinking': {'type': 'disabled'}}),
+            ('glm', {'thinking': {'type': 'disabled'}}),
+            ('anthropic', {'thinking': {'type': 'disabled'}}),
+            ('openai-responses', {'reasoning': {'effort': 'none'}}),
+            ('openrouter', {'reasoning': {'effort': 'none'}}),
+            ('chat-template', {'chat_template_kwargs': {'enable_thinking': False}}),
+        ]:
+            with self.subTest(protocol=protocol):
+                profile = self.profile(protocol, reasoning_effort='none')
+                if protocol == 'anthropic':
+                    payload, events = {'content': [{'type': 'text', 'text': 'answer'}]}, [{'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': 'answer'}}]
+                elif protocol == 'openai-responses':
+                    payload, events = {'status': 'completed', 'output': [{'type': 'message', 'content': [{'type': 'output_text', 'text': 'answer'}]}]}, [{'type': 'response.output_text.delta', 'delta': 'answer'}]
+                else:
+                    payload, events = {'choices': [{'message': {'content': 'answer'}}]}, [{'choices': [{'delta': {'content': 'answer'}}]}]
+                with patch('ai.urllib.request.urlopen', side_effect=[self.Response(payload), self.Response(events=events)]) as request:
+                    self.assertEqual(_complete([{'role': 'user', 'content': 'question'}], profile=profile), 'answer')
+                    self.assertEqual(list(_complete_stream([{'role': 'user', 'content': 'question'}], profile=profile)), ['answer'])
+                first, second = [json.loads(call.args[0].data) for call in request.call_args_list]
+                self.assertTrue(second.pop('stream'))
+                self.assertEqual(first, second)
+                for key, value in expected.items():
+                    self.assertEqual(first[key], value)
+
+    def test_explicit_reasoning_http_error_is_not_retried_or_removed(self):
+        import urllib.error
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming), patch('ai.urllib.request.urlopen', side_effect=urllib.error.HTTPError('https://custom.test', 400, 'Bad reasoning', {}, io.BytesIO())) as request:
+                with self.assertRaises(urllib.error.HTTPError):
+                    if streaming:
+                        list(_complete_stream([{'role': 'user', 'content': 'q'}], profile=self.profile(reasoning_effort='high')))
+                    else:
+                        _complete([{'role': 'user', 'content': 'q'}], profile=self.profile(reasoning_effort='high'))
+                self.assertEqual(request.call_count, 1)
+                self.assertEqual(json.loads(request.call_args.args[0].data)['reasoning_effort'], 'high')
+
+    def test_structured_format_fallback_keeps_explicit_reasoning(self):
+        import urllib.error
+        error = urllib.error.HTTPError('https://custom.test', 422, 'Bad format', {}, io.BytesIO())
+        with patch('ai.urllib.request.urlopen', side_effect=[error, self.Response({'choices': [{'message': {'content': '{}'}}]})]) as request:
+            _complete([{'role': 'user', 'content': 'q'}], response_format={'type': 'json_object'}, profile=self.profile(reasoning_effort='low'))
+        bodies = [json.loads(call.args[0].data) for call in request.call_args_list]
+        self.assertIn('response_format', bodies[0])
+        self.assertNotIn('response_format', bodies[1])
+        self.assertEqual(bodies[0]['reasoning_effort'], bodies[1]['reasoning_effort'])
+
+    def test_anthropic_uses_native_auth_system_images_and_budget(self):
+        profile = self.profile('anthropic', thinking_budget=2048)
+        image = {'type': 'image_url', 'image_url': {'url': 'data:image/png;base64,aGVsbG8='}}
+        messages = [{'role': 'system', 'content': 'system'}, {'role': 'user', 'content': [image, {'type': 'text', 'text': 'question'}]}]
+        with patch('ai.urllib.request.urlopen', return_value=self.Response({'content': [{'type': 'thinking', 'thinking': 'hidden'}, {'type': 'text', 'text': 'answer'}]})) as request:
+            self.assertEqual(_complete(messages, profile=profile), 'answer')
+        wire = request.call_args.args[0]
+        body = json.loads(wire.data)
+        self.assertEqual(wire.full_url, 'https://custom.test/v1/messages')
+        self.assertEqual(wire.get_header('X-api-key'), 'secret')
+        self.assertEqual(wire.get_header('Anthropic-version'), '2023-06-01')
+        self.assertIsNone(wire.get_header('Authorization'))
+        self.assertEqual(body['system'], 'system')
+        self.assertEqual(body['thinking'], {'type': 'enabled', 'budget_tokens': 2048})
+        self.assertEqual(body['max_tokens'], 6144)
+        self.assertNotIn('temperature', body)
+        self.assertEqual(body['messages'][0]['content'][0], {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'aGVsbG8='}})
+
+    def test_anthropic_adaptive_and_qwen_manual_parameters(self):
+        self.caps['thinking_modes'] = ['adaptive', 'manual']
+        for profile, fields in [
+            (self.profile('anthropic', model='claude-sonnet-4-6', reasoning_effort='high'), {'thinking': {'type': 'adaptive'}, 'output_config': {'effort': 'high'}}),
+            (self.profile('qwen', thinking_budget=6000), {'enable_thinking': True, 'thinking_budget': 6000}),
+        ]:
+            body, _, _ = ai_module._build_request([{'role': 'user', 'content': 'q'}], ai_module._effective_profile('chat', profile), temperature=0.2, max_tokens=4096)
+            for field, value in fields.items():
+                self.assertEqual(body[field], value)
+
+    def test_responses_converts_images_and_rejects_incomplete_output(self):
+        messages = [{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {'url': 'https://example.test/img.png'}}, {'type': 'text', 'text': 'question'}]}]
+        with patch('ai.urllib.request.urlopen', return_value=self.Response({'status': 'incomplete', 'incomplete_details': {'reason': 'max_output_tokens'}})) as request:
+            with self.assertRaisesRegex(RuntimeError, '未完成'):
+                _complete(messages, profile=self.profile('openai-responses', reasoning_effort='high'))
+        wire = request.call_args.args[0]
+        body = json.loads(wire.data)
+        self.assertEqual(wire.full_url, 'https://custom.test/v1/responses')
+        self.assertEqual(body['input'][0]['content'][0]['type'], 'input_image')
+        self.assertEqual(body['reasoning'], {'effort': 'high'})
+        self.assertNotIn('messages', body)
+
+    def test_stream_reports_provider_errors_and_truncation_after_visible_content(self):
+        for protocol, events in [
+            ('anthropic', [{'type': 'content_block_delta', 'delta': {'text': 'partial'}}, {'type': 'message_delta', 'delta': {'stop_reason': 'max_tokens'}}]),
+            ('openai-responses', [{'type': 'response.output_text.delta', 'delta': 'partial'}, {'type': 'response.incomplete'}]),
+            ('openai', [{'choices': [{'delta': {'content': 'partial'}}]}, {'error': {'message': 'provider error'}}]),
+        ]:
+            with self.subTest(protocol=protocol), patch('ai.urllib.request.urlopen', return_value=self.Response(events=events)):
+                iterator = _complete_stream([{'role': 'user', 'content': 'q'}], profile=self.profile(protocol))
+                self.assertEqual(next(iterator), 'partial')
+                with self.assertRaises(RuntimeError):
+                    next(iterator)
+
+    def test_session_options_inherit_defaults_and_do_not_mutate_global_profile(self):
+        original = self.profile(reasoning_effort='high', context_window=64000)
+        with patch('ai._config', return_value=original), patch('ai._complete', return_value='answer') as request:
+            result = chat([{'role': 'user', 'content': 'q'}], options={'reasoning_effort': 'low', 'context_window': None})
+        used = request.call_args.kwargs['profile']
+        self.assertEqual(used['reasoning_effort'], 'low')
+        self.assertEqual(used['context_window'], 64000)
+        self.assertEqual(original['reasoning_effort'], 'high')
+        self.assertEqual(result['context']['window'], 64000)
+
+    def test_context_budget_trims_history_and_paper_but_protects_current_selection(self):
+        from ai_context import message_tokens
+        profile = self.profile(context_window=8192)
+        question = '请解释当前选中的公式，不要改变符号。' * 100
+        selected = '重要选区 α = β + γ。' * 100
+        history = [{'role': 'user', 'content': 'old question ' * 1000}, {'role': 'assistant', 'content': 'old answer ' * 1000}, {'role': 'user', 'content': question}]
+        with patch('ai._config', return_value=profile), patch('ai._complete', return_value='answer') as request:
+            result = chat(history, context='paper context ' * 10000, selected_text=selected)
+        clean = request.call_args.args[0]
+        self.assertEqual(clean[-1]['content'], question)
+        self.assertIn(selected, clean[-2]['content'])
+        self.assertFalse(any('old question' in str(item['content']) for item in clean))
+        self.assertTrue(result['context']['truncated'])
+        self.assertEqual(result['context']['estimated_input_tokens'], message_tokens(clean))
+        self.assertLessEqual(message_tokens(clean) + result['context']['output_tokens'], 8192)
+
+    def test_context_model_hard_limit_and_input_output_limits_are_independent(self):
+        from ai_context import request_budget
+        self.caps.update(context_window=16000, max_input_tokens=7000, max_output_tokens=6000, thinking_supported=True)
+        budget = request_budget(self.profile(context_window=128000, thinking_budget=2048), 4096)
+        self.assertEqual(budget['window'], 16000)
+        self.assertEqual(budget['input_limit'], 7000)
+        self.assertEqual(budget['output_tokens'], 6000)
+        self.assertEqual(budget['answer_tokens'], 3952)
+        self.assertEqual(budget['thinking_tokens'], 2048)
+
+    def test_unknown_tokenizer_marks_estimates_and_weights_cjk(self):
+        from ai_context import estimate_tokens, request_budget
+        self.assertGreater(estimate_tokens('中' * 100), estimate_tokens('a' * 100))
+        budget = request_budget(self.profile(), 4096)
+        self.assertEqual(budget['window'], 32768)
+        self.assertEqual(budget['window_source'], 'conservative-default')
+        self.assertTrue(budget['estimated'])
+
+    def test_oversized_required_inputs_and_invalid_thinking_are_rejected_before_network(self):
+        with patch('ai._config', return_value=self.profile(context_window=4096)), patch('ai.urllib.request.urlopen') as request:
+            with self.assertRaisesRegex(ValueError, '当前问题'):
+                chat([{'role': 'user', 'content': '中' * 2000}])
+            self.assertFalse(request.called)
+        for protocol, options in [
+            ('anthropic', {'thinking_budget': 512}),
+            ('qwen', {'thinking_budget': 2048, 'reasoning_effort': 'high'}),
+            ('openai', {'thinking_budget': 2048}),
+            ('deepseek', {'thinking_budget': 2048}),
+            ('qwen', {'thinking_budget': 2048, 'reasoning_effort': 'none'}),
+        ]:
+            with self.subTest(protocol=protocol, options=options), patch('ai.urllib.request.urlopen') as request:
+                with self.assertRaises(ValueError):
+                    _complete([{'role': 'user', 'content': 'q'}], profile=self.profile(protocol, **options))
+                self.assertFalse(request.called)
+
+    def test_known_effort_and_forced_thinking_constraints_are_enforced(self):
+        from ai_context import request_budget
+        self.caps.update(reasoning_efforts=['low', 'high'], thinking_supported=True, thinking_required=True)
+        for effort in ('medium', 'none'):
+            with self.assertRaises(ValueError):
+                request_budget(self.profile(reasoning_effort=effort), 4096)
+        self.caps['thinking_required'] = False
+        self.assertEqual(request_budget(self.profile(reasoning_effort='none'), 4096)['thinking_tokens'], 0)
+
+    def test_implicit_reasoning_reserve_fits_small_known_output_limits(self):
+        from ai_context import request_budget
+        self.caps.update(max_output_tokens=4096, thinking_supported=True)
+        budget = request_budget(self.profile(reasoning_effort='max'), 4096)
+        self.assertEqual(budget['output_tokens'], 4096)
+        self.assertGreater(budget['answer_tokens'], 0)
+        self.assertLess(budget['thinking_tokens'], 4096)
+        self.caps['max_output_tokens'] = None
+        self.assertLess(request_budget(self.profile(reasoning_effort='max'), 4096)['output_tokens'], 32768)
+
+    def test_budget_supported_false_rejects_explicit_tokens(self):
+        self.caps['thinking_budget_supported'] = False
+        with self.assertRaisesRegex(ValueError, '不支持指定思考'):
+            _complete([{'role': 'user', 'content': 'q'}], profile=self.profile('qwen', thinking_budget=2048))
+
+    def test_verified_claude_capabilities_control_adaptive_and_manual_support(self):
+        from ai_capabilities import get_model_capabilities
+        for model, effort, tokens in [('claude-opus-4-7', 'high', 0), ('claude-sonnet-5-5', 'none', 0)]:
+            profile = self.profile('anthropic', base_url='https://api.anthropic.com', model=model, reasoning_effort=effort, thinking_budget=tokens)
+            self.caps.update(get_model_capabilities(profile))
+            body, _, _ = ai_module._build_request([{'role': 'user', 'content': 'q'}], ai_module._effective_profile('chat', profile), temperature=0.2, max_tokens=4096)
+            self.assertEqual(body['thinking']['type'], 'adaptive' if effort == 'high' else 'between_tools')
+        profile = self.profile('anthropic', base_url='https://api.anthropic.com', model='claude-opus-4-7', thinking_budget=2048)
+        self.caps.update(get_model_capabilities(profile))
+        with self.assertRaisesRegex(ValueError, '不支持指定思考'):
+            _complete([{'role': 'user', 'content': 'q'}], profile=profile)
 
 
 if __name__ == "__main__":

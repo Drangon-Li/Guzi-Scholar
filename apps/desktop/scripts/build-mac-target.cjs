@@ -5,18 +5,38 @@ const fs = require('fs');
 const path = require('path');
 
 const root = path.join(__dirname, '..');
-const outputDirectory = path.join(root, 'dist', 'mac.noindex');
+const LOCAL_TEST_BUILD = '20261022.5';
 
-function preventBuildOutputIndexing() {
+function preventBuildOutputIndexing(outputDirectory) {
   fs.mkdirSync(outputDirectory, { recursive: true });
   fs.closeSync(fs.openSync(path.join(outputDirectory, '.metadata_never_index'), 'a', 0o600));
+}
+
+function buildOptions(target, mode, environment = process.env) {
+  const outputDirectory = path.join(root, 'dist', mode === 'local-test' ? `local-test-${LOCAL_TEST_BUILD}.noindex` : 'mac.noindex');
+  const args = ['--mac', target, '--arm64', '--publish=never'];
+  const env = { ...environment };
+  if (mode === 'internal') {
+    args.push(
+      '--config.mac.identity=-',
+      '--config.mac.hardenedRuntime=false',
+      '--config.artifactName=Guzi-Scholar-${version}-${arch}-internal.${ext}',
+    );
+  }
+  if (mode === 'local-test') {
+    args.push('--config', path.join(__dirname, 'local-test-builder-config.cjs'));
+    env.CSC_IDENTITY_AUTO_DISCOVERY = 'false';
+    delete env.CSC_LINK;
+    delete env.CSC_KEY_PASSWORD;
+  }
+  return { args, env, outputDirectory };
 }
 
 function main() {
   const target = process.argv[2];
   const mode = process.argv[3];
-  if (!['check', 'dir', 'dmg'].includes(target) || !['internal', 'release'].includes(mode)) {
-    console.error('usage: node scripts/build-mac-target.cjs <check|dir|dmg> <internal|release>');
+  if (!['check', 'dir', 'dmg'].includes(target) || !['internal', 'release', 'local-test'].includes(mode)) {
+    console.error('usage: node scripts/build-mac-target.cjs <check|dir|dmg> <internal|release|local-test>');
     return 1;
   }
 
@@ -54,21 +74,15 @@ function main() {
 
   if (target === 'check') return 0;
 
-  preventBuildOutputIndexing();
-  const args = ['--mac', target, '--arm64', '--publish=never'];
-  if (mode === 'internal') {
-    args.push(
-      '--config.mac.identity=-',
-      '--config.mac.hardenedRuntime=false',
-      '--config.artifactName=Guzi-Scholar-${version}-${arch}-internal.${ext}',
-    );
-  }
+  const { args, env, outputDirectory } = buildOptions(target, mode);
+  preventBuildOutputIndexing(outputDirectory);
 
   const builder = path.join(root, 'node_modules', '.bin', 'electron-builder');
-  const result = spawnSync(builder, args, { cwd: root, env: process.env, stdio: 'inherit' });
+  const result = spawnSync(builder, args, { cwd: root, env, stdio: 'inherit' });
   if (result.error) throw result.error;
-  preventBuildOutputIndexing();
+  preventBuildOutputIndexing(outputDirectory);
   return result.status ?? 1;
 }
 
-process.exitCode = main();
+module.exports = { buildOptions, LOCAL_TEST_BUILD };
+if (require.main === module) process.exitCode = main();

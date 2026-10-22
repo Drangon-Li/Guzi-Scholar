@@ -42,7 +42,7 @@ function documentHTML(id) {
 function instrument(source) {
   const functions = ['openReader', 'wireFrame', 'prepareMountedReader', 'prepareReaderMedia', 'prepareReaderImages',
     'renderFrameAnnotations', 'buildReaderIndexes', 'rebuildReaderSentencePairs', 'renderCachedTranslations',
-    'renderLibrary', 'renderLibraryRows', 'renderFolderTree', 'loadSettings', 'renderAISettings', 'renderAnnotationActionSettings', 'loadParsingProviders', 'ensureTitleTranslation'];
+    'renderLibrary', 'renderLibraryRows', 'renderFolderTree', 'showSettingsSection', 'applyAppearance', 'applyTypography', 'loadSettings', 'renderAISettings', 'renderAnnotationActionSettings', 'loadParsingProviders', 'ensureTitleTranslation'];
   for (const name of functions) assert.match(source, new RegExp(`function ${name}\\(`), `Missing instrumentation target ${name}`);
   const injection = `
   window.__navigationPerformance = {
@@ -108,6 +108,21 @@ async function staticServer() {
     let releaseProviders = null;
     let releaseConnection = null;
     page.on('pageerror', (error) => errors.push(error.message));
+    await page.addInitScript(() => {
+      window.__settingsSwitchSamples = [];
+      document.addEventListener('click', (event) => {
+        const link = event.target.closest('.settings-navigation a');
+        if (!link) return;
+        const start = performance.now();
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const section = document.querySelector(link.getAttribute('href'));
+          const animations = section.getAnimations();
+          const sample = { section: section.id, nextPaintMs: performance.now() - start,
+            animationMs: Math.max(0, ...animations.map((animation) => Number(animation.effect.getTiming().duration) || 0)) };
+          window.__settingsSwitchSamples.push(sample);
+        }));
+      }, true);
+    });
     await page.route('**/web/app.js', (route) => route.fulfill({ contentType: 'text/javascript', body: instrument(fs.readFileSync(process.env.MY_SCHOLAR_NAVIGATION_APP_FIXTURE || path.join(__dirname, '../web/app.js'), 'utf8')) }));
     if (process.env.MY_SCHOLAR_NAVIGATION_STYLE_FIXTURE) await page.route('**/web/styles.css', (route) => route.fulfill({ contentType: 'text/css', body: fs.readFileSync(process.env.MY_SCHOLAR_NAVIGATION_STYLE_FIXTURE, 'utf8') }));
     await page.route('**/api/**', async (route) => {
@@ -252,6 +267,12 @@ async function staticServer() {
       refs.modelList.append(Object.assign(document.createElement('span'), { textContent: 'Synthetic cached model result', id: 'fixture-model-result' }));
       refs.modelResult = document.querySelector('#fixture-model-result');
     });
+    for (const section of ['settings-shortcuts', 'settings-metadata', 'settings-ai', 'settings-reading']) {
+      await page.locator(`.settings-navigation a[href="#${section}"]`).click();
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    }
+    const settingsSwitchSamples = await page.evaluate(() => window.__settingsSwitchSamples);
+    if (!baseline) assert.ok(settingsSwitchSamples.every((sample) => sample.animationMs === 0), 'First settings category switches must not wait for a panel animation');
     const beforeNavigation = await snapshot();
     const beforeRequests = { settings: count('/api/settings'), providers: count('/api/parsing/providers'), jobs: count('/api/jobs'), library: count('/api/library') };
     for (let cycle = 0; cycle < 4; cycle += 1) { await navigate('library'); await navigate('settings'); }
@@ -345,7 +366,7 @@ async function staticServer() {
     assert.equal(await page.frameLocator('#html-preview').locator('mark[data-annotation-id^="b-"]').count(), 0);
     assert.deepEqual(errors, []);
     assert.deepEqual(unexpected, [], 'All API traffic must stay inside the synthetic fixture');
-    console.log(JSON.stringify({ suite: 'navigation-performance', baseline, fixture: { paragraphs, annotations: annotationCount, translations: translationCount }, firstOpen, titleRequests, highlightRequests, navigation, navigationRequests, preserved, finalReader }));
+    console.log(JSON.stringify({ suite: 'navigation-performance', baseline, fixture: { paragraphs, annotations: annotationCount, translations: translationCount }, firstOpen, settingsSwitchSamples, titleRequests, highlightRequests, navigation, navigationRequests, preserved, finalReader }));
   } finally {
     for (const resolve of pending) resolve(); pending.clear();
     try { if (session) await session.close(); }

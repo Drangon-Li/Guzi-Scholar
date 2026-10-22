@@ -251,6 +251,34 @@ async function signal(promise, label) {
       await activate(b); await preserved(b);
     }
     await activate(a);
+    for (const width of [1450, 760]) {
+      await page.setViewportSize({ width, height: 940 });
+      // The media-query change handler can run after setViewportSize resolves.
+      await page.waitForFunction((wide) => document.querySelector('#assistant-toggle').getAttribute('aria-expanded') === String(wide), width > 880);
+      if (await page.locator('#assistant-toggle').getAttribute('aria-expanded') !== 'true') await page.locator('#assistant-toggle').click();
+      await page.waitForFunction(() => document.querySelector('#reader-sidebar').classList.contains('is-open'));
+      for (const destination of ['settings-view', 'library-view']) {
+        await page.locator(`[data-view="${destination}"]`).click();
+        const parked = await page.locator('#reader-view').evaluate((view) => ({
+          opacity: getComputedStyle(view).opacity, inert: view.inert, ariaHidden: view.getAttribute('aria-hidden'),
+          width: view.getBoundingClientRect().width, height: view.getBoundingClientRect().height,
+          sidebarOpen: view.querySelector('#reader-sidebar').classList.contains('is-open'),
+          hitIsReader: Boolean(document.elementFromPoint(30, 300)?.closest('#reader-view')),
+        }));
+        assert.equal(parked.opacity, '0', `Open reader assistant leaked into ${destination} at ${width}px`);
+        assert.equal(parked.inert, true);
+        assert.equal(parked.ariaHidden, 'true');
+        assert.equal(parked.sidebarOpen, true, `Parking must preserve expanded assistant state in ${destination} at ${width}px`);
+        assert.ok(parked.width > 0 && parked.height > 0, 'Parked iframe viewport must retain its dimensions');
+        assert.equal(parked.hitIsReader, false, 'Parked assistant must not intercept destination interactions');
+        await activate(a);
+        await preserved(a, { viewport: false });
+        assert.equal(await page.locator('#reader-view').evaluate((view) => getComputedStyle(view).opacity), '1');
+        assert.equal(await page.locator('#assistant-toggle').getAttribute('aria-expanded'), 'true');
+      }
+    }
+    await page.setViewportSize({ width: 1450, height: 940 });
+    await remember(a);
     await page.locator('[data-view="library-view"]').click();
     await activate(a);
     await preserved(a);
@@ -422,6 +450,7 @@ async function signal(promise, label) {
     assert.deepEqual(unexpected, [], 'Unexpected endpoint: synthetic tests must never call real AI');
     console.log(JSON.stringify({ passed: true, syntheticOnly: true, mockedAI: true, cases: [
       'A-B-A-and-home-preserve-document-node-scroll-translation-media-details', 'no-warm-resource-requests',
+      'expanded-assistant-settings-library-return-wide-and-narrow',
       'no-duplicate-hover-or-paragraph-handlers', 'background-paragraph-and-full-translation-isolation',
       'pending-initial-load-switch-isolation', 'close-background-active-last-and-reopen', 'active-and-background-reflow-invalidate-generation',
       'pending-full-translation-cannot-write-into-reopened-or-reflowed-document', 'profile-change-clears-background-resident-translations',

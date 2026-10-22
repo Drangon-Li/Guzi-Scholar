@@ -73,6 +73,17 @@ let browserSession;
       });
       return;
     }
+    if (chatResponseMode === 'citation-stream') {
+      chatResponseMode = 'normal';
+      const chunks = ['流式引用回归 [p3/b-c1355a4b', 'b3893eca79548054]，以及 [p10/b-', '36cea0e59e5170e53581c82c]。'];
+      await route.fulfill({
+        status: 200,
+        contentType: 'text/event-stream',
+        body: [...chunks.map((delta) => ({ delta })), { result: { text: chunks.join(''), model: 'chat-smoke' } }]
+          .map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
+      });
+      return;
+    }
     if (chatResponseMode === 'oversized-stream') {
       chatResponseMode = 'normal';
       const delta = JSON.stringify({ delta: 'x'.repeat(120001) });
@@ -86,7 +97,7 @@ let browserSession;
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify({ result: { text: '键盘交互回归回复。依据 [p1/block-1-6-paragraph]。短引用 [p1/block-6]，带页短引用 [p1/block-1-6]。错误页 [p2/block-1-6-paragraph]。代码 `[p1/block-1-6-paragraph]`，链接 [p1/block-1-6-paragraph](https://example.com)，数学 $[p1/block-1-6-paragraph]$，恶意 [p1/block-1-6-paragraph"><img]。', model: 'chat-smoke' } }),
+      body: JSON.stringify({ result: { text: '键盘交互回归回复。依据 [p1/block-1-6-paragraph]。短引用 [p1/block-6]，带页短引用 [p1/block-1-6]。错误页 [p2/block-1-6-paragraph]。代码 `[p1/block-1-6-paragraph]`，链接 [p1/block-1-6-paragraph](https://example.com)，数学 $[p1/block-1-6-paragraph]$，恶意 [p1/block-1-6-paragraph"><img]。新引用 [p3/b-c1355a4bb3893eca79548054] 和 [p10/b-36cea0e59e5170e53581c82c]。新引用错误页 [p10/b-c1355a4bb3893eca79548054]，不存在 [p3/b-000000000000000000000000]。新代码 `[p3/b-c1355a4bb3893eca79548054]`，新链接 [p10/b-36cea0e59e5170e53581c82c](https://example.com)，新数学 $[p3/b-c1355a4bb3893eca79548054]$，新恶意 [p3/b-c1355a4bb3893eca79548054"><img src=x onerror=alert(1)>]。', model: 'chat-smoke' } }),
     });
   });
   await page.route('**/api/jobs/*/reference-summary', async (route) => route.fulfill({
@@ -387,6 +398,21 @@ let browserSession;
   await page.locator('#selection-highlight').click();
   await frame.locator('[data-block-id="block-2-2-paragraph"] mark.my-scholar-highlight').waitFor();
 
+  const hashedChatTargets = [
+    { page: '3', blockId: 'b-c1355a4bb3893eca79548054' },
+    { page: '10', blockId: 'b-36cea0e59e5170e53581c82c' },
+  ];
+  await frame.locator('.pdf-page').first().evaluate((root, targets) => {
+    for (const target of targets) {
+      const paragraph = root.ownerDocument.createElement('p');
+      paragraph.dataset.blockId = target.blockId;
+      paragraph.dataset.page = target.page;
+      paragraph.dataset.chatCitationSmoke = 'hashed';
+      paragraph.textContent = `Chat citation fixture on page ${target.page}`;
+      root.append(paragraph);
+    }
+  }, hashedChatTargets);
+
   await selectText('[data-block-id="block-1-6-paragraph"]', 28);
   if (!((await page.locator('#selected-context').textContent()) || '').includes('当前选中')) throw new Error('A plain selection was not mirrored in the right assistant');
   await page.locator('#selection-add-chat').click();
@@ -423,7 +449,7 @@ let browserSession;
   await assistantBubble.locator('.chat-copy').click();
   if (!(await page.evaluate(() => window.__myScholarCopiedText)).includes('键盘交互回归回复。')) throw new Error('AI answer copy button did not fall back to the complete answer');
   const blockReferences = assistantBubble.locator('.chat-block-reference');
-  if (await blockReferences.count() !== 4) throw new Error('Canonical block references were parsed outside ordinary Markdown text');
+  if (await blockReferences.count() !== 8) throw new Error('Canonical block references were parsed outside ordinary Markdown text');
   if (await assistantBubble.locator('code .chat-block-reference, a .chat-block-reference, math .chat-block-reference').count()) throw new Error('Code, link or math contents became block-reference controls');
   if (await assistantBubble.locator('img').count()) throw new Error('Malformed block reference created executable HTML');
   const sourceGeneration = await assistantBubble.getAttribute('data-chat-source-generation');
@@ -434,6 +460,36 @@ let browserSession;
   const wrongPageReference = blockReferences.filter({ hasText: '[p2/block-1-6-paragraph]' }).first();
   await wrongPageReference.click();
   await page.locator('#toast').filter({ hasText: '未找到这条引用对应的原文位置' }).waitFor();
+  for (const target of hashedChatTargets) {
+    await blockReferences.filter({ hasText: `[p${target.page}/${target.blockId}]` }).click();
+    await frame.locator(`[data-block-id="${target.blockId}"].block-selected`).waitFor();
+    if (await frame.locator('[data-chat-citation-smoke].block-selected').count() !== 1) throw new Error('Hashed Chat citation did not highlight exactly its target');
+  }
+  // The valid reference owns a two-second highlight timer; exclude its cleanup
+  // and pending smooth-scroll frames from the invalid-reference baseline.
+  await frame.locator('[data-chat-citation-smoke].block-selected').waitFor({ state: 'hidden', timeout: 3000 });
+  await frame.locator('[data-block-id="b-36cea0e59e5170e53581c82c"]').evaluate(async (node) => {
+    // Keep a stable selection so invalid references must preserve existing highlights.
+    node.classList.add('block-selected');
+    node.scrollIntoView({ behavior: 'instant', block: 'center' });
+    const nextFrame = () => new Promise((resolve) => node.ownerDocument.defaultView.requestAnimationFrame(resolve));
+    await nextFrame();
+    await nextFrame();
+  });
+  for (const citation of ['[p10/b-c1355a4bb3893eca79548054]', '[p3/b-000000000000000000000000]']) {
+    const before = await frame.locator('.pdf-page').first().evaluate((root) => ({
+      scrollTop: root.ownerDocument.scrollingElement.scrollTop,
+      selected: [...root.ownerDocument.querySelectorAll('.block-selected')].map((node) => node.dataset.blockId),
+    }));
+    await blockReferences.filter({ hasText: citation }).click();
+    await page.locator('#toast').filter({ hasText: '未找到这条引用对应的原文位置' }).waitFor();
+    const after = await frame.locator('.pdf-page').first().evaluate((root) => ({
+      scrollTop: root.ownerDocument.scrollingElement.scrollTop,
+      selected: [...root.ownerDocument.querySelectorAll('.block-selected')].map((node) => node.dataset.blockId),
+    }));
+    if (JSON.stringify(after) !== JSON.stringify(before)) throw new Error(`Invalid hashed Chat citation moved or highlighted the source (${citation}; before=${JSON.stringify(before)}; after=${JSON.stringify(after)})`);
+  }
+  await frame.locator('[data-block-id="b-36cea0e59e5170e53581c82c"]').evaluate((node) => node.classList.remove('block-selected'));
   await assistantBubble.evaluate((bubble) => { delete bubble.dataset.chatSourceGeneration; });
   await validReference.click();
   await frame.locator('[data-block-id="block-1-6-paragraph"].block-selected').waitFor();
@@ -456,8 +512,7 @@ let browserSession;
   await frame.locator('[data-chat-alias-smoke="ambiguous"]').evaluate((node) => node.remove());
   await pageShortReference.click();
   await frame.locator('[data-block-id="block-1-6-paragraph"].block-selected').waitFor();
-  await page.waitForTimeout(2100);
-  if (await frame.locator('[data-block-id="block-1-6-paragraph"].block-selected').count()) throw new Error('Temporary Chat reference highlight was not cleared');
+  await frame.locator('[data-block-id="block-1-6-paragraph"].block-selected').waitFor({ state: 'hidden', timeout: 3000 });
   await page.locator('#open-chat-history').click();
   await page.locator('#chat-history-view:not([hidden])').waitFor();
   if (!(await page.locator('.sidebar-tab[data-panel="chat-panel"]').getAttribute('aria-selected') === 'true')) throw new Error('Opening Chat history deactivated the AI tab');
@@ -505,6 +560,10 @@ let browserSession;
   await firstSession.click();
   const existingAssistantBubble = page.locator('.chat-bubble.assistant').filter({ hasText: '键盘交互回归回复。' }).first();
   await existingAssistantBubble.waitFor();
+  for (const target of hashedChatTargets) {
+    await existingAssistantBubble.locator('.chat-block-reference').filter({ hasText: `[p${target.page}/${target.blockId}]` }).click();
+    await frame.locator(`[data-block-id="${target.blockId}"].block-selected`).waitFor();
+  }
   await existingAssistantBubble.locator('.chat-message-body').click({ button: 'right' });
   if (await page.locator('#chat-session-menu').isVisible()) throw new Error('Right-clicking an assistant answer incorrectly opened session management');
   await page.locator('#chat-input').fill('手动标题保持');
@@ -550,6 +609,18 @@ let browserSession;
   if (!replacementSessionId || replacementSessionId === firstSessionId || await page.locator('#chat-history-list [data-chat-session-id]').count() !== 1) throw new Error('Deleting the final Chat session did not create one blank replacement');
   await page.locator('#open-chat-history').click();
   await page.locator('#chat-input').waitFor();
+
+  chatResponseMode = 'citation-stream';
+  await chatInput.fill('测试流式分片引用');
+  await chatInput.press('Enter');
+  const streamedCitationBubble = page.locator('.chat-bubble.assistant').filter({ hasText: '流式引用回归' }).last();
+  await streamedCitationBubble.locator('.chat-copy').waitFor();
+  if (await streamedCitationBubble.locator('.chat-block-reference').count() !== 2) throw new Error('Completed SSE answer did not parse split hashed citations');
+  for (const target of hashedChatTargets) {
+    await streamedCitationBubble.locator('.chat-block-reference').filter({ hasText: `[p${target.page}/${target.blockId}]` }).click();
+    await frame.locator(`[data-block-id="${target.blockId}"].block-selected`).waitFor();
+  }
+  await frame.locator('[data-chat-citation-smoke]').evaluateAll((nodes) => nodes.forEach((node) => node.remove()));
 
   chatResponseMode = 'deep-markdown';
   await page.locator('#chat-input').fill('测试深层 Markdown');

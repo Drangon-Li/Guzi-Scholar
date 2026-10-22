@@ -534,9 +534,8 @@ def _process_pdf_odl(pdf_path: Path, job_dir: Path, *, job_id: str, source_name:
     page_sizes = pdf_page_sizes(source_copy, page_count)
     pdf_evidence = []
     try:
-        # The packaged Python runtime intentionally omits PyMuPDF.  The
-        # isolated helper keeps that optional dependency out of the main
-        # conversion process and can fall back to the bundled PDFBox reader.
+        # Isolate native PDF parsing failures from the conversion process;
+        # PDFBox remains available when PyMuPDF cannot extract the evidence.
         from layout_pipeline import _extract_pdf_evidence_isolated
 
         if progress:

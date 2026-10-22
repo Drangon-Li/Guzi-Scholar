@@ -8,6 +8,7 @@ small, atomically-written JSON document.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -800,6 +801,124 @@ class LibraryStore:
             else:
                 validated[field] = str(raw or "").strip()[:12000 if field == "abstract" else 2000]
         return validated
+
+    def find_zotero_source(self, source_id: str) -> Optional[str]:
+        with self.lock:
+            for job_id, item in self.state["items"].items():
+                if isinstance(item, dict) and source_id in item.get("zotero_sources", {}) and job_id not in self.state.get("permanently_deleted", []):
+                    return str(job_id)
+        return None
+
+    def import_zotero_metadata(self, job_id: str, package: Dict[str, Any]) -> Dict[str, Any]:
+        """Append Zotero organization and lock imported fields without editing user data."""
+        source_id = str(package.get("source_id") or "").strip()
+        library_id = str(package.get("library_id") or "").strip()
+        if not source_id or not library_id:
+            raise LibraryValidationError("Zotero 导入缺少来源标识。")
+        with self.lock:
+            if job_id in self.state.get("permanently_deleted", []):
+                raise LibraryValidationError("文献已被彻底清除。")
+            item = self.state["items"].setdefault(job_id, self._job_defaults({"job_id": job_id}))
+            metadata = self._normalize_metadata(item.get("metadata"))
+            incoming = self._normalize_metadata({"fields": package.get("metadata", {})})
+            ledger = item.setdefault("zotero_sources", {})
+            previous = ledger.get(source_id, {})
+            locked = set(metadata["locked_fields"])
+            imported_fields = []
+            for field, value in incoming["fields"].items():
+                if value in (None, "", []) or field in locked or metadata["sources"].get(field, {}).get("provider") == "user":
+                    continue
+                metadata["fields"][field] = copy.deepcopy(value)
+                metadata["sources"][field] = {"provider": "zotero", "source_id": source_id,
+                                                "item_key": package.get("item_key"), "confidence": 1.0,
+                                                "retrieved_at": utc_now()}
+                locked.add(field)
+                imported_fields.append(field)
+            metadata["locked_fields"] = sorted(locked)
+            if imported_fields:
+                metadata.update(status="complete", retrieved_at=utc_now(), error="")
+            item["metadata"] = metadata
+            tags = list(dict.fromkeys(str(tag).strip() for tag in _as_list(package.get("tags")) if str(tag).strip()))
+            unseen_tags = [tag for tag in tags if tag not in previous.get("seen_tags", [])]
+            prop = next((prop for prop in self.state["properties"] if prop.get("import_provider") == "zotero" and prop.get("import_field") == "tags" and prop.get("type") == "multi-select"), None)
+            if prop is None and unseen_tags:
+                label = "Zotero 标签"
+                suffix = 1
+                while self._property_label_taken(label):
+                    suffix += 1
+                    label = f"Zotero 标签（{suffix}）"
+                prop = {"id": "property-zotero-tags", "label": label, "type": "multi-select", "options": [],
+                        "system": False, "hidden": False, "order": len(self.state["properties"]),
+                        "created_at": utc_now(), "import_provider": "zotero", "import_field": "tags"}
+                if any(existing.get("id") == prop["id"] for existing in self.state["properties"]):
+                    prop["id"] += "-" + uuid.uuid4().hex[:12]
+                self.state["properties"].append(prop)
+                columns = self.state.setdefault("display", {}).setdefault("columns", [])
+                columns.append({"id": prop["id"], "label": label, "visible": True, "system": False, "order": len(columns)})
+            added_tags = 0
+            if prop:
+                values = item.setdefault("values", {}).setdefault(prop["id"], [])
+                for tag in unseen_tags:
+                    if tag not in prop["options"]:
+                        prop["options"].append(tag)
+                    if tag not in values:
+                        values.append(tag)
+                        added_tags += 1
+            def folder_id(key: str) -> str:
+                return "folder-zotero-" + hashlib.sha256((library_id + "\n" + key).encode()).hexdigest()[:20]
+            members = {str(value.get("key")): value for value in _as_list(package.get("collections")) if isinstance(value, dict) and value.get("key")}
+            definitions = {str(value.get("key")): value for value in [*_as_list(package.get("collection_ancestors")), *members.values()] if isinstance(value, dict) and value.get("key")}
+            root_id = folder_id("")
+            existing_folders = {str(folder.get("id")): folder for folder in self.state["folders"]}
+            if definitions and root_id not in existing_folders:
+                root = {"id": root_id, "name": "Zotero · " + library_id, "parent_id": None, "system": False,
+                        "sort_order": len(self.state["folders"]), "created_at": utc_now(),
+                        "import_provider": "zotero", "import_library_id": library_id, "import_collection_key": ""}
+                self.state["folders"].append(root)
+                existing_folders[root_id] = root
+            warnings = []
+            for key, definition in list(definitions.items()):
+                parent = str(definition.get("parent_key") or "")
+                if parent and parent not in definitions:
+                    definitions[parent] = {"key": parent, "name": parent, "parent_key": None}
+                    warnings.append(f"Zotero 文件夹 {key} 缺少父文件夹名称，已保留父来源标识。")
+            for key, definition in definitions.items():
+                identity = folder_id(key)
+                if identity in existing_folders:
+                    continue
+                parent = str(definition.get("parent_key") or "")
+                seen = {key}
+                cursor = parent
+                while cursor and cursor in definitions and cursor not in seen:
+                    seen.add(cursor)
+                    cursor = str(definitions[cursor].get("parent_key") or "")
+                if cursor in seen:
+                    warnings.append(f"Zotero 文件夹 {key} 存在循环父级，已保留在文库根目录。")
+                    parent = ""
+                folder = {"id": identity, "name": str(definition.get("name") or key), "parent_id": folder_id(parent),
+                          "system": False, "sort_order": len(self.state["folders"]), "created_at": utc_now(),
+                          "import_provider": "zotero", "import_library_id": library_id, "import_collection_key": key}
+                self.state["folders"].append(folder)
+                existing_folders[identity] = folder
+            added_folders = 0
+            for key in members:
+                if key in previous.get("seen_collection_keys", []):
+                    continue
+                identity = folder_id(key)
+                if identity not in item["folder_ids"]:
+                    item["folder_ids"].append(identity)
+                    added_folders += 1
+            ledger[source_id] = {**previous, "source_id": source_id, "library_id": library_id,
+                                 "item_key": package.get("item_key"), "attachment_key": package.get("attachment_key"),
+                                 "source_url": package.get("source_url"), "imported_at": previous.get("imported_at") or utc_now(),
+                                 "seen_tags": list(dict.fromkeys([*previous.get("seen_tags", []), *tags])),
+                                 "seen_collection_keys": list(dict.fromkeys([*previous.get("seen_collection_keys", []), *members])),
+                                 "metadata_fields": list(dict.fromkeys([*previous.get("metadata_fields", []), *imported_fields])),
+                                 "tag_property_id": prop["id"] if prop else previous.get("tag_property_id")}
+            item["updated_at"] = utc_now()
+            self._save_locked()
+            return {"source_id": source_id, "metadata_fields": imported_fields, "tags_added": added_tags,
+                    "folders_added": added_folders, "tags_property_id": ledger[source_id]["tag_property_id"], "warnings": warnings}
 
     def update_metadata(self, job_id: str, payload: Dict[str, Any], *, lock_changed: bool = True) -> Dict[str, Any]:
         fields = self._validate_metadata_fields(payload.get("fields", payload))

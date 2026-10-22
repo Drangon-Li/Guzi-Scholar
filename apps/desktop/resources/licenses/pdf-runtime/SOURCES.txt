@@ -1,0 +1,73 @@
+Guzi Scholar v0.5.0: bundled PDF runtime source and license materials
+
+Components: PyMuPDF 1.28.2 and MuPDF 1.28.2 (Artifex Software).
+The upstream PyMuPDF package metadata states:
+Dual Licensed - GNU AFFERO GPL 3.0 or Artifex Commercial License
+This release supplies the public open-source license materials. No commercial
+license grant is asserted here. PyMuPDF src/__init__.py also carries the upstream
+SPDX-License-Identifier: GPL-3.0-only header; it is preserved in the source archive.
+
+Files beside this notice:
+- PyMuPDF-COPYING.txt: the original short COPYING shipped in the upstream wheel.
+- PyMuPDF-BUILD.txt: the upstream wheel's original pymupdf/_build.py provenance.
+- AGPL-3.0.txt: complete license, copied unchanged from PyMuPDF's source COPYING
+  (also identical to MuPDF's root COPYING).
+- GPL-3.0.txt: complete license, copied unchanged from MuPDF source file
+  thirdparty/lcms2/plugins/threaded/COPYING.GPL3.
+- MuPDF-NOTICE.txt: the unchanged upstream MuPDF README, including copyright.
+- THIRD-PARTY-NOTICES.txt: upstream license/copyright/notice files from the MuPDF
+  source, including font notices, FreeType licenses, and libjpeg's README.
+  Line endings and trailing whitespace in this combined file are normalized.
+  Optional third-party components are included for notice preservation; this
+  listing does not assert that each optional feature is enabled in the wheel.
+
+The following two archives are unmodified upstream source distributions. They
+retain the source-file copyright headers, third-party source and notices, and
+upstream build scripts. PyMuPDF's sdist does NOT embed the MuPDF source archive;
+both downloads are needed for the source set supplied with this release.
+
+PyMuPDF 1.28.2
+Original source:
+https://files.pythonhosted.org/packages/a3/fb/b6761fa2d5266f2cdb24c3b91f4023070ab7848381417678e7a289a1d52a/pymupdf-1.28.2.tar.gz
+Same source archive accompanying this release:
+https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.5.0/pymupdf-1.28.2.tar.gz
+SHA256: 5e0be7908a715aa20333caddd73f1d6f01e4cd0c26e869fa2dd0b7f344da2249
+Size: 87903557 bytes
+Upstream source repository: https://github.com/pymupdf/PyMuPDF
+The upstream wheel's _build.py records PyMuPDF commit:
+12786d12b2962a1d77fd13b103162eddf749644c
+https://github.com/pymupdf/PyMuPDF/tree/12786d12b2962a1d77fd13b103162eddf749644c
+Upstream build entry points included in the sdist: pyproject.toml, setup.py,
+and scripts/gh_release.py.
+
+MuPDF 1.28.2
+Original source (also recorded by the upstream wheel's _build.py):
+https://mupdf.com/downloads/archive/mupdf-1.28.2-source.tar.gz
+Same source archive accompanying this release:
+https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.5.0/mupdf-1.28.2-source.tar.gz
+SHA256: 44075a84e329db55b9bef5f342a70fd26d69e48ad1d33cb89d9664581c641156
+Size: 68898646 bytes
+Upstream source repository: https://github.com/ArtifexSoftware/mupdf
+Upstream build entry points included in the archive: Makefile, Makerules,
+Makethird, setup.py, and scripts/mupdfwrap.py.
+
+Guzi Scholar source and packaging instructions for this exact release:
+https://github.com/Drangon-Li/Guzi-Scholar/tree/v0.5.0
+https://github.com/Drangon-Li/Guzi-Scholar/archive/refs/tags/v0.5.0.tar.gz
+https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.5.0/apps/desktop/scripts/prepare-mac-release.sh
+https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.5.0/apps/desktop/scripts/build-mac-target.cjs
+https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.5.0/apps/desktop/package.json
+
+The macOS packaging script pins PyMuPDF==1.28.2 from PyPI and includes its Python
+module, native MuPDF libraries, wheel metadata, and these license materials in
+the PyInstaller runtime. It does not patch the upstream PDF runtime source.
+The formal packaging environment is Apple Silicon macOS, arm64 Python 3.11,
+JDK 21, PyInstaller 6.16.0 and the additional versions pinned in that script.
+From apps/desktop, install the lockfile dependencies with npm ci; the package
+scripts prepare:mac, dist:mac:internal and dist:mac contain the build commands
+and the script checks report the required local toolchain. Upstream setup.py
+contains the source build steps and environment options for PyMuPDF; MuPDF's
+Makefile and scripts/mupdfwrap.py contain its native-library/bindings build steps.
+
+Release asset checksums:
+https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.5.0/SHA256SUMS.txt

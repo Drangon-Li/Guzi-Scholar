@@ -13,6 +13,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
@@ -20,6 +21,8 @@ from typing import Any, Dict, Iterator, List, Optional
 from config import AI_SERVICES, AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE, resolve_ai_profile
 from pipeline import collect_table_candidates, utc_now
 import translation_providers
+from ai_capabilities import get_model_capabilities, normalize_ai_options, resolve_api_format
+from ai_context import fit_messages, request_budget
 
 
 MAX_AI_RESPONSE_BYTES = 8 * 1024 * 1024
@@ -36,24 +39,18 @@ TRANSLATION_MAX_TOKENS = 8192
 # placeholder often enough on placeholder-dense paragraphs that a single try
 # left visible gaps in the reading page.
 TRANSLATION_ATTEMPTS = 3
-# A connection probe only needs "OK" back, but a reasoning model that ignores
-# every disable-thinking switch still has to finish thinking before it emits
-# anything, so leave enough headroom for that instead of the bare reply.
+# Probe answers are short; the shared budget adds room for configured thinking.
 PROBE_MAX_TOKENS = 512
 
 
 # Gateway configuration and connection status.
-def _config(service: str = "chat") -> Dict[str, str]:
+def _config(service: str = "chat") -> Dict[str, Any]:
     return resolve_ai_profile(service)
 
 
 def _translation_mode(profile: Optional[Dict[str, str]] = None) -> str:
     value = (profile or _config("translation")).get("mode", DEFAULT_TRANSLATION_MODE)
     return value if value in AI_TRANSLATION_MODES else DEFAULT_TRANSLATION_MODE
-
-
-def _uses_chat_template(service: str, profile: Optional[Dict[str, str]] = None) -> bool:
-    return service == "chat" or (service == "translation" and _translation_mode(profile) == "chat")
 
 
 def status(service: str = "chat") -> Dict[str, Any]:
@@ -71,6 +68,8 @@ def status(service: str = "chat") -> Dict[str, Any]:
         },
         "model": (config["model"] or None) if config.get("provider", "openai-compatible") == "openai-compatible" else None,
         "profile_id": config["profile_id"],
+        **normalize_ai_options(config),
+        "capabilities": get_model_capabilities(config),
         **({"provider": config.get("provider", "openai-compatible"),
             "source_language": config.get("source_language", "auto"),
             "target_language": config.get("target_language", "zh"),
@@ -96,7 +95,7 @@ def _endpoint(base_url: str) -> str:
     normalized = base_url.strip().rstrip("/")
     if normalized.endswith("/chat/completions"):
         return normalized
-    if normalized.endswith("/v1"):
+    if re.search(r"/v\d+$", normalized):
         return normalized + "/chat/completions"
     return normalized + "/v1/chat/completions"
 
@@ -173,10 +172,8 @@ def _message_content(envelope: Dict[str, Any]) -> str:
                 parts.append(str(part))
         content = "".join(parts)
     value = content.strip() if isinstance(content, str) else str(content).strip()
-    # Qwen-compatible gateways may include a thinking block in `content` when
-    # the deployment ignores `enable_thinking=false`.  Keep only the answer;
-    # the request path below also retries without optional fields for older
-    # gateways, so this is deliberately conservative rather than heuristic.
+    # Some compatible deployments include reasoning markup in answer content.
+    # Keep the reading assistant answer separate from that internal content.
     value = re.sub(r"<think>.*?</think>\s*", "", value, flags=re.IGNORECASE | re.DOTALL)
     return value.strip()
 
@@ -198,152 +195,235 @@ def _parse_json_content(content: str) -> Any:
         raise
 
 
-# OpenAI-compatible chat/completions transport and response parsing.
-def _complete(
-    messages: List[dict],
-    *,
-    service: str = "chat",
-    temperature: Optional[float] = 0.2,
-    response_format: Optional[dict] = None,
-    max_tokens: Optional[int] = None,
-    model: Optional[str] = None,
-    extra_body: Optional[dict] = None,
-    timeout_seconds: Optional[int] = None,
-    profile: Optional[Dict[str, str]] = None,
-) -> str:
-    """Call the configured OpenAI-compatible gateway and return message text."""
-    config = profile if profile is not None else _config(service)
-    selected_model = (model or config["model"]).strip()
-    if not (config["base_url"] and selected_model):
-        raise RuntimeError(f"未配置 {service} 服务的 Base URL 或模型。")
-    request_body: Dict[str, Any] = {
-        "model": selected_model,
-        "messages": messages,
-    }
-    if temperature is not None:
-        request_body["temperature"] = temperature
-    if _uses_chat_template(service, config) and os.environ.get("MY_SCHOLAR_AI_DISABLE_THINKING", "1").strip().lower() not in {"0", "false", "no"}:
-        # Reasoning models otherwise spend the token budget on a hidden chain of
-        # thought and return empty content.  Vendors spell the switch
-        # differently, so send both; whichever one the gateway rejects is
-        # stripped by the retry below.
-        request_body["chat_template_kwargs"] = {"enable_thinking": False}
-        request_body["thinking"] = {"type": "disabled"}
-    if response_format:
-        request_body["response_format"] = response_format
-    if max_tokens is not None:
-        request_body["max_tokens"] = max_tokens
-    if extra_body:
-        request_body.update(extra_body)
-    headers = {"Content-Type": "application/json"}
-    if config["api_key"]:
-        headers["Authorization"] = "Bearer " + config["api_key"]
+def _effective_profile(service: str, profile: Optional[dict] = None, options: Optional[dict] = None) -> dict:
+    config = dict(profile if profile is not None else _config(service))
+    if options:
+        config.update({key: value for key, value in options.items() if value is not None})
+    config.update(normalize_ai_options(config, strict=True))
+    return config
 
-    def request_envelope(body: Dict[str, Any]) -> Dict[str, Any]:
-        request = urllib.request.Request(
-            _endpoint(config["base_url"]),
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        timeout = timeout_seconds if timeout_seconds is not None else int(os.environ.get("MY_SCHOLAR_AI_TIMEOUT", "90"))
+
+def _protocol_endpoint(base_url: str, api_format: str) -> str:
+    if api_format not in {"anthropic", "openai-responses"}:
+        parsed = urllib.parse.urlsplit(base_url.strip().rstrip("/"))
+        if not parsed.path:
+            if api_format == 'glm':
+                return base_url.rstrip('/') + '/api/paas/v4/chat/completions'
+            if api_format == 'qwen' and 'dashscope' in (parsed.hostname or ''):
+                return base_url.rstrip('/') + '/compatible-mode/v1/chat/completions'
+            if api_format == 'openrouter':
+                return base_url.rstrip('/') + '/api/v1/chat/completions'
+        return _endpoint(base_url)
+    suffix = "/messages" if api_format == "anthropic" else "/responses"
+    base = base_url.strip().rstrip("/")
+    for old_suffix in ("/chat/completions", "/messages", "/responses"):
+        if base.endswith(old_suffix):
+            base = base[:-len(old_suffix)]
+            break
+    return base + suffix if re.search(r"/v\d+$", base) else base + "/v1" + suffix
+
+
+def _anthropic_content(content: Any) -> Any:
+    if not isinstance(content, list):
+        return content
+    parts = []
+    for part in content:
+        if part.get("type") != "image_url":
+            parts.append(part)
+            continue
+        url = str(part.get("image_url", {}).get("url", ""))
+        match = re.fullmatch(r"data:([^;]+);base64,(.*)", url, flags=re.DOTALL)
+        source = {"type": "base64", "media_type": match[1], "data": match[2]} if match else {"type": "url", "url": url}
+        parts.append({"type": "image", "source": source})
+    return parts
+
+
+def _reasoning_parameters(config: dict, budget: dict) -> dict:
+    api_format = resolve_api_format(config)
+    effort = config['reasoning_effort']
+    tokens = config['thinking_budget']
+    if effort == 'auto' and not tokens:
+        return {}
+    caps = budget['capabilities']
+    if api_format == 'anthropic':
+        if effort == 'none':
+            body = {'thinking': {'type': caps.get('thinking_off_type', 'disabled')}}
+            if caps.get('thinking_off_effort'):
+                body['output_config'] = {'effort': caps['thinking_off_effort']}
+            return body
+        if tokens:
+            modes = caps.get('thinking_modes')
+            if modes is not None and 'manual' not in modes:
+                raise ValueError('此 Claude 模型不支持手动思考预算，请使用推理强度。')
+            if effort != 'auto':
+                raise ValueError('Claude 手动思考预算不能同时设置推理强度，请将推理强度设为自动。')
+            if tokens < 1024:
+                raise ValueError('Claude 思考预算至少为 1024 token。')
+            return {'thinking': {'type': 'enabled', 'budget_tokens': tokens}}
+        body = {'output_config': {'effort': effort}}
+        if 'adaptive' in (caps.get('thinking_modes') or []):
+            body['thinking'] = {'type': 'adaptive'}
+        return body
+    if api_format == 'openrouter':
+        if tokens and effort != 'auto':
+            raise ValueError('OpenRouter 思考预算与推理强度不能同时设置。')
+        return {'reasoning': {'max_tokens': tokens} if tokens else {'effort': effort}}
+    if api_format == 'qwen':
+        if tokens and effort not in {'auto', 'none'}:
+            raise ValueError('Qwen 思考预算与推理强度不能同时设置。')
+        if effort not in {'auto', 'none'}:
+            if not isinstance(caps.get('reasoning_efforts'), list):
+                raise ValueError('此 Qwen 模型没有已确认的推理强度支持，请使用思考预算。')
+            return {'reasoning_effort': effort}
+        body = {'enable_thinking': effort != 'none'}
+        if tokens:
+            body['thinking_budget'] = tokens
+        return body
+    if api_format in {'deepseek', 'glm'}:
+        if tokens:
+            raise ValueError('此协议不支持指定思考 token 预算，请使用推理强度。')
+        body = {'thinking': {'type': 'disabled' if effort == 'none' else 'enabled'}}
+        if effort not in {'auto', 'none'}:
+            body['reasoning_effort'] = effort
+        return body
+    if api_format == 'chat-template':
+        if tokens or effort not in {'auto', 'none'}:
+            raise ValueError('chat-template 协议仅支持关闭思考；其他设置请使用对应服务协议。')
+        return {'chat_template_kwargs': {'enable_thinking': False}}
+    if tokens:
+        raise ValueError('OpenAI 协议不支持指定思考 token 预算，请使用推理强度。')
+    return {'reasoning': {'effort': effort}} if api_format == 'openai-responses' else {'reasoning_effort': effort}
+
+
+def _build_request(messages: List[dict], config: dict, *, temperature: Optional[float],
+                   max_tokens: Optional[int], response_format: Optional[dict] = None,
+                   extra_body: Optional[dict] = None, stream: bool = False) -> tuple[dict, dict, str]:
+    if not (config.get('base_url') and config.get('model')):
+        raise RuntimeError('未配置 AI 服务的 Base URL 或模型。')
+    budget = request_budget(config, max_tokens or CHAT_MAX_TOKENS)
+    # Fixed tasks (translation/review/highlights) must keep their task text.
+    # Chat has already pruned its optional paper/history before reaching here.
+    messages, _ = fit_messages(messages, budget)
+    api_format = resolve_api_format(config)
+    body: dict = {'model': config['model']}
+    reasoning = _reasoning_parameters(config, budget)
+    if api_format == 'anthropic':
+        system = '\n\n'.join(str(message['content']) for message in messages if message['role'] == 'system')
+        if system:
+            body['system'] = system
+        body['messages'] = [{'role': message['role'], 'content': _anthropic_content(message['content'])} for message in messages if message['role'] != 'system']
+        body['max_tokens'] = budget['output_tokens']
+    elif api_format == 'openai-responses':
+        inputs = []
+        for message in messages:
+            content = message['content']
+            if isinstance(content, list):
+                content = [{'type': 'input_image', 'image_url': part['image_url']['url']} if part.get('type') == 'image_url' else {'type': 'input_text', 'text': part.get('text', '')} for part in content]
+            inputs.append({'role': message['role'], 'content': content})
+        body['input'] = inputs
+        body['max_output_tokens'] = budget['output_tokens']
+        if response_format:
+            body['text'] = {'format': response_format}
+    else:
+        body['messages'] = messages
+        # Dedicated machine translation has its own generation contract.
+        if max_tokens is not None or not (extra_body and 'translation_options' in extra_body):
+            token_key = 'max_completion_tokens' if api_format == 'openai' and (budget['capabilities'].get('thinking_supported') or config['reasoning_effort'] != 'auto') else 'max_tokens'
+            body[token_key] = budget['output_tokens']
+        if response_format:
+            body['response_format'] = response_format
+    thinking_active = config['reasoning_effort'] != 'none' and (bool(reasoning) or budget['capabilities'].get('thinking_supported'))
+    if temperature is not None and budget['capabilities'].get('temperature_supported') is not False and not (thinking_active and api_format in {'anthropic', 'deepseek'}):
+        body['temperature'] = temperature
+    body.update(reasoning)
+    if extra_body:
+        body.update(extra_body)
+    if stream:
+        body['stream'] = True
+    headers = {'Content-Type': 'application/json'}
+    if api_format == 'anthropic':
+        headers['anthropic-version'] = '2023-06-01'
+        if config.get('api_key'):
+            headers['x-api-key'] = config['api_key']
+    elif config.get('api_key'):
+        headers['Authorization'] = 'Bearer ' + config['api_key']
+    return body, headers, _protocol_endpoint(config['base_url'], api_format)
+
+
+def _response_text(envelope: dict, api_format: str) -> str:
+    if envelope.get('error') or envelope.get('type') == 'error':
+        raise RuntimeError('模型服务返回错误，请检查模型和推理设置。')
+    if api_format == 'anthropic':
+        if envelope.get('stop_reason') == 'max_tokens':
+            raise RuntimeError('模型输出达到长度上限，疑似被截断，请重试。')
+        return ''.join(str(part.get('text', '')) for part in envelope.get('content', []) if part.get('type') == 'text').strip()
+    if api_format == 'openai-responses':
+        if envelope.get('status') in {'incomplete', 'failed'}:
+            raise RuntimeError('模型输出未完成，请调整输出或推理预算。')
+        return ''.join(str(part.get('text', '')) for item in envelope.get('output', []) if item.get('type') == 'message' for part in item.get('content', []) if part.get('type') == 'output_text').strip()
+    choices = envelope.get('choices', [])
+    if choices and choices[0].get('finish_reason') == 'length':
+        raise RuntimeError('模型输出达到长度上限，疑似被截断，请重试。')
+    return _message_content(envelope)
+
+
+def _complete(messages: List[dict], *, service: str = 'chat', temperature: Optional[float] = 0.2,
+              response_format: Optional[dict] = None, max_tokens: Optional[int] = None,
+              model: Optional[str] = None, extra_body: Optional[dict] = None,
+              timeout_seconds: Optional[int] = None, profile: Optional[dict] = None,
+              options: Optional[dict] = None) -> str:
+    config = _effective_profile(service, profile, options)
+    if model:
+        config['model'] = model
+    body, headers, endpoint = _build_request(messages, config, temperature=temperature, max_tokens=max_tokens,
+                                            response_format=response_format, extra_body=extra_body)
+    def request_envelope() -> dict:
+        request = urllib.request.Request(endpoint, data=json.dumps(body, ensure_ascii=False).encode('utf-8'), headers=headers, method='POST')
+        timeout = timeout_seconds if timeout_seconds is not None else int(os.environ.get('MY_SCHOLAR_AI_TIMEOUT', '90'))
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = response.read(MAX_AI_RESPONSE_BYTES + 1)
-            if len(payload) > MAX_AI_RESPONSE_BYTES:
-                raise RuntimeError("模型响应超过安全上限。")
-            value = json.loads(payload.decode("utf-8", errors="replace"))
-        return value if isinstance(value, dict) else {}
-
+        if len(payload) > MAX_AI_RESPONSE_BYTES:
+            raise RuntimeError('模型响应超过安全上限。')
+        envelope = json.loads(payload.decode('utf-8', errors='replace'))
+        return envelope if isinstance(envelope, dict) else {}
     try:
-        envelope = request_envelope(request_body)
+        envelope = request_envelope()
     except urllib.error.HTTPError as exc:
-        # Older OpenAI-compatible gateways reject optional body extensions even
-        # though they implement chat/completions. Retry once without them.
-        optional_keys = ("response_format", "chat_template_kwargs", "thinking")
-        if exc.code not in {400, 422} or not any(key in request_body for key in optional_keys):
+        # Only the optional structured-output hint can be retried. User
+        # reasoning choices stay in the body and endpoint errors remain visible.
+        if exc.code not in {400, 422} or 'response_format' not in body:
             raise
-        for key in optional_keys:
-            request_body.pop(key, None)
-        envelope = request_envelope(request_body)
-    content = _message_content(envelope)
+        body.pop('response_format')
+        envelope = request_envelope()
+    content = _response_text(envelope, resolve_api_format(config))
     if not content:
-        raise RuntimeError("模型返回为空。")
-    choices = envelope.get("choices") if isinstance(envelope, dict) else None
-    finish_reason = choices[0].get("finish_reason") if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None
-    if finish_reason == "length":
-        raise RuntimeError("模型输出达到长度上限，疑似被截断，请重试。")
+        raise RuntimeError('模型返回为空。')
     if len(content) > MAX_AI_TEXT_CHARS:
-        raise RuntimeError("模型回答超过安全上限。")
+        raise RuntimeError('模型回答超过安全上限。')
     return content
 
 
 def _delta_content(envelope: Any) -> str:
-    """Extract one streamed content delta without trimming its whitespace.
-
-    Deltas are concatenated by the caller, so leading/trailing spaces are
-    significant here unlike in _message_content().
-    """
-    choices = envelope.get("choices") if isinstance(envelope, dict) else None
+    choices = envelope.get('choices') if isinstance(envelope, dict) else None
     if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        return ""
-    delta = choices[0].get("delta")
-    content = delta.get("content", "") if isinstance(delta, dict) else ""
+        return ''
+    delta = choices[0].get('delta')
+    content = delta.get('content', '') if isinstance(delta, dict) else ''
     if isinstance(content, list):
-        parts = []
-        for part in content:
-            if isinstance(part, dict):
-                parts.append(str(part.get("text", part.get("content", ""))))
-            elif part is not None:
-                parts.append(str(part))
-        content = "".join(parts)
-    return content if isinstance(content, str) else str(content or "")
+        return ''.join(str(part.get('text', part.get('content', ''))) if isinstance(part, dict) else str(part or '') for part in content)
+    return content if isinstance(content, str) else str(content or '')
 
 
-def _complete_stream(
-    messages: List[dict],
-    *,
-    service: str = "chat",
-    temperature: Optional[float] = 0.2,
-    extra_body: Optional[dict] = None,
-    max_tokens: Optional[int] = None,
-    profile: Optional[Dict[str, str]] = None,
-) -> Iterator[str]:
-    """Stream content deltas from the configured OpenAI-compatible gateway."""
-    config = profile if profile is not None else _config(service)
-    model = config["model"].strip()
-    if not (config["base_url"] and model):
-        raise RuntimeError(f"未配置 {service} 服务的 Base URL 或模型。")
-    request_body: Dict[str, Any] = {"model": model, "messages": messages, "stream": True}
-    if temperature is not None:
-        request_body["temperature"] = temperature
-    if max_tokens is not None:
-        request_body["max_tokens"] = max_tokens
-    if _uses_chat_template(service, config) and os.environ.get("MY_SCHOLAR_AI_DISABLE_THINKING", "1").strip().lower() not in {"0", "false", "no"}:
-        request_body["chat_template_kwargs"] = {"enable_thinking": False}
-    if extra_body:
-        request_body.update(extra_body)
-    headers = {"Content-Type": "application/json"}
-    if config["api_key"]:
-        headers["Authorization"] = "Bearer " + config["api_key"]
-
-    def open_stream(body: Dict[str, Any]) -> Any:
-        request = urllib.request.Request(
-            _endpoint(config["base_url"]),
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        return urllib.request.urlopen(request, timeout=int(os.environ.get("MY_SCHOLAR_AI_TIMEOUT", "90")))
-
-    try:
-        response = open_stream(request_body)
-    except urllib.error.HTTPError as exc:
-        # Same as _complete: older gateways reject the optional extension.
-        if exc.code not in {400, 422} or "chat_template_kwargs" not in request_body:
-            raise
-        request_body.pop("chat_template_kwargs", None)
-        response = open_stream(request_body)
-    emitted = ""
+def _complete_stream(messages: List[dict], *, service: str = 'chat', temperature: Optional[float] = 0.2,
+                     extra_body: Optional[dict] = None, max_tokens: Optional[int] = None,
+                     profile: Optional[dict] = None, options: Optional[dict] = None) -> Iterator[str]:
+    config = _effective_profile(service, profile, options)
+    body, headers, endpoint = _build_request(messages, config, temperature=temperature, max_tokens=max_tokens,
+                                            extra_body=extra_body, stream=True)
+    request = urllib.request.Request(endpoint, data=json.dumps(body, ensure_ascii=False).encode('utf-8'), headers=headers, method='POST')
+    response = urllib.request.urlopen(request, timeout=int(os.environ.get('MY_SCHOLAR_AI_TIMEOUT', '90')))
+    api_format = resolve_api_format(config)
+    emitted = ''
     finish_reason = None
     received_bytes = 0
     with response:
@@ -353,40 +433,52 @@ def _complete_stream(
                 break
             received_bytes += len(raw_line)
             if received_bytes > MAX_AI_RESPONSE_BYTES:
-                raise RuntimeError("模型流式响应超过安全上限。")
+                raise RuntimeError('模型流式响应超过安全上限。')
             if len(raw_line) > MAX_AI_STREAM_LINE_BYTES:
-                raise RuntimeError("模型流式响应单行超过安全上限。")
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line.startswith("data:"):
+                raise RuntimeError('模型流式响应单行超过安全上限。')
+            line = raw_line.decode('utf-8', errors='replace').strip()
+            if not line.startswith('data:'):
                 continue
-            data = line[len("data:"):].strip()
-            if data == "[DONE]":
+            data = line[5:].strip()
+            if data == '[DONE]':
                 break
             try:
                 envelope = json.loads(data)
             except json.JSONDecodeError:
                 continue
-            choices = envelope.get("choices") if isinstance(envelope, dict) else None
-            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-                finish_reason = choices[0].get("finish_reason") or finish_reason
-            delta = _delta_content(envelope)
+            if not isinstance(envelope, dict):
+                continue
+            if envelope.get('error') or envelope.get('type') in {'error', 'response.failed', 'response.incomplete'}:
+                raise RuntimeError('模型流式输出失败或未完成，请检查模型和推理预算。')
+            if api_format == 'anthropic':
+                finish_reason = envelope.get('delta', {}).get('stop_reason') or finish_reason
+                delta = envelope.get('delta', {}).get('text', '') if envelope.get('type') == 'content_block_delta' else ''
+            elif api_format == 'openai-responses':
+                if envelope.get('type') == 'response.completed' and envelope.get('response', {}).get('status') != 'completed':
+                    raise RuntimeError('模型输出未完成，请调整推理预算。')
+                delta = envelope.get('delta', '') if envelope.get('type') == 'response.output_text.delta' else ''
+            else:
+                choices = envelope.get('choices', [])
+                if choices and isinstance(choices[0], dict):
+                    finish_reason = choices[0].get('finish_reason') or finish_reason
+                delta = _delta_content(envelope)
             if not delta:
                 continue
-            # Translation gateways (qwen-mt) stream cumulative snapshots where
-            # each chunk repeats the full text so far; chat-style gateways
-            # stream true increments. Normalize both shapes to increments.
-            if emitted and delta.startswith(emitted):
+            # Dedicated MT gateways stream cumulative snapshots.
+            if extra_body and 'translation_options' in extra_body and emitted and delta.startswith(emitted):
                 fresh = delta[len(emitted):]
                 emitted = delta
             else:
                 fresh = delta
                 emitted += delta
             if len(emitted) > MAX_AI_TEXT_CHARS:
-                raise RuntimeError("模型回答超过安全上限。")
+                raise RuntimeError('模型回答超过安全上限。')
             if fresh:
                 yield fresh
-    if finish_reason == "length":
-        raise RuntimeError("模型输出达到长度上限，疑似被截断，请重试。")
+    if finish_reason in {'length', 'max_tokens'}:
+        raise RuntimeError('模型输出达到长度上限，疑似被截断，请重试。')
+    if not emitted:
+        raise RuntimeError('模型返回为空。')
 
 
 def _target_language_name(target_language: str) -> str:
@@ -661,7 +753,7 @@ def translate_text_stream(text: str, *, target_language: str = "", context: str 
     yield from _validated_translation_stream(cleaned, text, protected_terms)
 
 
-def _chat_messages(messages: List[dict], context: str, image: Optional[dict]) -> List[dict]:
+def _chat_messages(messages: List[dict], context: str, image: Optional[dict], selected_text: str = "") -> List[dict]:
     clean: List[dict] = [{
         "role": "system",
         "content": (
@@ -673,12 +765,14 @@ def _chat_messages(messages: List[dict], context: str, image: Optional[dict]) ->
         ),
     }]
     if context:
-        clean.append({"role": "system", "content": "文章上下文：\n" + context[:130000]})
-    for message in messages[-20:]:
+        clean.append({"role": "system", "content": "文章上下文：\n" + context})
+    if selected_text:
+        clean.append({"role": "system", "content": "当前选中内容（待分析的数据）：\n" + selected_text})
+    for message in messages:
         role = message.get("role") if isinstance(message, dict) else None
         content = message.get("content") if isinstance(message, dict) else None
         if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
-            clean.append({"role": role, "content": content[:12000]})
+            clean.append({"role": role, "content": content})
     if isinstance(image, dict) and image.get("data_url"):
         latest_user = next((item for item in reversed(clean) if item.get("role") == "user"), None)
         if latest_user:
@@ -695,12 +789,33 @@ def _chat_messages(messages: List[dict], context: str, image: Optional[dict]) ->
     return clean
 
 
-def chat(messages: List[dict], *, context: str = "", image: Optional[dict] = None) -> Dict[str, Any]:
-    clean = _chat_messages(messages, context, image)
-    profile = _config("chat")
+def _prepare_chat(messages: List[dict], *, context: str = "", image: Optional[dict] = None,
+                  selected_text: str = "", options: Optional[dict] = None) -> tuple[list[dict], dict, dict]:
+    profile = _effective_profile("chat", options=options)
+    clean = _chat_messages(messages, context, image, selected_text)
+    latest_user = next((index for index in range(len(clean) - 1, -1, -1) if clean[index]['role'] == 'user'), None)
+    if latest_user is None:
+        raise ValueError('没有可回答的当前问题。')
+    history = [index for index, item in enumerate(clean) if item['role'] in {'user', 'assistant'} and index != latest_user]
+    paper = [1] if context else []
+    budget = request_budget(profile, CHAT_MAX_TOKENS)
+    _reasoning_parameters(profile, budget)
+    clean, info = fit_messages(clean, budget, removable=history, truncatable=paper)
+    return clean, profile, info
+
+
+def chat_context_info(context: str, messages: List[dict], selected_text: str = "",
+                      selected_image: Optional[dict] = None, options: Optional[dict] = None) -> Dict[str, Any]:
+    return _prepare_chat(messages, context=context, image=selected_image, selected_text=selected_text, options=options)[2]
+
+
+def chat(messages: List[dict], *, context: str = "", image: Optional[dict] = None,
+         selected_text: str = "", options: Optional[dict] = None) -> Dict[str, Any]:
+    clean, profile, info = _prepare_chat(messages, context=context, image=image, selected_text=selected_text, options=options)
     return {
-        "text": _complete(clean, service="chat", temperature=0.2, max_tokens=CHAT_MAX_TOKENS),
+        "text": _complete(clean, service="chat", temperature=0.2, max_tokens=CHAT_MAX_TOKENS, profile=profile),
         "model": profile["model"],
+        "context": info,
     }
 
 
@@ -748,8 +863,7 @@ def reference_quick_read(reference_text: str, *, context: str, evidence: Dict[st
 def _strip_stream_thinking(deltas: Iterator[str]) -> Iterator[str]:
     """Suppress a leading <think>…</think> block from a delta stream.
 
-    Mirrors the non-streaming cleanup in _message_content for deployments
-    that ignore enable_thinking=false.
+    Mirrors the non-streaming cleanup in _message_content.
     """
     buffer = ""
     mode = "detect"
@@ -787,15 +901,12 @@ def _strip_stream_thinking(deltas: Iterator[str]) -> Iterator[str]:
         yield buffer
 
 
-def chat_stream(messages: List[dict], *, context: str = "", image: Optional[dict] = None) -> Iterator[str]:
-    """Yield assistant reply deltas with the same message shape as chat()."""
+def chat_stream(messages: List[dict], *, context: str = "", image: Optional[dict] = None,
+                selected_text: str = "", options: Optional[dict] = None) -> Iterator[str]:
+    """Yield assistant reply deltas using the same profile and budget as chat()."""
+    clean, profile, _ = _prepare_chat(messages, context=context, image=image, selected_text=selected_text, options=options)
     yield from _strip_stream_thinking(
-        _complete_stream(
-            _chat_messages(messages, context, image),
-            service="chat",
-            temperature=0.2,
-            max_tokens=CHAT_MAX_TOKENS,
-        )
+        _complete_stream(clean, service="chat", temperature=0.2, max_tokens=CHAT_MAX_TOKENS, profile=profile)
     )
 
 
