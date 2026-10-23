@@ -205,11 +205,11 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
     const hoverSource = () => hoverText(source);
     const firstSourceSentence = (await source.evaluate((node) => { const copy = node.cloneNode(true); copy.querySelectorAll('button').forEach((item) => item.remove()); return copy.textContent.trim(); })).match(/^[^.!?。！？]+[.!?。！？]?/u)?.[0];
     const blockRequests = () => requests.filter((item) => !item.block_id && item.text === firstSourceSentence).length;
-    const tooltip = frame.locator('.reader-sentence-tooltip');
+    const tooltip = page.locator('#selection-popover:not([hidden])');
     const hoverFeedback = () => frame.locator('body').evaluate(() => {
       const ranges = [...(CSS.highlights.get('my-scholar-sentence-hover') || [])];
       return {
-        tooltip: Boolean(document.querySelector('.reader-sentence-tooltip')),
+        tooltip: Boolean(parent.document.querySelector('#selection-popover:not([hidden])')),
         ranges: ranges.map((range) => {
           const fragment = range.cloneContents();
           fragment.querySelectorAll('.annotation-note-trigger,.paragraph-translate-trigger').forEach((node) => node.remove());
@@ -236,12 +236,14 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
     const assertTooltipOutsideSentence = async ({ multiline = false, above = false } = {}) => {
       const geometry = await tooltip.evaluate((node) => {
         const rect = node.getBoundingClientRect();
-        const ranges = [...(CSS.highlights.get('my-scholar-sentence-hover') || [])];
-        const lines = ranges.flatMap((range) => [...range.getClientRects()]).filter((line) => line.width && line.height);
+        const iframe = document.querySelector('#html-preview');
+        const frameRect = iframe.getBoundingClientRect();
+        const ranges = [...(iframe.contentWindow.CSS.highlights.get('my-scholar-sentence-hover') || [])];
+        const lines = ranges.flatMap((range) => [...range.getClientRects()]).filter((line) => line.width && line.height).map((line) => ({ left: line.left + frameRect.left, right: line.right + frameRect.left, top: line.top + frameRect.top, bottom: line.bottom + frameRect.top }));
         return {
-          tooltip: rect.toJSON(), lines: lines.map((line) => line.toJSON()),
+          tooltip: rect.toJSON(), lines,
           viewportWidth: innerWidth, viewportHeight: innerHeight,
-          scrollable: node.scrollHeight > node.clientHeight,
+          scrollable: node.querySelector('#selection-translation-result').scrollHeight > node.querySelector('#selection-translation-result').clientHeight,
         };
       });
       const { tooltip: box, lines } = geometry;
@@ -256,19 +258,19 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
     await hoverSource();
     await waitForPointerFrame();
     await assertFeedbackCleared();
-    await tooltip.filter({ hasText: '结束。' }).waitFor().catch(async (error) => { console.error(JSON.stringify({ errors, requests, debug: await source.evaluate((node) => ({ ready: node.ownerDocument.documentElement.dataset.sentenceHoverReady, html: node.innerHTML.slice(0,700), box: node.getBoundingClientRect().toJSON(), body: node.ownerDocument.querySelector('.reader-sentence-tooltip')?.outerHTML, selected: node.ownerDocument.getSelection()?.toString() })) })); await page.screenshot({ path: '/tmp/guzi-reader-experience-failure.png' }); throw error; });
+    await tooltip.filter({ hasText: '结束。' }).waitFor().catch(async (error) => { console.error(JSON.stringify({ errors, requests, debug: await source.evaluate((node) => ({ ready: node.ownerDocument.documentElement.dataset.sentenceHoverReady, html: node.innerHTML.slice(0,700), box: node.getBoundingClientRect().toJSON(), body: node.ownerDocument.defaultView.parent.document.querySelector('#selection-popover:not([hidden])')?.outerHTML, selected: node.ownerDocument.getSelection()?.toString() })) })); await page.screenshot({ path: '/tmp/guzi-reader-experience-failure.png' }); throw error; });
     assert.equal(blockRequests(), 1);
     const tooltipGeometry = await tooltip.evaluate((node) => {
       const rect = node.getBoundingClientRect();
-      return { height: rect.height, top: rect.top, bottom: rect.bottom, width: rect.width, scrollable: node.scrollHeight > node.clientHeight, viewportHeight: innerHeight, label: node.querySelector('.reader-sentence-tooltip-label').textContent };
+      return { height: rect.height, top: rect.top, bottom: rect.bottom, width: rect.width, scrollable: node.querySelector('#selection-translation-result').scrollHeight > node.querySelector('#selection-translation-result').clientHeight, viewportHeight: innerHeight, buttons: node.querySelectorAll('.selection-actions button').length };
     });
     assert(tooltipGeometry.scrollable && tooltipGeometry.top >= 0 && tooltipGeometry.bottom <= tooltipGeometry.viewportHeight);
-    assert.equal(tooltipGeometry.label, '当前句译文');
+    assert(tooltipGeometry.buttons > 0, 'Hover exposes sentence actions');
     await assertTooltipOutsideSentence();
     assert.equal(requests.filter((item) => !item.block_id).at(-1).text, firstSourceSentence);
     await assertSourceFeedback(firstSourceSentence);
-    await tooltip.evaluate((node) => { node.scrollTop = node.scrollHeight; });
-    assert(await tooltip.evaluate((node) => node.scrollTop > 0));
+    await tooltip.locator('#selection-translation-result').evaluate((node) => { node.scrollTop = node.scrollHeight; });
+    assert(await tooltip.locator('#selection-translation-result').evaluate((node) => node.scrollTop > 0));
     await assertSourceFeedback(firstSourceSentence);
     await frame.locator('body').evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })));
     await assertFeedbackCleared();
@@ -356,13 +358,29 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
       await hoverText(geometryParagraph, sentence);
       await tooltip.filter({ hasText: '正在翻译当前句' }).waitFor();
       await tooltip.evaluate((_node, geometry) => {
-        const range = [...CSS.highlights.get('my-scholar-sentence-hover')][0];
-        range.getClientRects = () => geometry === 'empty' ? [] : [{ left: 12, right: 100, top: 0, bottom: innerHeight, width: 88, height: innerHeight }];
+        const view = document.querySelector('#html-preview').contentWindow;
+        const range = [...view.CSS.highlights.get('my-scholar-sentence-hover')][0];
+        range.getClientRects = () => geometry === 'empty' ? [] : [{ left: 12, right: 100, top: 0, bottom: view.innerHeight, width: 88, height: view.innerHeight }];
       }, geometry);
       const response = page.waitForResponse((item) => item.url().endsWith('/translate') && item.request().postDataJSON().text === sentence);
       releaseGeometryResponse();
       await (await response).finished();
-      await tooltip.waitFor({ state: 'detached' });
+      if (geometry === 'empty') await tooltip.waitFor({ state: 'detached' });
+      else {
+        await tooltip.locator('#selection-translation-result[data-state="ready"]').filter({ hasText: '结束。' }).waitFor();
+        const constrained = await tooltip.evaluate((node) => {
+          const box = node.getBoundingClientRect();
+          const wrap = document.querySelector('.reader-frame-wrap').getBoundingClientRect();
+          const result = node.querySelector('#selection-translation-result');
+          result.scrollTop = result.scrollHeight;
+          return { box: box.toJSON(), wrap: wrap.toJSON(), resultHeight: result.clientHeight, scrollTop: result.scrollTop };
+        });
+        assert(constrained.box.left >= constrained.wrap.left && constrained.box.right <= constrained.wrap.right
+          && constrained.box.top >= constrained.wrap.top && constrained.box.bottom <= constrained.wrap.bottom,
+        `A constrained sentence toolbar must remain inside the reading area: ${JSON.stringify(constrained)}`);
+        assert(constrained.resultHeight > 0 && constrained.scrollTop > 0,
+          `A constrained sentence toolbar must retain a visible, scrollable translation: ${JSON.stringify(constrained)}`);
+      }
       await frame.locator('body').evaluate(() => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })));
     }
     await source.scrollIntoViewIfNeeded();
@@ -507,7 +525,7 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
     const hoverRichSentence = async (paragraph) => {
       await hoverText(paragraph);
       await tooltip.filter({ hasText: '参考文献' }).waitFor();
-      const rendered = await tooltip.locator('.reader-sentence-tooltip-text').evaluate((node) => ({
+      const rendered = await tooltip.locator('#selection-translation-result').evaluate((node) => ({
         text: node.textContent,
         citation: node.querySelector('sup')?.textContent,
         subscript: node.querySelector('sub')?.textContent,

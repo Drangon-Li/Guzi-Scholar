@@ -40,12 +40,48 @@ class AnnotationActionTest(unittest.TestCase):
         return handler, replies
 
     def test_toolbar_roundtrip_and_legacy_defaults(self):
-        self.assertEqual(server._public_settings()["annotation_actions"], {"hidden_builtin": [], "custom": []})
+        self.assertEqual(server._public_settings()["annotation_actions"],
+                         {"hidden_builtin": [], "custom": [], "show_shortcut_hints": True})
         saved = server._write_settings({"annotation_actions": self.actions})
         self.assertEqual(saved["annotation_actions"]["custom"], self.actions["custom"])
         self.assertEqual(set(saved["annotation_actions"]["hidden_builtin"]), set(self.actions["hidden_builtin"]))
         self.assertEqual(server._public_settings()["annotation_actions"], saved["annotation_actions"])
         self.assertEqual(json.loads(self.settings.read_text())["annotation_actions"], saved["annotation_actions"])
+
+    def test_legacy_toolbar_settings_default_to_visible_shortcut_hints(self):
+        self.settings.write_text(json.dumps({"annotation_actions": self.actions}))
+        self.assertEqual(server._public_settings()["annotation_actions"],
+                         {**self.actions, "hidden_builtin": ["underline_note", "copy"],
+                          "show_shortcut_hints": True})
+
+    def test_shortcut_hint_toggle_roundtrip_does_not_sync_annotation_styles(self):
+        self.settings.write_text(json.dumps({"annotation_actions": self.actions}))
+        with patch.object(server, "commit_style_sync") as style_sync:
+            for visible in (False, True):
+                with self.subTest(visible=visible):
+                    saved = server._write_settings({"annotation_actions": {
+                        **self.actions, "show_shortcut_hints": visible,
+                    }})
+                    self.assertIs(saved["annotation_actions"]["show_shortcut_hints"], visible)
+                    self.assertEqual(saved["annotation_actions"]["custom"], self.actions["custom"])
+                    self.assertEqual(set(saved["annotation_actions"]["hidden_builtin"]),
+                                     set(self.actions["hidden_builtin"]))
+                    self.assertEqual(server._public_settings()["annotation_actions"], saved["annotation_actions"])
+                    self.assertEqual(json.loads(self.settings.read_text())["annotation_actions"],
+                                     saved["annotation_actions"])
+                    self.assertNotIn("annotation_style_revision", json.loads(self.settings.read_text()))
+            style_sync.assert_not_called()
+
+    def test_shortcut_hint_normalization_in_valid_and_invalid_stored_settings(self):
+        for raw, expected in ((None, True), ("false", False), ("off", False), ("true", True)):
+            for invalid in ({}, {"hidden_builtin": None}, {"custom": {}}):
+                with self.subTest(raw=raw, invalid=invalid):
+                    self.settings.write_text(json.dumps({"annotation_actions": {
+                        **invalid, "show_shortcut_hints": raw,
+                    }}))
+                    self.assertEqual(server._public_settings()["annotation_actions"], {
+                        "hidden_builtin": [], "custom": [], "show_shortcut_hints": expected,
+                    })
 
     def test_invalid_action_cannot_replace_saved_settings(self):
         server._write_settings({"annotation_actions": self.actions})

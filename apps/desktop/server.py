@@ -615,12 +615,13 @@ BUILTIN_ANNOTATION_ACTIONS = ("highlight", "highlight_note", "underline", "under
 
 def _annotation_actions(value: Any, *, strict: bool = False) -> Dict[str, Any]:
     stored = value if isinstance(value, dict) else {}
+    show_shortcut_hints = _setting_bool(stored.get("show_shortcut_hints"), True)
     hidden = stored.get("hidden_builtin", [])
     custom = stored.get("custom", [])
     if not isinstance(hidden, list) or not isinstance(custom, list):
         if strict:
             raise PipelineError("选区工具栏的按钮配置必须是列表。")
-        return {"hidden_builtin": [], "custom": []}
+        return {"hidden_builtin": [], "custom": [], "show_shortcut_hints": show_shortcut_hints}
     if strict and len(custom) > 32:
         raise PipelineError("最多可配置 32 个自定义标记。")
     actions = []
@@ -645,7 +646,8 @@ def _annotation_actions(value: Any, *, strict: bool = False) -> Dict[str, Any]:
         seen.add(action_id)
         actions.append({"id": action_id, "label": label, "kind": kind, "color": color,
                         "enabled": _setting_bool(item.get("enabled"), True)})
-    return {"hidden_builtin": [name for name in BUILTIN_ANNOTATION_ACTIONS if name in hidden], "custom": actions}
+    return {"hidden_builtin": [name for name in BUILTIN_ANNOTATION_ACTIONS if name in hidden],
+            "custom": actions, "show_shortcut_hints": show_shortcut_hints}
 
 
 def _annotation_action_snapshot(value: Dict[str, Any]) -> Dict[str, str]:
@@ -882,6 +884,8 @@ def _public_settings() -> Dict[str, Any]:
         "underline": "Cmd+Shift+U",
         "highlight_note": "Cmd+Shift+J",
         "underline_note": "Cmd+Shift+K",
+        "full_translation": f"{'Cmd' if sys.platform == 'darwin' else 'Ctrl'}+Shift+Enter",
+        "reflow": f"{'Cmd' if sys.platform == 'darwin' else 'Ctrl'}+Option+Enter",
     }
     stored_shortcuts = data.get("shortcuts") if isinstance(data.get("shortcuts"), dict) else {}
     shortcuts = {**shortcut_defaults, **{key: str(value).strip()[:40] for key, value in stored_shortcuts.items() if key in shortcut_defaults and str(value).strip()}}

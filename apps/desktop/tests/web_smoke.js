@@ -853,8 +853,8 @@ let browserSession;
   if (await page.locator('#typography-button').getAttribute('aria-expanded') !== 'false') throw new Error('Clicking reader iframe text did not close the typography popover');
   await page.locator('#typography-button').click();
   await page.locator('#typography-popover:not([hidden]):not(.is-closing)').waitFor();
-  const selectionActions = await page.locator('.selection-actions > button').allTextContents();
-  const expectedSelectionActions = ['高亮', '高亮笔记', '划线', '划线随笔', '复制', '加入 Chat', '加入生词本'];
+  const selectionActions = await page.locator('.selection-actions > button').evaluateAll((buttons) => buttons.map((button) => button.getAttribute('aria-label') || button.textContent.trim()));
+  const expectedSelectionActions = ['高亮', '高亮笔记', '划线', '划线随笔', '复制', '加入 Chat', '数字快捷键提示设置', '加入生词本'];
   if (JSON.stringify(selectionActions) !== JSON.stringify(expectedSelectionActions)) throw new Error(`Selection menu actions or order were incorrect (${JSON.stringify(selectionActions)})`);
   const readerHeading = await page.locator('.reader-heading').innerText();
   if (/\.pdf\b/i.test(readerHeading)) throw new Error('Reader assistant header leaked the document filename');
@@ -980,9 +980,9 @@ let browserSession;
   metrics.selectionTypography.at120 = await readSelectionTypography();
   await page.locator('#font-size-range').evaluate((node) => { node.value = '115'; node.dispatchEvent(new Event('input', { bubbles: true })); });
   for (const measurement of Object.values(metrics.selectionTypography)) {
-    const expectedToolbarSize = measurement.supportToken * .88;
-    const expectedResultSize = measurement.contentToken * .82;
-    if (measurement.fontSize < 11 || Math.abs(measurement.fontSize - expectedToolbarSize) > 0.2 || Math.abs(measurement.buttonFontSize - expectedToolbarSize) > 0.2 || Math.abs(measurement.resultFontSize - expectedResultSize) > 0.2 || Math.abs(measurement.resultLineHeight - expectedResultSize * 1.48) > 0.3) throw new Error(`Selection toolbar or translation did not keep its compact reader-relative typography (${JSON.stringify(metrics.selectionTypography)})`);
+    const expectedToolbarSize = measurement.supportToken * .9;
+    const expectedResultSize = measurement.contentToken * .88;
+    if (measurement.fontSize < 11 || Math.abs(measurement.fontSize - expectedToolbarSize) > 0.2 || Math.abs(measurement.buttonFontSize - expectedToolbarSize) > 0.2 || Math.abs(measurement.resultFontSize - expectedResultSize) > 0.2 || Math.abs(measurement.resultLineHeight - expectedResultSize * 1.65) > 0.3) throw new Error(`Selection toolbar or translation did not keep its compact reader-relative typography (${JSON.stringify(metrics.selectionTypography)})`);
     const { placement } = measurement;
     if (placement.left < placement.wrapLeft - 1 || placement.right > placement.wrapRight + 1 || placement.top < placement.wrapTop - 1 || placement.bottom > placement.wrapBottom + 1) throw new Error(`Scaled selection toolbar escaped the reading area (${JSON.stringify(metrics.selectionTypography)})`);
   }

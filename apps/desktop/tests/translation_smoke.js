@@ -168,13 +168,13 @@ let browserSession;
   });
   if (!sentenceHoverState.ready) throw new Error(`Sentence hover fixture unavailable (${sentenceHoverState.reason})`);
   await frame.locator('body').evaluate(async () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  await frame.locator('.reader-sentence-tooltip').waitFor();
+  await page.locator('#selection-popover:not([hidden])').waitFor();
   const hoverState = await frame.locator('body').evaluate(() => ({
     custom: Boolean(document.defaultView.CSS?.highlights?.has('my-scholar-sentence-hover')),
     customRanges: document.defaultView.CSS?.highlights?.get('my-scholar-sentence-hover')?.size || 0,
     translatedRanges: [...(CSS.highlights?.get('my-scholar-sentence-hover') || [])].filter((range) => (range.commonAncestorContainer.parentElement || range.commonAncestorContainer).closest('.my-scholar-translation')).length,
     fallback: document.querySelectorAll('.reader-sentence-hover-fallback').length,
-    tooltip: document.querySelector('.reader-sentence-tooltip')?.textContent,
+    tooltip: parent.document.querySelector('#selection-popover:not([hidden])')?.textContent,
   }));
   if (!hoverState.custom || hoverState.customRanges !== 1 || hoverState.translatedRanges || hoverState.fallback || !hoverState.tooltip) throw new Error(`Sentence hover did not show a source-only background with its tooltip (${JSON.stringify(hoverState)})`);
 
@@ -193,7 +193,7 @@ let browserSession;
   });
   if (!reverseHoverState.ready) throw new Error(`Reverse sentence hover fixture unavailable (${reverseHoverState.reason})`);
   await frame.locator('body').evaluate(async () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  await frame.locator('.reader-sentence-tooltip').waitFor({ state: 'detached' });
+  await page.locator('#selection-popover:not([hidden])').waitFor({ state: 'detached' });
   const reverseHoverResult = await frame.locator('body').evaluate(() => ({
     custom: Boolean(document.defaultView.CSS?.highlights?.has('my-scholar-sentence-hover')),
     customRanges: document.defaultView.CSS?.highlights?.get('my-scholar-sentence-hover')?.size || 0,

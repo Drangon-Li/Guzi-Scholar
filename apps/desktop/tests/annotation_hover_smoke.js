@@ -6,7 +6,7 @@ if (!baseURL) throw new Error('Run through run_ui_tests.js --only=annotation-hov
 const ids = ['cccccccccccccccc', 'bbbbbbbbbbbbbbbb'];
 const texts = {
   first: 'The first annotated sentence explains the research method and its evaluation protocol. The remaining unmarked sentence discusses limitations.',
-  second: 'The second annotated sentence describes an independent result with a different personal note.',
+  second: 'The second annotated sentence describes an independent result with a different personal note, including the separate evaluation dataset, the measurements collected across repeated trials, the practical interpretation of the observed differences, and the limitations that should guide any comparison with the research method discussed in the preceding paragraph.',
   empty: 'This highlighted sentence has no personal note and should still offer a translation.',
   nested: 'This outer annotation includes an overlapping inner highlight and a personal note.',
   delayed: 'This sentence waits for a delayed translation response while the pointer moves to a note.',
@@ -79,8 +79,12 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     }
     async function textPoint(locator, needle = '') {
       await locator.scrollIntoViewIfNeeded();
-      const position = await locator.evaluate((node, needle) => {
+      const result = await locator.evaluate((node, needle) => {
         const doc = node.ownerDocument;
+        const iframe = doc.defaultView.frameElement;
+        const iframeRect = iframe.getBoundingClientRect();
+        const describe = (element) => element ? { tag: element.tagName, id: element.id, className: element.getAttribute('class'), rect: element.getBoundingClientRect().toJSON() } : null;
+        const blockers = new Map();
         const walker = doc.createTreeWalker(node, NodeFilter.SHOW_TEXT);
         let text;
         while ((text = walker.nextNode())) {
@@ -93,14 +97,21 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
             if (!rect) continue;
             const x = rect.left + rect.width / 2; const y = rect.top + rect.height / 2;
             const hit = doc.elementFromPoint(x, y);
-            if (node.contains(hit)) return { x, y };
+            const hostX = iframeRect.left + iframe.clientLeft + x;
+            const hostY = iframeRect.top + iframe.clientTop + y;
+            const hostHit = iframe.ownerDocument.elementFromPoint(hostX, hostY);
+            // A host toolbar can cover text without affecting the iframe's hit test.
+            if (node.contains(hit) && hostHit === iframe) return { point: { x: hostX, y: hostY } };
+            if (!blockers.has(hostHit)) blockers.set(hostHit, { host: describe(hostHit), frame: describe(hit), count: 0, first: { x: hostX, y: hostY } });
+            const blocker = blockers.get(hostHit);
+            blocker.count += 1;
+            blocker.last = { x: hostX, y: hostY };
           }
         }
-        return null;
+        return { point: null, diagnostics: { target: describe(node), iframe: describe(iframe), popover: describe(iframe.ownerDocument.querySelector('#selection-popover:not([hidden])')), blockers: [...blockers.values()] } };
       }, needle);
-      assert(position, 'Fixture text must be visible');
-      const iframe = await page.locator('#html-preview').boundingBox();
-      return { x: iframe.x + position.x, y: iframe.y + position.y };
+      assert(result.point, `Fixture text must be visible: ${JSON.stringify(result.diagnostics)}`);
+      return result.point;
     }
     async function hover(locator, needle = '') {
       const point = await textPoint(locator, needle);
@@ -121,7 +132,7 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     let frame = await open(ids[0]);
     const mark = (id) => frame.locator(`mark[data-annotation-id="${id}"]`).first();
     const popup = () => frame.locator('.annotation-note-popover:not(.is-closing)');
-    const tooltip = () => frame.locator('.reader-sentence-tooltip');
+    const tooltip = () => page.locator('#selection-popover:not([hidden])');
     const sentences = () => requests.filter((body) => !body.block_id);
     await mark('first-note').waitFor();
     await page.bringToFront();
@@ -139,7 +150,8 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     await hover(mark('first-note'));
     await tooltip().filter({ hasText: '第一条：研究方法笔记' }).filter({ hasText: '这是模拟句译结果' }).waitFor();
     assert.equal(sentences().length, 1, 'A noted range also requests its sentence translation');
-    assert.equal(await tooltip().locator('button').count(), 0, 'The hover card only contains notes and translation');
+    assert(await tooltip().locator('button').count() > 0, 'Sentence hover exposes the complete selection toolbar');
+    assert.equal(await frame.locator('body').evaluate((node) => node.ownerDocument.getSelection().toString()), '', 'Hover actions do not require native text selection');
     assert.equal(await popup().count(), 0);
     await hover(mark('second-note'));
     await tooltip().filter({ hasText: '第二条：独立结果笔记' }).filter({ hasText: '这是模拟句译结果' }).waitFor();
@@ -154,12 +166,13 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     const beforeDisabled = sentences().length;
     await hover(mark('first-note'));
     await tooltip().filter({ hasText: '第一条：研究方法笔记' }).waitFor();
-    assert.equal(await tooltip().locator('.reader-sentence-tooltip-translation').isVisible(), false);
+    assert.equal(await tooltip().locator('#selection-translation-result').isVisible(), false);
     assert.equal(sentences().length, beforeDisabled, 'Disabling sentence translation still previews notes without a request');
     await idle();
     await hover(mark('empty-note'));
     await page.waitForTimeout(600);
-    assert.equal(await tooltip().count(), 0);
+    assert.equal(await tooltip().count(), 1, 'The toolbar remains available when automatic translation is disabled');
+    assert.equal(await tooltip().locator('.selection-hover-note').isVisible(), false);
     assert.equal(await popup().count(), 0, 'Whitespace-only notes must not capture text hover');
     await toggleHover();
     await hover(mark('empty-note'));
@@ -171,7 +184,7 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     await hover(frame.locator('[data-block-id="first"]'), 'The remaining');
     await tooltip().filter({ hasText: '这是模拟句译结果' }).waitFor();
     assert.equal(await popup().count(), 0, 'A note must not capture unmarked text in the same paragraph');
-    assert.equal(await tooltip().locator('.reader-sentence-tooltip-note').isVisible(), false);
+    assert.equal(await tooltip().locator('.selection-hover-note').isVisible(), false);
     await idle();
     await hover(frame.locator('[data-block-id="delayed"]'));
     await tooltip().filter({ hasText: '正在翻译当前句' }).waitFor();
@@ -240,14 +253,14 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     await tooltip().filter({ hasText: '第一条：研究方法笔记' }).filter({ hasText: '这是模拟句译结果' }).waitFor().catch(async (error) => {
       console.error(JSON.stringify(await mark('first-note').evaluate((node) => {
         const doc = node.ownerDocument;
-        return { card: doc.querySelector('.reader-sentence-tooltip')?.outerHTML, popover: doc.querySelector('.annotation-note-popover')?.outerHTML, selection: doc.getSelection()?.toString(), mark: node.getBoundingClientRect().toJSON(), highlight: [...(doc.defaultView.CSS.highlights.get('my-scholar-sentence-hover') || [])].map((range) => range.toString()), scroll: doc.defaultView.scrollY };
+        return { card: doc.defaultView.parent.document.querySelector('#selection-popover:not([hidden])')?.outerHTML, popover: doc.querySelector('.annotation-note-popover')?.outerHTML, selection: doc.getSelection()?.toString(), mark: node.getBoundingClientRect().toJSON(), highlight: [...(doc.defaultView.CSS.highlights.get('my-scholar-sentence-hover') || [])].map((range) => range.toString()), scroll: doc.defaultView.scrollY };
       })));
       await page.screenshot({ path: '/tmp/guzi-annotation-hover-full-run-failure.png' });
       throw error;
     });
     await mark('first-note').evaluate((node) => {
       const doc = node.ownerDocument;
-      doc.defaultView.hoverReferences = { mark: node, card: doc.querySelector('.reader-sentence-tooltip'), range: [...doc.defaultView.CSS.highlights.get('my-scholar-sentence-hover')][0] };
+      doc.defaultView.hoverReferences = { mark: node, card: doc.defaultView.parent.document.querySelector('#selection-popover:not([hidden])'), range: [...doc.defaultView.CSS.highlights.get('my-scholar-sentence-hover')][0] };
       doc.defaultView.hoverLayoutScrolls = 0;
       doc.defaultView.hoverLayoutObserver = new MutationObserver((records) => {
         if (!records.some((record) => [...record.addedNodes].some((item) => item.nodeType === 1 && item.matches('.my-scholar-translation:not(.is-pending):not(.is-error)')))) return;
@@ -262,7 +275,7 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     await frame.locator(`.my-scholar-translation[data-for="${translatedBlock}"]:not(.is-pending):not(.is-error)`).waitFor();
     assert.deepEqual(await mark('first-note').evaluate((node) => {
       const doc = node.ownerDocument; const saved = doc.defaultView.hoverReferences;
-      return { mark: saved.mark === node, card: saved.card === doc.querySelector('.reader-sentence-tooltip'), range: saved.range === [...doc.defaultView.CSS.highlights.get('my-scholar-sentence-hover')][0] };
+      return { mark: saved.mark === node, card: saved.card === doc.defaultView.parent.document.querySelector('#selection-popover:not([hidden])'), range: saved.range === [...doc.defaultView.CSS.highlights.get('my-scholar-sentence-hover')][0] };
     }), { mark: true, card: true, range: true }, 'An arriving full-document paragraph preserves the card, source annotation and sentence range');
     assert(await frame.locator('body').evaluate((node) => node.ownerDocument.defaultView.hoverLayoutScrolls > 0), 'Translation layout emitted the simulated scroll event');
     await frame.locator('body').evaluate(async (node) => {

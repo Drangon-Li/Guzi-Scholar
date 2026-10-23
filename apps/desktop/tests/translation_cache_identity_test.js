@@ -119,7 +119,7 @@ vm.runInContext([
 
   const timers = [];
   const tooltips = [];
-  const hoverDoc = { querySelector: () => null, createElement: () => ({ append(source) { this.source = source; }, querySelectorAll: () => [] }) };
+  const hoverDoc = { querySelector: () => null, getSelection: () => ({ toString: () => '' }), createElement: () => ({ append(source) { this.source = source; }, querySelectorAll: () => [] }) };
   Object.assign(context, {
     readerSentenceState: { doc: hoverDoc, pendingTranslations: new Map() },
     window: { clearTimeout: () => {}, setTimeout: (callback) => { timers.push(callback); return timers.length; } },
