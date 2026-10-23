@@ -73,7 +73,7 @@ assert.strictEqual(manifest.build?.productName, '谷子学术');
 assert.strictEqual(manifest.build?.directories?.output, 'dist/mac.noindex');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleDisplayName, '谷子学术');
 assert.strictEqual(manifest.build?.mac?.extendInfo?.CFBundleName, '谷子学术');
-assert.strictEqual(manifest.version, '0.5.1');
+assert.strictEqual(manifest.version, '0.6.0');
 assert.strictEqual(manifest.build?.afterPack, 'scripts/after-pack.cjs');
 assert.match(manifest.scripts?.['pack:mac'] || '', /prepare:mac/u);
 assert.match(manifest.scripts?.['dist:mac'] || '', /prepare:mac/u);
@@ -87,6 +87,9 @@ assert.strictEqual(resources.get('toolchain/opendataloader-pdf-cli-0.0.0.jar'), 
 assert.strictEqual(resources.get('toolchain/pdf-renderer'), 'build/mac-runtime/pdf-renderer');
 assert.deepStrictEqual([...resources.keys()].sort(), expectedResourceDestinations, 'the default package extraResources allowlist changed');
 assert.ok(manifest.build?.files?.includes('*.py'), 'the small Python component catalog must be packaged with the service');
+for (const relative of ['mcp/bridge.cjs', 'mcp/bridge.cjs.LEGAL.txt', 'plugin_templates/**/*']) {
+  assert.ok(manifest.build.files.includes(relative), `plugin runtime must be included in the package: ${relative}`);
+}
 for (const [destination, source] of resources) {
   assert.doesNotMatch(`${destination}\n${source}`, /mineru|safetensors|model(?:s)?[\\/]/iu, 'MinerU runtimes and models must not enter the default package');
 }
@@ -219,6 +222,18 @@ if (packagedApp) {
   for (const relative of ['app/component_manager.py', 'app/mineru_discovery.py', 'app/parsing_providers.py']) {
     assert.ok(fs.statSync(path.join(resourcesRoot, relative)).isFile(), `${relative} is missing from the packaged app`);
   }
+  for (const relative of [
+    'mcp/bridge.cjs', 'mcp/bridge.cjs.LEGAL.txt',
+    'mcp_access.py', 'plugin_store.py', 'scholar_service.py', 'search_service.py',
+    ...['index.html', 'main.js', 'styles.css'].map((file) => `plugin_templates/starter/${file}`),
+    ...['manifest.json', 'index.html', 'main.js', 'plugin-sdk.js', 'vocabulary.js', 'styles.css'].map((file) => `web/plugins/vocabulary/${file}`),
+  ]) {
+    assert.ok(fs.statSync(path.join(resourcesRoot, 'app', relative)).isFile(), `${relative} is missing from the packaged plugin runtime`);
+  }
+  runChecked(process.execPath, [
+    path.join(__dirname, 'mcp_bridge_test.js'), appExecutable,
+    path.join(resourcesRoot, 'app', 'mcp', 'bridge.cjs'),
+  ]);
   const forbidden = walkFiles(resourcesRoot).filter((relative) =>
     /(^|\/)(?:mineru(?:\/|$)|models?(?:\/|$))|\.(?:safetensors|onnx|ckpt|pth)$/iu.test(relative),
   );

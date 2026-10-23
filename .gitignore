@@ -26,6 +26,8 @@ deploy/tencent/ai.tokens.json
 platforms/windows/dist/
 apps/desktop/build/
 apps/desktop/dist/
+apps/desktop/mcp/bridge.cjs
+apps/desktop/mcp/bridge.cjs.LEGAL.txt
 *.dmg
 *.pkg
 macos/resources/dmg-background.tiff

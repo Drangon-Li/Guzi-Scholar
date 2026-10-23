@@ -70,6 +70,7 @@ let browserSession;
     let body = {};
     if (pathname === '/api/health') body = { ok: true, service: 'my-scholar', version: '0.1', shell: 'reference', ai: { services: { translation: { enabled: true, configured: true }, chat: { enabled: true, configured: true } } } };
     else if (pathname === '/api/jobs') body = { jobs: [] };
+    else if (pathname === '/api/plugins' && route.request().method() === 'GET') body = { plugins: [], drafts: [], previews: [] };
     else if (pathname === '/api/library') body = { library: { folders: [], views: [], properties: [], items: {}, display: { columns: [], group_by: 'reading_status' } } };
     else if (pathname === '/api/settings') body = { ai: { translation: { base_url: '', model: '', api_key_configured: false }, chat: { base_url: '', model: '', api_key_configured: false } }, metadata: { auto_retrieve: true, online_lookup: true, contact_email: '' }, shortcuts: {}, appearance: { app_font: 'system', reader_font: 'academic', accent: 'amber' }, ai_services: {}, ai_status_history: [], highlight_color: '#f59e0b' };
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });

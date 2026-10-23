@@ -1,0 +1,29 @@
+{
+  "id": "guzi.vocabulary",
+  "name": "生词本",
+  "description": "收藏论文原文中的单词与短语，保留原句、释义和来源并进行复习。",
+  "version": "1.0.0",
+  "sdkVersion": "1",
+  "entry": "index.html",
+  "permissions": [
+    "vocabulary.read",
+    "vocabulary.write",
+    "ai.translate",
+    "reader.open",
+    "storage"
+  ],
+  "contributes": {
+    "pages": [
+      {
+        "id": "vocabulary",
+        "title": "生词本"
+      }
+    ],
+    "selectionActions": [
+      {
+        "id": "keep",
+        "title": "加入生词本"
+      }
+    ]
+  }
+}

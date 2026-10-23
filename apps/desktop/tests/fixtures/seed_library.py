@@ -220,7 +220,8 @@ RICH_SECTIONS = [
         "Each tokenizer is a single convolutional layer that turns a raw signal into a sequence of tokens with the width the encoder expects.",
         "The universal encoder is a frozen vision-language model whose weights are shared across every modality, which keeps the parameter count flat as modalities are added.",
         "The universal projection module is a mixture of projection experts, and a router selects the combination used for each incoming token sequence.",
-        "Because the router is learned rather than hand-assigned, a new modality can reuse experts that already handle a similar signal instead of training its own from scratch.",
+        # The default rich paper also needs an inline formula for translation round-trips.
+        f"Because the router is learned rather than hand-assigned, a new modality can reuse experts that already handle a similar signal instead of training its own from scratch. Its projection is written as {INLINE_MATH}.",
         # feature_smoke quotes this sentence verbatim as an innovation highlight.
         "To the best of our knowledge, OneLLM is the first MLLM that integrates eight distinct modalities within a single model.",
         # feature_smoke quotes the opening of this sentence as a conclusion highlight.

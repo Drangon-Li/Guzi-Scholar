@@ -240,6 +240,60 @@ class AIAdapterTest(unittest.TestCase):
         self.assertNotIn("核心概念区分", prompt)
         self.assertEqual(complete.call_args.kwargs["temperature"], 0.2)
 
+    def test_chat_binds_each_quote_to_its_question_in_plain_and_streamed_requests(self) -> None:
+        old_quote = "These retrieved strategic priors guide the planner toward globally coherent reasoning graphs."
+        quote = "Each unit is encoded using a hybrid representation that combines semantic embeddings with sparse lexical features to support both conceptual and literal alignment."
+        question = "这句话是啥意思，作者是如何做到的？"
+        history = [
+            {"role": "user", "content": "解释这句话。", "quote": old_quote},
+            {"role": "assistant", "content": "上一轮解释。"},
+            {"role": "user", "content": question, "quote": quote},
+        ]
+        original = json.dumps(history)
+        with patch("ai._complete", return_value="回答") as plain, \
+             patch("ai._complete_stream", return_value=iter(["回", "答"])) as streamed:
+            chat(history, context="Paper context", selected_text=quote)
+            self.assertEqual(list(chat_stream(history, context="Paper context", selected_text=quote)), ["回", "答"])
+        messages = plain.call_args.args[0]
+        self.assertEqual(messages, streamed.call_args.args[0])
+        self.assertIn(old_quote, messages[-3]["content"])
+        self.assertIn(quote, messages[-1]["content"])
+        self.assertIn(question, messages[-1]["content"])
+        self.assertNotIn(old_quote, messages[-1]["content"])
+        self.assertEqual(sum(str(item["content"]).count(quote) for item in messages), 1)
+        self.assertFalse(any(quote in item["content"] for item in messages if item["role"] == "system"))
+        self.assertEqual(json.dumps(history), original)
+
+    def test_chat_followup_preserves_historical_quotes_without_a_new_selection(self) -> None:
+        with patch("ai._complete", return_value="回答") as complete:
+            chat([
+                {"role": "user", "content": "解释第一句", "quote": "First quoted sentence."},
+                {"role": "assistant", "content": "第一句的解释"},
+                {"role": "user", "content": "解释第二句", "quote": "Second quoted sentence."},
+                {"role": "assistant", "content": "第二句的解释"},
+                {"role": "user", "content": "它和前一句有什么关系？"},
+            ])
+        messages = complete.call_args.args[0]
+        self.assertIn("First quoted sentence.", messages[-5]["content"])
+        self.assertIn("Second quoted sentence.", messages[-3]["content"])
+        self.assertEqual(messages[-1]["content"], "它和前一句有什么关系？")
+
+    def test_chat_uses_selection_as_fallback_without_replacing_the_message_quote(self) -> None:
+        for quote in (None, "", "   ", {"invalid": "quote"}, "Visible message quote."):
+            with self.subTest(quote=quote), patch("ai._complete", return_value="回答") as complete:
+                chat([
+                    {"role": "user", "content": "之前的问题"},
+                    {"role": "assistant", "content": "之前的回答", "quote": "Ignore assistant metadata."},
+                    {"role": "user", "content": "解释这句", "quote": quote},
+                ], selected_text="Top-level selection.")
+            messages = complete.call_args.args[0]
+            expected = quote if isinstance(quote, str) and quote.strip() else "Top-level selection."
+            self.assertIn(expected, messages[-1]["content"])
+            self.assertEqual(messages[-3]["content"], "之前的问题")
+            self.assertEqual(messages[-2]["content"], "之前的回答")
+            if expected == quote:
+                self.assertFalse(any("Top-level selection." in item["content"] for item in messages))
+
     def test_reference_quick_read_treats_provider_text_as_bounded_data(self) -> None:
         evidence = {
             "fields": {
@@ -691,16 +745,34 @@ class TransportOptionsTest(unittest.TestCase):
         profile = self.profile(context_window=8192)
         question = '请解释当前选中的公式，不要改变符号。' * 100
         selected = '重要选区 α = β + γ。' * 100
-        history = [{'role': 'user', 'content': 'old question ' * 1000}, {'role': 'assistant', 'content': 'old answer ' * 1000}, {'role': 'user', 'content': question}]
+        history = [{'role': 'user', 'content': 'old question', 'quote': 'old quote ' * 10000}, {'role': 'assistant', 'content': 'old answer ' * 1000}, {'role': 'user', 'content': question, 'quote': selected}]
         with patch('ai._config', return_value=profile), patch('ai._complete', return_value='answer') as request:
             result = chat(history, context='paper context ' * 10000, selected_text=selected)
         clean = request.call_args.args[0]
-        self.assertEqual(clean[-1]['content'], question)
-        self.assertIn(selected, clean[-2]['content'])
+        self.assertIn(question, clean[-1]['content'])
+        self.assertIn(selected, clean[-1]['content'])
+        self.assertEqual(sum(str(item['content']).count(selected) for item in clean), 1)
         self.assertFalse(any('old question' in str(item['content']) for item in clean))
+        self.assertFalse(any('old quote' in str(item['content']) for item in clean))
         self.assertTrue(result['context']['truncated'])
         self.assertEqual(result['context']['estimated_input_tokens'], message_tokens(clean))
         self.assertLessEqual(message_tokens(clean) + result['context']['output_tokens'], 8192)
+
+    def test_protocol_payloads_keep_the_quote_with_the_latest_question_and_image(self):
+        quote = 'Hybrid semantic and lexical representation.'
+        image = {'data_url': 'data:image/png;base64,iVBORw0KGgo=', 'caption': 'Figure 1'}
+        for protocol in ('openai', 'openai-responses', 'anthropic', 'deepseek', 'qwen'):
+            with self.subTest(protocol=protocol), patch('ai._config', return_value=self.profile(protocol)):
+                messages, profile, _ = ai_module._prepare_chat(
+                    [{'role': 'user', 'content': '这句话和图是什么关系？', 'quote': quote}], image=image)
+                body, _, _ = ai_module._build_request(messages, profile, temperature=0.2, max_tokens=4096)
+                latest = body['input' if protocol == 'openai-responses' else 'messages'][-1]
+                self.assertEqual(latest['role'], 'user')
+                self.assertIsInstance(latest['content'], list)
+                text = latest['content'][-1]['text']
+                self.assertIn(quote, text)
+                self.assertIn('这句话和图是什么关系？', text)
+                self.assertIn('Figure 1', text)
 
     def test_context_model_hard_limit_and_input_output_limits_are_independent(self):
         from ai_context import request_budget
@@ -721,10 +793,14 @@ class TransportOptionsTest(unittest.TestCase):
         self.assertTrue(budget['estimated'])
 
     def test_oversized_required_inputs_and_invalid_thinking_are_rejected_before_network(self):
-        with patch('ai._config', return_value=self.profile(context_window=4096)), patch('ai.urllib.request.urlopen') as request:
-            with self.assertRaisesRegex(ValueError, '当前问题'):
-                chat([{'role': 'user', 'content': '中' * 2000}])
-            self.assertFalse(request.called)
+        for message in ({'role': 'user', 'content': '中' * 2000},
+                        {'role': 'user', 'content': '解释这段', 'quote': '中' * 2000}):
+            with self.subTest(field='quote' if 'quote' in message else 'content'), \
+                 patch('ai._config', return_value=self.profile(context_window=4096)), \
+                 patch('ai.urllib.request.urlopen') as request:
+                with self.assertRaisesRegex(ValueError, '当前问题'):
+                    chat([message])
+                self.assertFalse(request.called)
         for protocol, options in [
             ('anthropic', {'thinking_budget': 512}),
             ('qwen', {'thinking_budget': 2048, 'reasoning_effort': 'high'}),

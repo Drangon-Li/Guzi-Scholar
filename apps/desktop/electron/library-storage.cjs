@@ -183,12 +183,12 @@ async function inspectLibraryDirectory(directory) {
     return { path: root, exists: true, valid: false, empty: false, itemCount: 0, jobCount, updatedAt: '', error: 'library.json 结构不受支持，未自动切换。' };
   }
   const itemCount = Array.isArray(items) ? items.length : Object.keys(items).length;
-  const hasVocabulary = (await fs.promises.readdir(root)).some((name) => name === 'vocabulary.json' || name === 'vocabulary.json.bak');
+  const hasPersonalData = (await fs.promises.readdir(root)).some((name) => name === 'vocabulary.json' || name === 'vocabulary.json.bak' || name === 'plugin-data');
   return {
     path: root,
     exists: true,
     valid: true,
-    empty: itemCount === 0 && jobCount === 0 && !hasVocabulary,
+    empty: itemCount === 0 && jobCount === 0 && !hasPersonalData,
     itemCount,
     jobCount,
     updatedAt: typeof payload.updated_at === 'string' ? payload.updated_at : '',
@@ -263,11 +263,15 @@ async function walkLibrary(source) {
     const absoluteDirectory = path.join(source, relativeDirectory);
     let entries;
     try {
+      const info = await fs.promises.lstat(absoluteDirectory);
+      if (info.isSymbolicLink()) throw new Error(`文献库包含不受支持的符号链接：${relativeDirectory}`);
+      if (!info.isDirectory()) throw new Error(`文献库目录无效：${relativeDirectory}`);
       entries = await fs.promises.readdir(absoluteDirectory, { withFileTypes: true });
     } catch (error) {
       if (error?.code === 'ENOENT') return;
       throw error;
     }
+    directories.add(relativeDirectory);
     for (const entry of entries) {
       const relative = path.join(relativeDirectory, entry.name);
       if (excludedRelativePath(relative, entry.isDirectory())) continue;
@@ -294,6 +298,7 @@ async function walkLibrary(source) {
     }
   }
   await walk('jobs');
+  await walk('plugin-data');
   files.sort((left, right) => left.relative.localeCompare(right.relative));
   return {
     directories: [...directories].sort((left, right) => left.localeCompare(right)),

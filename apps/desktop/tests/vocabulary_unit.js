@@ -4,8 +4,11 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 const context = { window: {} };
-vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../web/vocabulary.js'), 'utf8'), context);
-const { validTerm, sentenceContext, matches, normalizeDetails, hasDetails } = context.window.MyScholarVocabulary;
+vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../web/plugins/vocabulary/vocabulary.js'), 'utf8'), context);
+const { validTerm, matches, normalizeDetails, hasDetails } = context.window.MyScholarVocabulary;
+const { sentenceContext, validSelectionTerm } = require('../web/core.js');
+assert(validSelectionTerm('variational inference'));
+assert(!validSelectionTerm('two\nlines'));
 assert(validTerm('variational inference'));
 assert(validTerm('字'.repeat(120)));
 assert(!validTerm('字'.repeat(121)));
@@ -83,7 +86,7 @@ function harness(initialEntries) {
     return response;
   };
   const fixtureContext = { window: { confirm: () => true }, document: { querySelector: () => root } };
-  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../web/vocabulary.js'), 'utf8'), fixtureContext);
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../web/plugins/vocabulary/vocabulary.js'), 'utf8'), fixtureContext);
   const controller = fixtureContext.window.MyScholarVocabulary.create({ api, jsonOptions: (body, method = 'POST') => ({ method, body: JSON.stringify(body) }), escapeHTML: (value) => String(value), translate: () => { throw new Error('Unexpected additional translation'); }, openSource: async () => {}, toast: () => {}, confirm: async () => confirmed });
   return {
     controller, calls, stored, elements,

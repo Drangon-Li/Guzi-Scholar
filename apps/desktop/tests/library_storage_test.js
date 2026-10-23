@@ -200,6 +200,7 @@ async function testCopyScopeAndVerification() {
     await write(path.join(source, 'library.json.bak'), '{"items":{"old":true}}');
     await write(path.join(source, 'vocabulary.json'), '{"version":1,"entries":[{"term":"method"}]}');
     await write(path.join(source, 'vocabulary.json.bak'), '{"version":1,"entries":[]}');
+    await write(path.join(source, 'plugin-data', 'example.reading', 'storage.json'), '{"queue":["paper-a"]}');
     await write(path.join(source, 'jobs', 'abc123abc123', 'source.pdf'), Buffer.from('%PDF-test'));
     await write(path.join(source, 'jobs', 'abc123abc123', 'content', 'notes.md'), 'note');
     await write(path.join(source, 'jobs', '.duplicates', 'merge-manifest.json'), '{"groups":[]}');
@@ -209,9 +210,10 @@ async function testCopyScopeAndVerification() {
     const result = await copyLibraryToEmptyTarget({ sourceDir: source, targetDir: target, onProgress: ({ phase }) => phases.push(phase) });
     assert.strictEqual(result.sourcePath, await fs.promises.realpath(source));
     assert.strictEqual(result.targetPath, await fs.promises.realpath(target));
-    assert.strictEqual(result.files, 7);
+    assert.strictEqual(result.files, 8);
     assert.strictEqual(await fs.promises.readFile(path.join(target, 'vocabulary.json'), 'utf8'), '{"version":1,"entries":[{"term":"method"}]}');
     assert.strictEqual(await fs.promises.readFile(path.join(target, 'vocabulary.json.bak'), 'utf8'), '{"version":1,"entries":[]}');
+    assert.strictEqual(await fs.promises.readFile(path.join(target, 'plugin-data', 'example.reading', 'storage.json'), 'utf8'), '{"queue":["paper-a"]}');
     assert.ok(result.bytes > 0);
     assert.deepStrictEqual([...new Set(phases)], ['scan', 'copy', 'verify']);
     assert.strictEqual(await fs.promises.readFile(path.join(target, 'jobs', 'abc123abc123', 'content', 'notes.md'), 'utf8'), 'note');

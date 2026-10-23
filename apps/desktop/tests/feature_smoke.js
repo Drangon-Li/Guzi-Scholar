@@ -419,6 +419,7 @@ let browserSession;
   await page.locator('#selected-context:not([hidden])').waitFor();
   const selectedContext = await page.locator('#selected-context').textContent();
   if (!selectedContext.includes('已加入 Chat · 文本') || !selectedContext.includes('Large Language Models')) throw new Error('Selected text was not pinned as the right Chat context');
+  const firstChatQuote = (await page.locator('#selected-context .selected-context-quote').textContent()).replace(/\s+/g, ' ').trim();
   if ((await page.locator('#chat-input').inputValue()).trim()) throw new Error('加入 Chat should not overwrite the user question draft');
   const chatInput = page.locator('#chat-input');
   await chatInput.fill('第一行');
@@ -429,6 +430,9 @@ let browserSession;
   await page.locator('.chat-bubble.assistant').filter({ hasText: '键盘交互回归回复。' }).waitFor();
   if (chatRequestContents.length !== 1 || chatRequestContents[0] !== '第一行\n第二行') throw new Error(`Enter did not send the multiline Chat draft exactly once (${JSON.stringify(chatRequestContents)})`);
   if (!String(chatRequestPayloads[0]?.selected_text || '').includes('Large Language Models')) throw new Error('The pinned text context was not sent with the Chat question');
+  const firstUserMessage = chatRequestPayloads[0]?.messages?.at(-1);
+  const firstUserQuote = await page.locator('.chat-bubble.user').first().locator('.chat-quote').textContent();
+  if (firstUserMessage?.role !== 'user' || firstUserMessage.quote !== firstChatQuote || chatRequestPayloads[0].selected_text !== firstChatQuote || firstUserQuote !== firstChatQuote) throw new Error('The first Chat question did not send and display the same pinned quote');
   if (await chatInput.inputValue()) throw new Error('Chat input was not cleared after Enter sent the question');
   const assistantBubble = page.locator('.chat-bubble.assistant').last();
   const assistantSelection = await assistantBubble.evaluate((bubble) => {
@@ -513,6 +517,49 @@ let browserSession;
   await pageShortReference.click();
   await frame.locator('[data-block-id="block-1-6-paragraph"].block-selected').waitFor();
   await frame.locator('[data-block-id="block-1-6-paragraph"].block-selected').waitFor({ state: 'hidden', timeout: 3000 });
+
+  const secondChatQuote = 'Each unit is encoded using a hybrid representation that combines semantic embeddings with sparse lexical features to support both conceptual and literal alignment.';
+  await frame.locator('.pdf-page').first().evaluate((root, quote) => {
+    const paragraph = root.ownerDocument.createElement('p');
+    paragraph.dataset.blockId = 'chat-multiturn-quote-fixture';
+    paragraph.dataset.page = '1';
+    paragraph.textContent = quote;
+    root.append(paragraph);
+  }, secondChatQuote);
+  const secondChatQuoteSelector = '[data-block-id="chat-multiturn-quote-fixture"]';
+  await selectText(secondChatQuoteSelector, secondChatQuote.length);
+  await page.locator('#selection-add-chat').click();
+  if (await page.locator('#selected-context .selected-context-quote').textContent() !== secondChatQuote) throw new Error('The second Chat question did not pin the newly selected quote');
+  const secondChatQuestion = '这句话是啥意思，作者是如何做到的？';
+  await chatInput.fill(secondChatQuestion);
+  await chatInput.press('Enter');
+  await page.locator('.chat-bubble.assistant').nth(1).locator('.chat-copy').waitFor();
+  const secondChatPayload = chatRequestPayloads[1];
+  const secondUserMessage = secondChatPayload?.messages?.at(-1);
+  const secondUserQuote = await page.locator('.chat-bubble.user').nth(1).locator('.chat-quote').textContent();
+  if (chatRequestContents.length !== 2 || secondChatPayload?.messages?.length !== 3 || secondUserMessage?.role !== 'user' || secondUserMessage.content !== secondChatQuestion || secondUserMessage.quote !== secondChatQuote || secondChatPayload.selected_text !== secondChatQuote || secondUserQuote !== secondChatQuote) throw new Error('The second Chat question reused an earlier quote instead of sending and displaying its current quote');
+  if (secondChatPayload.messages[0]?.quote !== firstChatQuote || await page.locator('.chat-bubble.user').first().locator('.chat-quote').textContent() !== firstChatQuote) throw new Error('Sending a new Chat quote overwrote the first question quote');
+
+  await selectText(secondChatQuoteSelector, secondChatQuote.length);
+  await page.locator('#selection-add-chat').click();
+  await frame.locator(secondChatQuoteSelector).evaluate((block) => {
+    block.ownerDocument.getSelection().removeAllRanges();
+    block.ownerDocument.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  });
+  await page.locator('#selected-context .selected-context-clear').click();
+  await page.locator('#selected-context').waitFor({ state: 'hidden' });
+  const unquotedChatQuestion = '继续解释这两种表示如何配合。';
+  await chatInput.fill(unquotedChatQuestion);
+  await chatInput.press('Enter');
+  await page.locator('.chat-bubble.assistant').nth(2).locator('.chat-copy').waitFor();
+  const unquotedChatPayload = chatRequestPayloads[2];
+  const unquotedUserMessage = unquotedChatPayload?.messages?.at(-1);
+  const historicalUserQuotes = unquotedChatPayload?.messages?.filter((message) => message.role === 'user').map((message) => message.quote || '');
+  const displayedUserQuotes = await page.locator('.chat-bubble.user .chat-quote').allTextContents();
+  if (chatRequestContents.length !== 3 || unquotedChatPayload?.messages?.length !== 5 || unquotedUserMessage?.role !== 'user' || unquotedUserMessage.content !== unquotedChatQuestion || unquotedUserMessage.quote || unquotedChatPayload.selected_text || await page.locator('.chat-bubble.user').nth(2).locator('.chat-quote').count()) throw new Error('Clearing the pinned Chat quote still attached context to the follow-up question');
+  if (JSON.stringify(historicalUserQuotes) !== JSON.stringify([firstChatQuote, secondChatQuote, '']) || JSON.stringify(displayedUserQuotes) !== JSON.stringify([firstChatQuote, secondChatQuote])) throw new Error('An unquoted Chat follow-up lost or changed the historical quotes');
+  await frame.locator(secondChatQuoteSelector).evaluate((node) => node.remove());
+
   await page.locator('#open-chat-history').click();
   await page.locator('#chat-history-view:not([hidden])').waitFor();
   if (!(await page.locator('.sidebar-tab[data-panel="chat-panel"]').getAttribute('aria-selected') === 'true')) throw new Error('Opening Chat history deactivated the AI tab');

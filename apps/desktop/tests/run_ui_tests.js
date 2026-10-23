@@ -19,6 +19,8 @@ const tests = [
   ['features', 'feature_smoke.js', { ci: true }],
   ['ai-controls', 'ai_controls_smoke.js', { ci: true }],
   ['vocabulary', 'vocabulary_smoke.js', { ci: true }],
+  ['plugin-market', 'plugin_market_smoke.js', { ci: true }],
+  ['notes-revision', 'notes_revision_smoke.js', { ci: true }],
   ['zotero-import', 'zotero_import_smoke.js', { ci: true }],
   ['zotero-note-markers', 'zotero_note_markers_smoke.js', { ci: true }],
   ['zotero-anchor-mapping', 'zotero_anchor_mapping_smoke.js', { ci: true }],
@@ -101,7 +103,7 @@ async function runManaged(script) {
     const log = fs.openSync(logPath, 'a');
     server = spawn(python, [path.join(desktopRoot, 'server.py'), '--port', String(port)], {
       cwd: desktopRoot,
-      env: { ...process.env, MY_SCHOLAR_DATA_DIR: dataRoot },
+      env: { ...process.env, MY_SCHOLAR_DATA_DIR: dataRoot, ...(script === 'plugin_market_smoke.js' ? { MY_SCHOLAR_PLUGIN_ADMISSION_TOKEN: 'fixture-admission-token' } : {}) },
       stdio: ['ignore', log, log],
     });
     await waitForHealth(port);

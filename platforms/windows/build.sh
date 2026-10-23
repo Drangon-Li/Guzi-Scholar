@@ -14,6 +14,7 @@ if [[ ! -d "$APP_SRC/node_modules/electron" ]]; then
 fi
 
 echo "==> Verifying shared application code"
+(cd "$APP_SRC" && npm run mcp:build)
 (cd "$APP_SRC" && npm run check)
 
 echo "==> Building Windows package"

@@ -16,6 +16,14 @@ contextBridge.exposeInMainWorld('myScholarDesktop', Object.freeze({
   chooseLibraryLocation: () => ipcRenderer.invoke('my-scholar:choose-library-location'),
   chooseMineruComponent: () => ipcRenderer.invoke('my-scholar:choose-mineru-component'),
   getStartupContext: () => ipcRenderer.invoke('my-scholar:get-startup-context'),
+  pluginRuntimeCheck: (request) => ipcRenderer.invoke('my-scholar:plugin-runtime-check', request),
+  onPluginStopped: (callback) => {
+    if (typeof callback !== 'function') throw new TypeError('插件停止回调必须是函数。');
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('my-scholar:plugin-stopped', listener);
+    return () => ipcRenderer.removeListener('my-scholar:plugin-stopped', listener);
+  },
+  getMcpConfig: () => ipcRenderer.invoke('my-scholar:mcp-config'),
   selectStartupLibrary: (selectedPath) => ipcRenderer.invoke('my-scholar:select-startup-library', selectedPath),
   checkForUpdates: () => ipcRenderer.invoke('my-scholar:check-for-updates'),
   openUpdateDownload: () => ipcRenderer.invoke('my-scholar:open-update-download'),

@@ -170,6 +170,7 @@ async function signal(promise, label) {
       const request = route.request(); const pathname = new URL(request.url()).pathname; const method = request.method();
       let payload = {};
       if (pathname === '/api/jobs') payload = { jobs };
+      else if (pathname === '/api/plugins' && route.request().method() === 'GET') payload = { plugins: [], drafts: [], previews: [] };
       else if (pathname === '/api/library') payload = { library };
       else if (pathname === '/api/health') payload = { ok: true, ai: { services: { translation: { enabled: true, configured: true, profile_id: profile, target_language: '中文' }, chat: { enabled: true, configured: true } } } };
       else if (pathname === '/api/settings') payload = { appearance: { app_font: 'system', reader_font: 'academic', accent: 'amber' }, ai: {}, metadata: { auto_retrieve: false, online_lookup: false } };

@@ -85,6 +85,7 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
       const jobId = pathname.split('/')[3];
       let payload = {};
       if (pathname === '/api/jobs') payload = { jobs };
+      else if (pathname === '/api/plugins' && route.request().method() === 'GET') payload = { plugins: [], drafts: [], previews: [] };
       else if (pathname === '/api/library') payload = { library };
       else if (pathname === '/api/health') payload = { ok: true, ai: { services: { translation: { enabled: true, configured: true, profile_id: profile, target_language: '中文' }, chat: { enabled: false, configured: false } } } };
       else if (pathname === '/api/settings') payload = { metadata: { auto_retrieve: false }, ai: { translation: { provider: 'openai-compatible', model: 'synthetic', enabled: true }, chat: { enabled: false } } };

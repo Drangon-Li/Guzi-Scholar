@@ -21,7 +21,10 @@
     "!docs/**",
     "!node_modules/**",
     "!developer.tokens.json",
-    "!config.local.json"
+    "!config.local.json",
+    "mcp/bridge.cjs",
+    "mcp/bridge.cjs.LEGAL.txt",
+    "plugin_templates/**/*"
   ],
   "extraMetadata": {
     "name": "guzi-scholar",

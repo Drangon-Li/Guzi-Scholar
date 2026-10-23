@@ -23,7 +23,7 @@ const unanchored = '<!-- zotero-unanchored:0123456789abcdef0123456789abcdef -->'
 const editor = element('DIV', comment(marker.slice(4, -3)), element('H2', text('Zotero 笔记')), element('P', text('Original note.')),
   comment(unanchored.slice(4, -3)), element('H2', text('Zotero 未定位批注')), element('P', text('Unanchored content.')));
 editor.dataset = { jobId: 'fixture', revision: '7' }; editor.contentEditable = 'true';
-const context = vm.createContext({ Node, state: { activeJob: { job_id: 'fixture' } },
+const context = vm.createContext({ Node, articleNoteServerRevisions: new Map([['fixture', 'server-revision']]), state: { activeJob: { job_id: 'fixture' } },
   $: () => editor, noteAssetURL: () => '',
   escapeHTML: (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char])),
 });
@@ -40,6 +40,7 @@ assert.equal(rendered, `${marker}<h2>Zotero 笔记</h2><p>Original note.</p>${un
 const saved = context.snapshot();
 assert.equal(saved.jobId, 'fixture');
 assert.equal(saved.revision, 7);
+assert.equal(saved.baseRevision, 'server-revision');
 assert.equal(context.render(saved.markdown), rendered, 'Loading and saving preserve the hidden metadata and note bodies');
 editor.childNodes[2].childNodes.push(element('STRONG', text(' An edited sentence.')));
 const edited = context.snapshot().markdown;

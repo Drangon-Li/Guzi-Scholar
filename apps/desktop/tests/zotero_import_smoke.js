@@ -83,7 +83,8 @@ const results = [
       } else if (pathname === '/api/jobs') {
         jobsReads += 1;
         payload = { jobs: copied ? [{ job_id: importedJobId, source_filename: 'Imported Zotero Synthetic.pdf', status: 'queued', created_at: '2026-10-22T00:00:00Z', links: {}, manifest: { counts: {} } }] : [] };
-      } else if (pathname === '/api/library') payload = { library: { folders: [], properties: [], views: [], items: copied ? { [importedJobId]: { values: { importance: 0 }, folder_ids: [], metadata: { fields: { title: 'Imported Zotero Synthetic' }, status: 'complete' } } } : {}, display: { columns: [{ id: 'name', visible: true, order: 0 }] } } };
+      } else if (pathname === '/api/plugins' && route.request().method() === 'GET') payload = { plugins: [], drafts: [], previews: [] };
+        else if (pathname === '/api/library') payload = { library: { folders: [], properties: [], views: [], items: copied ? { [importedJobId]: { values: { importance: 0 }, folder_ids: [], metadata: { fields: { title: 'Imported Zotero Synthetic' }, status: 'complete' } } } : {}, display: { columns: [{ id: 'name', visible: true, order: 0 }] } } };
       else if (pathname === '/api/health') payload = { ok: true, ai: { services: { chat: { enabled: false }, translation: { enabled: false } } } };
       else if (pathname === '/api/settings') payload = { ai: {}, metadata: { auto_retrieve: false } };
       else if (pathname === '/api/library/location') payload = { location: {} };

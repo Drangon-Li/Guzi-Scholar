@@ -5,6 +5,16 @@ const { launchManagedChromium } = require('./playwright.cjs');
 const baseURL = process.argv[2];
 if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Use an isolated fixture server with MY_SCHOLAR_TEST_DATA. This suite writes vocabulary.');
 
+function vocabularyRequest(request) {
+  if (new URL(request.url()).pathname !== '/api/plugins/guzi.vocabulary/invoke') return null;
+  const payload = request.postDataJSON();
+  const args = payload.arguments || {};
+  const { entry_id, ...body } = args;
+  const operations = { vocabulary_list: ['GET', ''], vocabulary_save: ['POST', ''], vocabulary_update: ['PATCH', `/${entry_id}`], vocabulary_delete: ['DELETE', `/${entry_id}`], vocabulary_review: ['POST', `/${entry_id}/review`], vocabulary_explain: ['POST', `/${entry_id}/explain`] };
+  const operation = operations[payload.name];
+  return operation ? { method: operation[0], path: `/api/vocabulary${operation[1]}`, body } : null;
+}
+
 const fixture = `<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;font:19px/1.8 serif}.reader-content{max-width:760px;margin:40px auto}p{margin:30px 0}.spacer{height:1200px}</style></head><body data-vocabulary-fixture="true"><main class="reader-content"><section class="pdf-page" data-page="1"><p data-block-id="vocab-one" data-page="1">We apply variational inference to approximate the posterior.</p><p data-block-id="vocab-two" data-page="1">Our variational inference method shares evidence with the first sentence.</p><p data-block-id="vocab-three" data-page="1">A stochastic gradient estimator improves the objective.</p><p data-block-id="vocab-failure" data-page="1">The failed concept remains available for later study.</p><p data-block-id="vocab-long" data-page="1">${'a'.repeat(121)}</p><div class="spacer"></div></section></main></body></html>`;
 
 (async () => {
@@ -14,6 +24,7 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><style>body{ma
   try {
     const page = await session.browser.newPage({ viewport: { width: 1460, height: 960 } });
     page.setDefaultTimeout(20000);
+    const vocab = page.frameLocator('iframe[data-plugin-id="guzi.vocabulary"]');
     const errors = [];
     const translationRequests = [];
     const vocabularyPosts = [];
@@ -25,7 +36,7 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><style>body{ma
     page.on('pageerror', (error) => errors.push(error.message));
     page.on('dialog', async (dialog) => { errors.push(`Unexpected native dialog: ${dialog.type()}`); await dialog.dismiss(); });
     page.on('request', (request) => {
-      if (new URL(request.url()).pathname === '/api/vocabulary' && request.method() === 'POST') vocabularyPosts.push(request.postDataJSON());
+      if (vocabularyRequest(request)?.path === '/api/vocabulary' && vocabularyRequest(request)?.method === 'POST') vocabularyPosts.push(vocabularyRequest(request).body);
     });
     await page.route('**/api/health', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: true, service: 'my-scholar', version: 'test', ai: { services: { translation: { enabled: true, configured: true, model: 'vocabulary-mock', profile_id: 'vocabulary-mock' }, chat: { enabled: false, configured: false } } } }) }));
     await page.route('**/api/jobs/*/document.html*', (route) => route.fulfill({ contentType: 'text/html', body: fixture }));
@@ -36,12 +47,15 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><style>body{ma
       if (body.text === 'failed concept' && failTranslation) return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: '模拟翻译暂不可用' }) });
       return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ result: { text: `释义：${body.text}`, block_id: body.block_id, source_hash: body.source_hash, target_language: body.target_language, profile_id: 'vocabulary-mock' } }) });
     });
-    await page.route('**/api/vocabulary/*/explain', async (route) => {
-      explanations.push(route.request().postDataJSON());
+    await page.route('**/api/plugins/guzi.vocabulary/invoke', async (route) => {
+      if (route.request().postDataJSON()?.name !== 'vocabulary_explain') return route.continue();
+      explanations.push(vocabularyRequest(route.request()).body);
       if (explanationMode === 'failure') return route.fulfill({ status: 503, json: { error: '模拟详细释义暂不可用' } });
       await new Promise((resolve) => { releaseExplanation = resolve; });
-      return route.fulfill({ json: { details: generatedDetails, model: 'vocabulary-explain-fixture' } });
+      return route.fulfill({ json: { result: { details: generatedDetails, model: 'vocabulary-explain-fixture' } } });
     });
+    const previousEntries = (await (await page.request.get(`${baseURL}/api/vocabulary`)).json()).entries || [];
+    for (const entry of previousEntries) await page.request.delete(`${baseURL}/api/vocabulary/${entry.id}`);
     await page.goto(baseURL, { waitUntil: 'networkidle' });
     const paper = page.locator('#library-view .library-card[data-status="completed"]').first();
     await paper.waitFor();
@@ -82,9 +96,9 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><style>body{ma
       await page.locator('#selection-popover:not([hidden])').waitFor();
     };
     const save = async () => {
-      const response = page.waitForResponse((item) => new URL(item.url()).pathname === '/api/vocabulary' && item.request().method() === 'POST');
+      const response = page.waitForResponse((item) => vocabularyRequest(item.request())?.path === '/api/vocabulary' && vocabularyRequest(item.request())?.method === 'POST');
       await page.locator('#selection-add-vocabulary').click();
-      const payload = await (await response).json();
+      const payload = (await (await response).json()).result;
       assert(payload.entry, JSON.stringify(payload));
       return payload.entry;
     };
@@ -119,27 +133,27 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><style>body{ma
     const second = await save();
     assert.equal(second.meaning, '');
     await page.locator('[data-view="vocabulary-view"]').click();
-    await page.locator(`[data-vocabulary-id="${second.id}"]`).waitFor();
+    await vocab.locator(`[data-vocabulary-id="${second.id}"]`).waitFor();
     assert.equal(await initialFrame.evaluate((node) => node.isConnected), true, 'Vocabulary navigation must preserve mounted reader');
     assert.equal(await page.locator('#reader-view').getAttribute('aria-hidden'), 'true');
-    const secondCard = page.locator(`[data-vocabulary-id="${second.id}"]`);
+    const secondCard = vocab.locator(`[data-vocabulary-id="${second.id}"]`);
     await secondCard.locator('[data-vocab-action="edit"]').click();
     await secondCard.locator('[name="meaning"]').fill('用户编写释义');
     await secondCard.locator('[name="tags"]').fill('机器学习, 优化');
     await secondCard.locator('[name="note"]').fill('检查异步补全不覆盖编辑');
-    await secondCard.locator('[type="submit"]').click();
-    await secondCard.locator('.vocabulary-meaning').filter({ hasText: '用户编写释义' }).waitFor();
-    const completedPatch = page.waitForResponse((response) => response.url().endsWith(`/api/vocabulary/${second.id}`) && response.request().method() === 'PATCH' && response.request().postDataJSON()?.only_if_meaning_empty === true);
+    await secondCard.locator('[data-vocab-action="save-edit"]').click();
+    await secondCard.locator('.vocabulary-meaning').filter({ hasText: '用户编写释义' }).waitFor().catch(async (error) => { console.error('Vocabulary status:', await vocab.locator('#vocabulary-status').textContent(), errors); throw error; });
+    const completedPatch = page.waitForResponse((response) => vocabularyRequest(response.request())?.path === `/api/vocabulary/${second.id}` && vocabularyRequest(response.request())?.method === 'PATCH' && vocabularyRequest(response.request())?.body.only_if_meaning_empty === true);
     releaseDelayed();
     await completedPatch;
     assert.equal((await getEntry(second.id)).meaning, '用户编写释义', 'Delayed AI result must not overwrite edited meaning');
     assert.equal(translationRequests.filter((term) => term === second.term).length, 1, 'Saving pending translation must not issue another AI request');
     assert.equal(explanations.length, 0, 'Detailed explanation must only run on request');
     await secondCard.locator('[data-vocab-action="explain"]').click();
-    await page.locator('#vocabulary-status').filter({ hasText: '模拟详细释义暂不可用' }).waitFor();
+    await vocab.locator('#vocabulary-status').filter({ hasText: '模拟详细释义暂不可用' }).waitFor();
     assert(await secondCard.locator('[data-vocab-action="explain"]').isEnabled(), 'Failed explanations can be retried');
     explanationMode = 'success';
-    const explanationRequest = page.waitForRequest((request) => request.url().endsWith('/explain'));
+    const explanationRequest = page.waitForRequest((request) => vocabularyRequest(request)?.path.endsWith('/explain'));
     await secondCard.locator('[data-vocab-action="explain"]').click();
     await explanationRequest;
     assert(await secondCard.locator('[data-vocab-action="explain"]').isDisabled(), 'Generation is guarded against duplicate requests');
@@ -154,35 +168,35 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><style>body{ma
     await secondCard.locator('.vocabulary-details > summary').click();
     assert.equal(await secondCard.locator('.vocabulary-details textarea').count(), 6);
     await secondCard.locator('[name="details.examples"]').fill('A manual example. 用户编辑的例句。');
-    const detailSave = page.waitForResponse((response) => response.url().endsWith(`/api/vocabulary/${second.id}`) && response.request().method() === 'PATCH');
-    await secondCard.locator('[type="submit"]').click();
-    assert.deepEqual((await detailSave).request().postDataJSON(), { details: { examples: 'A manual example. 用户编辑的例句。' } });
+    const detailSave = page.waitForResponse((response) => vocabularyRequest(response.request())?.path === `/api/vocabulary/${second.id}` && vocabularyRequest(response.request())?.method === 'PATCH');
+    await secondCard.locator('[data-vocab-action="save-edit"]').click();
+    assert.deepEqual(vocabularyRequest((await detailSave).request()).body, { details: { examples: 'A manual example. 用户编辑的例句。' } });
     await secondCard.locator('.vocabulary-meaning').waitFor();
     const enriched = await getEntry(second.id);
     assert.equal(enriched.meaning, '用户编写释义');
     assert.equal(enriched.details.synonyms, generatedDetails.synonyms, 'Editing one detail preserves the others');
     assert.equal(enriched.details.examples, 'A manual example. 用户编辑的例句。');
-    await page.locator('#vocabulary-tag').selectOption('优化');
-    assert.equal(await page.locator('.vocabulary-card').count(), 1);
-    await page.locator('#vocabulary-start-review').click();
-    assert.equal(await page.locator('#vocabulary-review .vocabulary-review-meaning').count(), 0);
-    assert.equal(await page.locator('#vocabulary-review .vocabulary-details').count(), 0, 'Review front must hide detailed answers');
-    await page.locator('[data-vocab-action="reveal"]').click();
-    await page.locator('#vocabulary-review .vocabulary-details > summary').click();
-    assert.match(await page.locator('#vocabulary-review .vocabulary-details').innerText(), /用户编辑的例句/u);
-    await page.locator('[data-vocab-action="rate"][data-status="mastered"]').click();
-    await page.getByText('本轮复习完成', { exact: true }).waitFor();
+    await vocab.locator('#vocabulary-tag').selectOption('优化');
+    assert.equal(await vocab.locator('.vocabulary-card').count(), 1);
+    await vocab.locator('#vocabulary-start-review').click();
+    assert.equal(await vocab.locator('#vocabulary-review .vocabulary-review-meaning').count(), 0);
+    assert.equal(await vocab.locator('#vocabulary-review .vocabulary-details').count(), 0, 'Review front must hide detailed answers');
+    await vocab.locator('[data-vocab-action="reveal"]').click();
+    await vocab.locator('#vocabulary-review .vocabulary-details > summary').click();
+    assert.match(await vocab.locator('#vocabulary-review .vocabulary-details').innerText(), /用户编辑的例句/u);
+    await vocab.locator('[data-vocab-action="rate"][data-status="mastered"]').click();
+    await vocab.getByText('本轮复习完成', { exact: true }).waitFor();
     assert.equal((await getEntry(second.id)).review.status, 'mastered');
-    await page.locator('[data-vocab-action="end-review"]').click();
-    await page.locator('#vocabulary-filter').selectOption('learning');
-    assert.equal(await page.locator('.vocabulary-card').count(), 0);
-    await page.locator('#vocabulary-filter').selectOption('mastered');
-    assert.equal(await page.locator('.vocabulary-card').count(), 1);
-    await page.locator('#vocabulary-filter').selectOption('all');
-    await page.locator('#vocabulary-tag').selectOption('');
-    await page.locator('#vocabulary-search').fill('posterior');
-    assert.equal(await page.locator('.vocabulary-card').count(), 1);
-    const firstCard = page.locator(`[data-vocabulary-id="${first.id}"]`);
+    await vocab.locator('[data-vocab-action="end-review"]').click();
+    await vocab.locator('#vocabulary-filter').selectOption('learning');
+    assert.equal(await vocab.locator('.vocabulary-card').count(), 0);
+    await vocab.locator('#vocabulary-filter').selectOption('mastered');
+    assert.equal(await vocab.locator('.vocabulary-card').count(), 1);
+    await vocab.locator('#vocabulary-filter').selectOption('all');
+    await vocab.locator('#vocabulary-tag').selectOption('');
+    await vocab.locator('#vocabulary-search').fill('posterior');
+    assert.equal(await vocab.locator('.vocabulary-card').count(), 1);
+    const firstCard = vocab.locator(`[data-vocabulary-id="${first.id}"]`);
     await firstCard.locator('[data-vocab-action="source"]').first().click();
     await page.locator('#reader-view.active-view').waitFor();
     assert.equal(await frame.locator('body').evaluate((node) => node.ownerDocument.getSelection().toString()), first.term);
@@ -192,8 +206,8 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><style>body{ma
     const failed = await save();
     assert.equal(failed.meaning, '');
     await page.locator('[data-view="vocabulary-view"]').click();
-    await page.locator('#vocabulary-search').fill('failed concept');
-    const failedCard = page.locator(`[data-vocabulary-id="${failed.id}"]`);
+    await vocab.locator('#vocabulary-search').fill('failed concept');
+    const failedCard = vocab.locator(`[data-vocabulary-id="${failed.id}"]`);
     await failedCard.waitFor();
     failTranslation = false;
     await failedCard.locator('[data-vocab-action="complete"]').click();
@@ -213,7 +227,7 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><style>body{ma
     await failedCard.waitFor({ state: 'detached' });
     assert.equal(await getEntry(failed.id), undefined);
 
-    await page.locator('#vocabulary-search').fill('variational inference');
+    await vocab.locator('#vocabulary-search').fill('variational inference');
     // A stale source may still point to the same block id; exact text and
     // surrounding-context validation must prevent a jump into changed text.
     await initialFrame.evaluate((node) => { node.contentDocument.querySelector('[data-block-id="vocab-one"]').firstChild.textContent = 'This paragraph was replaced by a new render.'; });

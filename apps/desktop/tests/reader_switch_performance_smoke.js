@@ -123,6 +123,7 @@ async function staticServer() {
       const method = request.method();
       let payload = {};
       if (pathname === '/api/jobs') payload = { jobs };
+      else if (pathname === '/api/plugins' && route.request().method() === 'GET') payload = { plugins: [], drafts: [], previews: [] };
       else if (pathname === '/api/library') payload = { library };
       else if (pathname === '/api/health') payload = { ok: true, ai: { services: {
         translation: { enabled: true, configured: true, profile_id: profile, target_language: '中文' },

@@ -1,6 +1,6 @@
 {
   "name": "guzi-scholar",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "private": true,
   "license": "Apache-2.0",
   "description": "Open-source cross-platform academic PDF reader",
@@ -15,7 +15,8 @@
     "sync": "cap sync",
     "android:build": "cd android && ./gradlew assembleDebug",
     "android:install": "cd android && ./gradlew installDebug",
-    "ios:open": "cap open ios"
+    "ios:open": "cap open ios",
+    "desktop:dev:plugins": "npm --prefix apps/desktop run dev:plugins"
   },
   "dependencies": {
     "@capacitor/android": "^7.0.0",

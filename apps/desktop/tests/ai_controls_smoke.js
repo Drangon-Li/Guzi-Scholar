@@ -33,6 +33,7 @@ const info = { window: 64000, estimated_input_tokens: 51000, output_tokens: 4096
       const method = request.method();
       let payload = {};
       if (pathname === '/api/jobs') payload = { jobs: [job] };
+      else if (pathname === '/api/plugins' && route.request().method() === 'GET') payload = { plugins: [], drafts: [], previews: [] };
       else if (pathname === '/api/library') payload = { library };
       else if (pathname === '/api/health') payload = { ok: true, ai: { services: { chat: { ...profile(settings.ai.chat), enabled: true, configured: true }, translation: { ...profile(settings.ai.translation), enabled: false, configured: false } } } };
       else if (pathname === '/api/settings') {
