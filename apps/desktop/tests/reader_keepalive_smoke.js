@@ -299,7 +299,7 @@ async function signal(promise, label) {
       const rect = range.getClientRects()[0];
       doc.dispatchEvent(new PointerEvent('pointermove', { clientX: rect.x + 5, clientY: rect.y + rect.height / 2 }));
     });
-    await active().locator('.reader-sentence-tooltip').filter({ hasText: 'A mocked translation' }).waitFor();
+    await page.locator('#selection-popover:not([hidden])').filter({ hasText: 'A mocked translation' }).waitFor();
     assert.equal(count(a, 'translate', 'POST') - hoverBefore, 1, 'Hover dispatched duplicate translation requests');
     const paragraphBefore = count(a, 'translate', 'POST');
     await translateParagraph(1);

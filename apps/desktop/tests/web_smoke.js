@@ -980,9 +980,9 @@ let browserSession;
   metrics.selectionTypography.at120 = await readSelectionTypography();
   await page.locator('#font-size-range').evaluate((node) => { node.value = '115'; node.dispatchEvent(new Event('input', { bubbles: true })); });
   for (const measurement of Object.values(metrics.selectionTypography)) {
-    const expectedToolbarSize = measurement.supportToken * .88;
-    const expectedResultSize = measurement.contentToken * .82;
-    if (measurement.fontSize < 11 || Math.abs(measurement.fontSize - expectedToolbarSize) > 0.2 || Math.abs(measurement.buttonFontSize - expectedToolbarSize) > 0.2 || Math.abs(measurement.resultFontSize - expectedResultSize) > 0.2 || Math.abs(measurement.resultLineHeight - expectedResultSize * 1.48) > 0.3) throw new Error(`Selection toolbar or translation did not keep its compact reader-relative typography (${JSON.stringify(metrics.selectionTypography)})`);
+    const expectedToolbarSize = measurement.supportToken * .9;
+    const expectedResultSize = measurement.contentToken * .88;
+    if (measurement.fontSize < 11 || Math.abs(measurement.fontSize - expectedToolbarSize) > 0.2 || Math.abs(measurement.buttonFontSize - expectedToolbarSize) > 0.2 || Math.abs(measurement.resultFontSize - expectedResultSize) > 0.2 || Math.abs(measurement.resultLineHeight - expectedResultSize * 1.65) > 0.3) throw new Error(`Selection toolbar or translation did not keep its compact reader-relative typography (${JSON.stringify(metrics.selectionTypography)})`);
     const { placement } = measurement;
     if (placement.left < placement.wrapLeft - 1 || placement.right > placement.wrapRight + 1 || placement.top < placement.wrapTop - 1 || placement.bottom > placement.wrapBottom + 1) throw new Error(`Scaled selection toolbar escaped the reading area (${JSON.stringify(metrics.selectionTypography)})`);
   }

@@ -1806,6 +1806,28 @@ class LocalRequestSecurityTest(unittest.TestCase):
 
 
 class SettingsBoundaryTest(unittest.TestCase):
+    def test_reader_shortcut_defaults_follow_platform_and_round_trip_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-reader-shortcuts-") as temp:
+            settings_path = Path(temp) / "settings.json"
+            with patch("server.SETTINGS_PATH", settings_path), patch("server.ai_services", return_value={}):
+                for platform_name, modifier in (("darwin", "Cmd"), ("win32", "Ctrl"), ("linux", "Ctrl")):
+                    with self.subTest(platform=platform_name), patch("server.sys.platform", platform_name):
+                        shortcuts = _public_settings()["shortcuts"]
+                        self.assertEqual(shortcuts["full_translation"], f"{modifier}+Shift+Enter")
+                        self.assertEqual(shortcuts["reflow"], f"{modifier}+Option+Enter")
+                saved = _write_settings({"shortcuts": {
+                    "full_translation": "Ctrl+Shift+T", "reflow": "Ctrl+Option+R", "unknown": "Cmd+Q",
+                }})
+                self.assertEqual(saved["shortcuts"]["full_translation"], "Ctrl+Shift+T")
+                self.assertEqual(saved["shortcuts"]["reflow"], "Ctrl+Option+R")
+                self.assertEqual(_public_settings()["shortcuts"], saved["shortcuts"])
+                self.assertNotIn("unknown", saved["shortcuts"])
+                persisted = json.loads(settings_path.read_text())["shortcuts"]
+                self.assertEqual(persisted, saved["shortcuts"])
+                partial = _write_settings({"shortcuts": {"open_library": "Ctrl+1"}})["shortcuts"]
+                self.assertEqual(partial["full_translation"], "Ctrl+Shift+T")
+                self.assertEqual(partial["reflow"], "Ctrl+Option+R")
+
     def test_ai_status_history_keeps_more_than_the_visible_page_limit(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-settings-history-limit-") as temp:
             history_path = Path(temp) / "ai-status-history.json"

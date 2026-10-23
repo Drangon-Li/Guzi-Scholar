@@ -61,19 +61,20 @@
     lineHeight: Object.freeze({ min: 100, max: 300 }),
     pageMargin: Object.freeze({ min: 0, max: 250 }),
   });
+  const shortcutPrimaryModifier = /mac/iu.test(navigator.userAgentData?.platform || navigator.platform || '') ? 'Cmd' : 'Ctrl';
   const state = {
     aiProfiles: {}, aiModelCapabilities: {},
     jobs: [], activeJob: null, selection: null, chatSelection: null, annotations: [], aiHighlights: [], chat: [], chatSessions: new Map(),
     openDocuments: [], translationCache: [], translationCaches: new Map(), translationRun: null, translationRuns: new Map(),
     translationPreferences: { hoverEnabled: true, displayMode: 'bilingual' },
-    annotationActions: { hidden_builtin: [], custom: [] },
+    annotationActions: { hidden_builtin: [], custom: [], show_shortcut_hints: true },
     mediaLayouts: new Map(),
     health: null, library: null, activeFolderId: 'system-all', activeViewId: 'view-all', librarySort: 'updated_at-desc', libraryStatusFilter: '', libraryMode: 'list', primaryView: 'library-view',
     selectedLibraryJobId: null, selectedLibraryJobIds: new Set(), activeGroupValue: null, groupingMenuOpen: false,
     graphController: null, graphData: null, graphConfig: { showSimilarity: false, showAttributes: true, attributeIds: null, topK: 2, viewportScale: 0.85 },
     inlineImportanceSaving: new Set(),
     assistantInitialized: false, quickPreview: null, highlightColor: '#f59e0b', annotationColors: { highlight: '#f59e0b', underline: '#f59e0b' }, appearance: { ...appearanceDefaults }, pendingAppearance: { ...appearanceDefaults },
-    shortcuts: { open_library: 'Cmd+1', open_settings: 'Cmd+,', highlight: 'Cmd+Shift+H', underline: 'Cmd+Shift+U', highlight_note: 'Cmd+Shift+J', underline_note: 'Cmd+Shift+K' },
+    shortcuts: { open_library: 'Cmd+1', open_settings: 'Cmd+,', highlight: 'Cmd+Shift+H', underline: 'Cmd+Shift+U', highlight_note: 'Cmd+Shift+J', underline_note: 'Cmd+Shift+K', full_translation: `${shortcutPrimaryModifier}+Shift+Enter`, reflow: `${shortcutPrimaryModifier}+Option+Enter` },
     highlightFilter: 'all', typography: { ...typographyDefaults }, importQueue: [], importRunning: false, metadataAutoRetrieve: true,
   };
   const openTabsStorageKey = 'my-scholar-open-documents';
@@ -734,7 +735,7 @@
       else if (event.key === 'ArrowRight') target = tabs[(index + 1) % tabs.length];
       else if (event.key === 'Home') target = tabs[0];
       else if (event.key === 'End') target = tabs.at(-1);
-      else if (['Enter', ' '].includes(event.key)) {
+      else if (['Enter', ' '].includes(event.key) && !event.metaKey && !event.ctrlKey && !event.altKey) {
         event.preventDefault();
         tab.click();
         return;
@@ -3751,7 +3752,7 @@
     return (segments || []).map((segment) => rangeAtOffsets(root, segment.start, segment.end, doc)).filter((range) => range && !range.collapsed);
   }
 
-  function clearReaderSentenceHover(doc = frameDocument()) {
+  function clearReaderSentenceHover(doc = frameDocument(), { clearPopover = true } = {}) {
     if (readerSentenceState.pointerFrame) {
       (readerSentenceState.doc?.defaultView || doc?.defaultView)?.cancelAnimationFrame?.(readerSentenceState.pointerFrame);
       readerSentenceState.pointerFrame = 0;
@@ -3762,12 +3763,13 @@
     readerSentenceState.pendingAnnotation = null;
     readerHighlightRegistry(doc)?.delete(readerSentenceHighlightName);
     doc?.querySelectorAll('.reader-sentence-hover-fallback').forEach((node) => node.classList.remove('reader-sentence-hover-fallback'));
-    doc?.querySelector('.reader-sentence-tooltip')?.remove();
     readerSentenceState.activePairId = '';
     readerSentenceState.activePair = null;
     readerSentenceState.annotation = null;
     readerSentenceState.revision += 1;
     readerSentenceState.usingCustomHighlight = false;
+    readerSentenceState.toolbarPointerInside = false;
+    if (clearPopover && state.selection?.origin === 'sentence-hover') clearSelectionPopover({ clearState: true, immediate: true });
   }
 
   function rebuildReaderSentencePairs(doc = frameDocument()) {
@@ -3816,80 +3818,108 @@
     }) || null;
   }
 
+  function readerSentenceSelection(pair, doc = readerSentenceState.doc) {
+    if (!doc || !pair?.source?.isConnected) return null;
+    const range = pair.sourceRange;
+    const block = blockForNode(range.startContainer);
+    if (!block?.dataset.blockId || block !== blockForNode(range.endContainer)) return null;
+    const { start, end, text: canonicalText } = canonicalSelectionOffsets(block, range, doc);
+    const quote = canonicalText.slice(start, end);
+    const rects = [...range.getClientRects()].filter((rect) => rect.width && rect.height);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || !quote || !rects.length) return null;
+    const rect = rects.at(-1);
+    return {
+      origin: 'sentence-hover',
+      pair_id: pair.id,
+      job_id: state.activeJob?.job_id,
+      quote: quote.slice(0, 10000),
+      sentence: quote,
+      block_id: block.dataset.blockId,
+      source_block_id: null,
+      surface: 'paper',
+      page: block.dataset.page || pair.source.dataset.page || null,
+      start,
+      end,
+      quote_prefix: canonicalText.slice(Math.max(0, start - 48), start),
+      quote_suffix: canonicalText.slice(end, end + 48),
+      render_generation: activeChatSourceGeneration(),
+      anchorRect: { left: rect.left, top: Math.min(...rects.map((item) => item.top)), bottom: Math.max(...rects.map((item) => item.bottom)) },
+    };
+  }
+
+  function hasAnnotationHoverDetails(annotation) {
+    return Boolean(annotation && !isAIAnnotation(annotation) && (String(annotation.label || '').trim() || hasAnnotationNote(annotation)));
+  }
+
   function paintReaderSentenceTooltip(pair, text, { status = '', formulas = [], markers = [], emphasis = [] } = {}) {
     const doc = readerSentenceState.doc;
     const annotation = readerSentenceState.annotation;
-    if (!doc || doc !== frameDocument() || (!readerHoverTranslationEnabled() && !annotation) || doc.querySelector('.annotation-note-popover') || readerSentenceState.activePairId !== pair.id) return;
+    if (!doc || doc !== frameDocument() || state.health?.readonly || doc.getSelection()?.toString().trim() || doc.querySelector('.annotation-note-popover') || readerSentenceState.activePairId !== pair.id) return;
+    const popover = $('#selection-popover');
+    if (!popover) return;
+    if (state.selection?.origin !== 'sentence-hover' || state.selection.pair_id !== pair.id) {
+      const selection = readerSentenceSelection(pair, doc);
+      if (!selection) return;
+      clearSelectionPopover({ clearState: true, immediate: true });
+      state.selection = selection;
+      renderSelectedContext();
+      renderSelectionActions();
+      openTransient(popover);
+    }
     const registry = readerHighlightRegistry(doc);
     const highlight = readerHighlightForRanges(doc, [pair.sourceRange]);
     if (registry && highlight) {
       registry.set(readerSentenceHighlightName, highlight);
       readerSentenceState.usingCustomHighlight = true;
     }
-    let tooltip = doc.querySelector('.reader-sentence-tooltip');
-    if (!tooltip) {
-      tooltip = doc.createElement('div');
-      tooltip.className = 'reader-sentence-tooltip';
-      tooltip.setAttribute('role', 'tooltip');
-      tooltip.innerHTML = '<section class="reader-sentence-tooltip-note" hidden><strong class="reader-sentence-tooltip-note-label"></strong><div class="annotation-note-popover-body reader-sentence-tooltip-note-body"></div></section><section class="reader-sentence-tooltip-translation"><strong class="reader-sentence-tooltip-label"></strong><div class="reader-sentence-tooltip-text"></div></section>';
-      tooltip.addEventListener('pointerenter', () => window.clearTimeout(readerSentenceState.closeTimer));
-      tooltip.addEventListener('pointerleave', () => clearReaderSentenceHover(doc));
-      doc.body.append(tooltip);
+    let note = popover.querySelector('.selection-hover-note');
+    if (!note) {
+      note = document.createElement('section');
+      note.className = 'selection-hover-note';
+      note.innerHTML = '<strong class="selection-hover-note-label"></strong><div class="selection-hover-note-body"></div>';
+      popover.insertBefore(note, $('#selection-translation-result'));
     }
-    const note = tooltip.querySelector('.reader-sentence-tooltip-note');
     note.hidden = !annotation;
     if (annotation) {
-      tooltip.querySelector('.reader-sentence-tooltip-note-label').textContent = annotation.label || '笔记';
-      tooltip.querySelector('.reader-sentence-tooltip-note-body').innerHTML = renderMarkdown(annotation.note);
-      applyAnnotationTheme(tooltip, annotation);
+      note.querySelector('.selection-hover-note-label').textContent = annotation.label || '笔记';
+      const body = note.querySelector('.selection-hover-note-body');
+      body.hidden = !hasAnnotationNote(annotation);
+      body.innerHTML = body.hidden ? '' : renderMarkdown(annotation.note);
+      applyAnnotationTheme(note, annotation);
     }
-    tooltip.querySelector('.reader-sentence-tooltip-translation').hidden = !readerHoverTranslationEnabled();
-    tooltip.querySelector('.reader-sentence-tooltip-label').textContent = status || '当前句译文';
-    tooltip.querySelector('.reader-sentence-tooltip-text').replaceChildren(status
-      ? doc.createTextNode(text || '')
-      : renderTranslationText(text, formulas, doc, markers, emphasis));
+    $('#selection-translation-result').hidden = !readerHoverTranslationEnabled();
+    if (readerHoverTranslationEnabled()) {
+      if (status && !text) renderSelectionTranslation('loading');
+      else if (status) renderSelectionTranslation('error', { message: text || status });
+      else renderSelectionTranslation('ready', { text, formulas, markers, emphasis });
+    }
     positionReaderSentenceTooltip(doc);
   }
 
   function positionReaderSentenceTooltip(doc = frameDocument()) {
     if (doc !== readerSentenceState.doc || doc !== frameDocument()) return;
     const pair = readerSentenceState.activePair;
-    const tooltip = doc.querySelector('.reader-sentence-tooltip');
-    if (!pair || !tooltip) return;
+    if (!pair || state.selection?.origin !== 'sentence-hover' || state.selection.pair_id !== pair.id) return;
     const sentenceRects = [...pair.sourceRange.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0 && Number.isFinite(rect.top) && Number.isFinite(rect.bottom));
-    if (!sentenceRects.length) { tooltip.remove(); return; }
-    const point = readerSentenceState.hoverPoint;
-    const viewportWidth = doc.documentElement.clientWidth;
-    const viewportHeight = doc.documentElement.clientHeight;
-    const sentenceTop = Math.min(...sentenceRects.map((rect) => rect.top));
-    const sentenceBottom = Math.max(...sentenceRects.map((rect) => rect.bottom));
-    const belowTop = Math.ceil(sentenceBottom + 10);
-    const aboveBottom = Math.floor(sentenceTop - 10);
-    const below = Math.max(0, viewportHeight - 12 - belowTop);
-    const above = Math.max(0, aboveBottom - 12);
-    tooltip.style.maxHeight = `${Math.max(0, viewportHeight - 24)}px`;
-    const rect = { width: tooltip.offsetWidth, height: tooltip.offsetHeight };
-    if (Math.max(below, above) < Math.min(80, rect.height)) { tooltip.remove(); return; }
-    const left = Math.max(12, Math.min((point?.x || 12) + 10, viewportWidth - rect.width - 12));
-    const placeBelow = rect.height <= below || (rect.height > above && below >= above);
-    tooltip.style.maxHeight = `${placeBelow ? below : above}px`;
-    const height = tooltip.offsetHeight;
-    const top = placeBelow ? belowTop : Math.floor(aboveBottom - height);
-    tooltip.style.left = `${Math.round(left)}px`;
-    tooltip.style.top = `${top}px`;
+    if (!sentenceRects.length) { clearReaderSentenceHover(doc); return; }
+    const rect = sentenceRects.at(-1);
+    state.selection.anchorRect = { left: rect.left, top: Math.min(...sentenceRects.map((item) => item.top)), bottom: Math.max(...sentenceRects.map((item) => item.bottom)) };
+    positionSelectionPopover();
   }
 
-  function setReaderSentenceHover(pair, annotation = null) {
+  function setReaderSentenceHover(pair, annotation = null, { retry = false } = {}) {
     const doc = readerSentenceState.doc || frameDocument();
     if (!doc) return;
-    if (!readerHoverTranslationEnabled() && !annotation) { clearReaderSentenceHover(doc); return; }
+    if (state.health?.readonly) { clearReaderSentenceHover(doc); return; }
     if (!pair) {
       window.clearTimeout(readerSentenceState.closeTimer);
-      readerSentenceState.closeTimer = window.setTimeout(() => clearReaderSentenceHover(doc), 180);
+      readerSentenceState.closeTimer = window.setTimeout(() => {
+        if (!readerSentenceState.toolbarPointerInside && !$('#selection-popover')?.contains(document.activeElement)) clearReaderSentenceHover(doc);
+      }, 260);
       return;
     }
     window.clearTimeout(readerSentenceState.closeTimer);
-    if (readerSentenceState.activePairId === pair.id && readerSentenceState.annotation?.id === annotation?.id) return;
+    if (!retry && readerSentenceState.activePairId === pair.id && readerSentenceState.annotation?.id === annotation?.id) return;
     clearReaderSentenceHover(doc);
     readerSentenceState.activePairId = pair.id;
     readerSentenceState.activePair = pair;
@@ -3902,8 +3932,8 @@
     const profileId = translationProfileId();
     const hoverMount = readerMount;
     readerSentenceState.hoverTimer = window.setTimeout(async () => {
-      if (!readerMountMatches(hoverMount, doc) || readerSentenceState.revision !== revision || doc.querySelector('.annotation-note-popover')) return;
-      if (annotation) paint('', { status: '正在翻译当前句…' });
+      if (!readerMountMatches(hoverMount, doc) || readerSentenceState.revision !== revision || doc.getSelection()?.toString().trim() || doc.querySelector('.annotation-note-popover')) return;
+      paint('', { status: '正在翻译当前句…' });
       if (!readerHoverTranslationEnabled()) return;
       const fragment = doc.createElement('div');
       fragment.append(pair.sourceRange.cloneContents());
@@ -3931,7 +3961,7 @@
         formulas: result.formulas, markers: result.markers, emphasis: result.emphasis,
         status: result.error ? '此句翻译失败 · 点击段落“译”可翻译整段' : '',
       });
-    }, annotation ? NOTE_HOVER_OPEN_DELAY : 500);
+    }, retry ? 0 : annotation ? NOTE_HOVER_OPEN_DELAY : 500);
   }
 
   function installReaderSentenceHover(doc = frameDocument()) {
@@ -3952,10 +3982,6 @@
         return;
       }
       if (notePopoverHover.pinned) { clearReaderSentenceHover(doc); return; }
-      if (event.target?.closest?.('.reader-sentence-tooltip')) {
-        window.clearTimeout(readerSentenceState.closeTimer);
-        return;
-      }
       const noteTrigger = event.target?.closest?.('.annotation-note-trigger');
       if (noteTrigger) { scheduleNoteHoverOpen(noteTrigger); return; }
       let noteAnnotation = null;
@@ -3963,7 +3989,7 @@
         let mark = event.target?.closest?.(':is(mark, mrow)[data-annotation-id]');
         while (mark) {
           const annotation = state.annotations.find((item) => item.id === mark.dataset.annotationId);
-          if (annotation && !isAIAnnotation(annotation) && hasAnnotationNote(annotation)) {
+          if (hasAnnotationHoverDetails(annotation)) {
             noteAnnotation = annotation;
             break;
           }
@@ -3972,7 +3998,7 @@
       }
       cancelNoteHoverOpen();
       scheduleNoteHoverClose();
-      if (!readerHoverTranslationEnabled() && !noteAnnotation) { clearReaderSentenceHover(doc); return; }
+      if (state.health?.readonly) { clearReaderSentenceHover(doc); return; }
       if (isAnnotationInteraction(event.target) || event.target?.closest?.('button,input,textarea,select,summary') || doc.getSelection()?.toString().trim()) {
         clearReaderSentenceHover(doc);
         return;
@@ -3995,6 +4021,7 @@
       if (!notePopoverHover.pinned) closeInlineAnnotation(doc);
     };
     doc.addEventListener('pointermove', schedule, { passive: true });
+    doc.addEventListener('pointerup', schedule, { passive: true });
     doc.addEventListener('mouseleave', () => {
       if (doc !== frameDocument()) return;
       setReaderSentenceHover(null);
@@ -4002,12 +4029,13 @@
       scheduleNoteHoverClose();
     }, { passive: true });
     doc.addEventListener('pointerdown', (event) => {
-      if (doc !== frameDocument() || isAnnotationInteraction(event.target) || event.target?.closest?.('.reader-sentence-tooltip')) return;
+      if (doc !== frameDocument() || isAnnotationInteraction(event.target)) return;
       dismissHover();
+      if (notePopoverHover.pinned) closeInlineAnnotation(doc, { immediate: true });
     }, { passive: true, capture: true });
     doc.addEventListener('selectionchange', () => { if (doc === frameDocument() && doc.getSelection()?.toString().trim()) dismissHover(); });
     doc.addEventListener('scroll', (event) => {
-      if (doc !== frameDocument() || event.target?.closest?.('.reader-sentence-tooltip,.annotation-note-popover')) return;
+      if (doc !== frameDocument() || event.target?.closest?.('.annotation-note-popover')) return;
       if (readerDocumentState(doc).translationLayoutPending) positionReaderSentenceTooltip(doc);
       else dismissHover();
     }, { passive: true, capture: true });
@@ -4016,7 +4044,9 @@
       dismissHover();
       if (!event.defaultPrevented) closeInlineAnnotation(doc);
     });
-    doc.defaultView?.addEventListener('blur', () => { if (doc === frameDocument()) dismissHover(); }, { passive: true });
+    doc.defaultView?.addEventListener('blur', () => {
+      if (doc === frameDocument() && !readerSentenceState.toolbarPointerInside && !$('#selection-popover')?.contains(document.activeElement)) dismissHover();
+    }, { passive: true });
   }
   function readerURLIdentity(value) {
     try {
@@ -4826,7 +4856,7 @@
   function guardFrameSelection(event) {
     const doc = event.currentTarget;
     const element = selectionElement(doc, event);
-    if (element?.closest?.('input, textarea, [contenteditable="true"], .reader-sentence-tooltip')) return;
+    if (element?.closest?.('input, textarea, [contenteditable="true"]')) return;
     if (!isPaperSelectionSurface(element)) { event.preventDefault(); return; }
     if (event.type === 'copy' && event.clipboardData) {
       const selection = doc.getSelection();
@@ -4839,6 +4869,17 @@
   }
 
   function blockForNode(node) { return node?.nodeType === Node.ELEMENT_NODE ? node.closest('[data-block-id]') : node?.parentElement?.closest('[data-block-id]'); }
+  function canonicalSelectionOffsets(block, range, doc = frameDocument()) {
+    let start = textOffset(block, range.startContainer, range.startOffset, doc);
+    let end = textOffset(block, range.endContainer, range.endOffset, doc);
+    const text = canonicalBlockText(block, doc);
+    if (Number.isFinite(start) && Number.isFinite(end)) {
+      const selected = text.slice(start, end);
+      start += selected.length - selected.trimStart().length;
+      end -= selected.length - selected.trimEnd().length;
+    }
+    return { start, end, text };
+  }
   let selectionTranslationTimer = null;
   let selectionTranslationToken = 0;
   let selectionTranslationKey = '';
@@ -4846,6 +4887,10 @@
   let selectionTranslationRecord = null;
 
   function clearSelectionPopover({ clearState = false, immediate = false } = {}) {
+    if (state.selection?.origin === 'sentence-hover') {
+      clearReaderSentenceHover(readerSentenceState.doc || frameDocument(), { clearPopover: false });
+      clearState = true;
+    }
     if (!selectionTranslationRecord?.keepForVocabulary) window.clearTimeout(selectionTranslationRecord?.timer ?? selectionTranslationTimer);
     selectionTranslationTimer = null;
     if (!selectionTranslationRecord?.keepForVocabulary) {
@@ -4861,8 +4906,12 @@
     const resetResult = () => {
       if (!result) return;
       result.replaceChildren();
+      result.hidden = false;
       delete result.dataset.state;
       result.removeAttribute('aria-busy');
+      const note = popover?.querySelector('.selection-hover-note');
+      if (note) note.hidden = true;
+      if (popover) popover.style.maxHeight = '';
     };
     if (popover) closeTransient(popover, { immediate, onFinish: resetResult });
     else resetResult();
@@ -4877,16 +4926,53 @@
     return [state.activeJob?.job_id || '', selection.surface || 'paper', selection.block_id || '', selection.source_block_id || '', selection.start ?? '', selection.end ?? '', hashText(selection.quote)].join(':');
   }
 
+  function activeSelectionActionTarget() {
+    const selection = state.selection;
+    const popover = $('#selection-popover');
+    const doc = frameDocument();
+    if (!selection?.quote || !doc || !popover || popover.hidden || popover.classList.contains('is-closing') || !$('#reader-view')?.classList.contains('active-view')) return null;
+    if (selection.job_id !== state.activeJob?.job_id || selection.render_generation !== activeChatSourceGeneration()) return null;
+    if (selection.origin === 'sentence-hover' && (readerSentenceState.doc !== doc || readerSentenceState.activePairId !== selection.pair_id || !readerSentenceState.activePair?.source?.isConnected)) return null;
+    return selection;
+  }
+
+  $('#selection-popover')?.addEventListener('pointerenter', () => {
+    if (state.selection?.origin !== 'sentence-hover') return;
+    readerSentenceState.toolbarPointerInside = true;
+    window.clearTimeout(readerSentenceState.closeTimer);
+  });
+  $('#selection-popover')?.addEventListener('pointerleave', () => {
+    if (state.selection?.origin !== 'sentence-hover') return;
+    readerSentenceState.toolbarPointerInside = false;
+    setReaderSentenceHover(null);
+  });
+  $('#selection-popover')?.addEventListener('focusin', () => window.clearTimeout(readerSentenceState.closeTimer));
+  $('#selection-popover')?.addEventListener('focusout', (event) => {
+    if (state.selection?.origin === 'sentence-hover' && !event.currentTarget.contains(event.relatedTarget)) setReaderSentenceHover(null);
+  });
+  $('#selection-popover')?.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') clearReaderSentenceHover();
+  });
+
   function positionSelectionPopover() {
     const frame = $('#html-preview');
     const wrap = $('.reader-frame-wrap');
     const popover = $('#selection-popover');
     const anchor = state.selection?.anchorRect;
     if (!frame || !wrap || !popover || popover.hidden || !anchor) return;
+    // Keep the clickable surface stationary while the pointer is over it, even
+    // when background paragraph translations change the sentence position.
+    if (state.selection.origin === 'sentence-hover' && readerSentenceState.toolbarPointerInside) return;
     const frameRect = frame.getBoundingClientRect();
     const wrapRect = wrap.getBoundingClientRect();
     const scaleX = frame.clientWidth ? frameRect.width / frame.clientWidth : 1;
     const scaleY = frame.clientHeight ? frameRect.height / frame.clientHeight : 1;
+    if (state.selection.origin === 'sentence-hover') {
+      const belowSpace = wrapRect.height - (frameRect.top - wrapRect.top + anchor.bottom * scaleY + 6) - 8;
+      const aboveSpace = frameRect.top - wrapRect.top + anchor.top * scaleY - 14;
+      const minimumHeight = Math.min(240, wrapRect.height - 16);
+      popover.style.maxHeight = `${Math.min(wrapRect.height - 16, Math.max(minimumHeight, belowSpace, aboveSpace))}px`;
+    }
     const popoverWidth = popover.offsetWidth || 320;
     const popoverHeight = popover.offsetHeight || 96;
     const anchorLeft = frameRect.left - wrapRect.left + anchor.left * scaleX;
@@ -4898,14 +4984,14 @@
     popover.style.top = `${Math.max(8, Math.min(maxTop, below <= maxTop ? below : above))}px`;
   }
 
-  function renderSelectionTranslation(status, { text = '', formulas = [], message = '' } = {}) {
+  function renderSelectionTranslation(status, { text = '', formulas = [], markers = [], emphasis = [], message = '' } = {}) {
     const result = $('#selection-translation-result');
     if (!result) return;
     result.replaceChildren();
     result.dataset.state = status;
     result.setAttribute('aria-busy', String(status === 'loading' || status === 'streaming'));
     if (status === 'ready' || status === 'streaming') {
-      const rendered = renderTranslationText(text, formulas, document);
+      const rendered = renderTranslationText(text, formulas, document, markers, emphasis);
       if (rendered) result.append(rendered); else result.textContent = text;
     } else if (status === 'error') {
       const label = document.createElement('span');
@@ -4919,13 +5005,18 @@
     } else {
       const label = document.createElement('span');
       label.className = 'selection-translation-loading';
-      label.textContent = '正在翻译选中文本…';
+      label.textContent = state.selection?.origin === 'sentence-hover' ? '正在翻译当前句…' : '正在翻译选中文本…';
       result.append(label);
     }
     window.requestAnimationFrame(positionSelectionPopover);
   }
 
   function beginSelectionTranslation(selection, { immediate = false } = {}) {
+    if (selection?.origin === 'sentence-hover') {
+      const pair = readerSentenceState.activePair;
+      if (pair && pair.id === selection.pair_id) setReaderSentenceHover(pair, readerSentenceState.annotation, { retry: true });
+      return;
+    }
     const key = selectionRequestKey(selection);
     if (!key) return;
     if (!selectionTranslationRecord?.keepForVocabulary) {
@@ -5071,7 +5162,7 @@
     if (state.health?.readonly) return;
     const doc = frameDocument();
     if (!doc) return;
-    if (isAnnotationInteraction(event?.target) || event?.target?.closest?.('.reader-sentence-tooltip')) {
+    if (isAnnotationInteraction(event?.target)) {
       clearSelectionPopover({ clearState: true, immediate: true });
       return;
     }
@@ -5085,16 +5176,7 @@
     }
     const rects = [...range.getClientRects()].filter((item) => item.width || item.height);
     const rect = rects.at(-1) || range.getBoundingClientRect();
-    let start = block ? textOffset(block, range.startContainer, range.startOffset, doc) : null;
-    let end = block ? textOffset(block, range.endContainer, range.endOffset, doc) : null;
-    const canonicalText = block ? canonicalBlockText(block, doc) : '';
-    if (Number.isFinite(start) && Number.isFinite(end)) {
-      const selected = canonicalText.slice(start, end);
-      const leading = selected.length - selected.trimStart().length;
-      const trailing = selected.length - selected.trimEnd().length;
-      start += leading;
-      end -= trailing;
-    }
+    const { start, end, text: canonicalText } = canonicalSelectionOffsets(block, range, doc);
     const text = Number.isFinite(start) && Number.isFinite(end) ? canonicalText.slice(start, end) : '';
     if (!text) {
       clearSelectionPopover({ clearState: true });
@@ -5103,6 +5185,8 @@
     }
     const translation = block?.closest?.('.my-scholar-translation') || (block?.classList?.contains('my-scholar-translation') ? block : null);
     const nextSelection = {
+      origin: 'selection',
+      job_id: state.activeJob?.job_id,
       quote: text.slice(0, 10000),
       sentence: window.MyScholarVocabulary.sentenceContext(canonicalText, start, end),
       block_id: block?.dataset.blockId || null,
@@ -5122,6 +5206,10 @@
     renderSelectedContext();
     const popover = $('#selection-popover');
     clearReaderSentenceHover(doc);
+    const note = popover?.querySelector('.selection-hover-note');
+    if (note) note.hidden = true;
+    const result = $('#selection-translation-result');
+    if (result) result.hidden = false;
     renderSelectionActions();
     openTransient(popover);
     if (selectionChanged) beginSelectionTranslation(nextSelection);
@@ -5602,7 +5690,7 @@
   function markReaderUserInteraction(mount, event) {
     if (!readerMountMatches(mount)) return;
     if (event?.type === 'keydown' && !['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar'].includes(event.key)) return;
-    if (['wheel', 'touchstart', 'keydown'].includes(event?.type) && !event.target?.closest?.('.reader-sentence-tooltip,.annotation-note-popover')) clearReaderSentenceHover(mount.frame.contentDocument);
+    if (['wheel', 'touchstart'].includes(event?.type) && !event.target?.closest?.('.annotation-note-popover')) clearReaderSentenceHover(mount.frame.contentDocument);
     cancelReadingLocationRestore(mount);
   }
 
@@ -6151,7 +6239,7 @@
     readerContinuations.set(doc, aliases);
     const pages = [...doc.querySelectorAll('.reader-content > .pdf-page')];
     let referenceDepth = 0;
-    const boundaries = pages.map((page) => {
+    const blocks = pages.flatMap((page) => {
       const blocks = [...page.children].filter((node) => !node.matches('.page-number, .page-label, [data-render-mode="suppressed-margin"]'));
       return blocks.map((node) => {
         const text = canonicalBlockText(node, doc);
@@ -6163,13 +6251,20 @@
         let bbox = null;
         try { bbox = JSON.parse(node.dataset.bbox || 'null'); } catch (_) {}
         return { node, page: Number(node.dataset.page || page.dataset.page), bbox, text, tag: node.tagName.toLowerCase(),
+          media: !referenceDepth && node.matches('figure.pdf-figure:not([data-reader-toc-excluded]):not([data-translation-excluded])') && Boolean(node.querySelector('img')),
           excluded: Boolean(referenceDepth || !node.dataset.blockId || node.matches('.footnote, .paper-metadata, [data-reader-toc-excluded], [data-translation-excluded]')) };
       });
     });
-    for (let index = 1; index < boundaries.length; index += 1) {
-      const previous = boundaries[index - 1].at(-1);
-      const next = boundaries[index][0];
-      if (!previous || !next || !window.GuziParagraphContinuation.canJoin(previous, next)) continue;
+    let previous = null;
+    let media = [];
+    for (const next of blocks) {
+      if (next.media) {
+        media.push(next);
+        continue;
+      }
+      const joins = previous && window.GuziParagraphContinuation.canJoin(previous, next, { media });
+      media = [];
+      if (!joins) { previous = next; continue; }
       const root = aliases.get(previous.node.dataset.blockId)?.root || previous.node;
       if (!aliases.has(root.dataset.blockId)) {
         const segment = doc.createElement('span');
@@ -6190,6 +6285,7 @@
       aliases.set(next.node.dataset.blockId, { root, page: String(next.page), start, end: start + next.text.length });
       root.dataset.continuationPages = [...new Set([...aliases.values()].filter((source) => source.root === root).map((source) => source.page))].join(',');
       next.node.remove();
+      previous = next;
     }
   }
 
@@ -6308,14 +6404,6 @@
         ::highlight(${readerSentenceHighlightName}) {
           background-color:color-mix(in srgb,var(--accent,#d97706) 12%,transparent);
         }
-        .reader-sentence-tooltip { position:fixed; z-index:1100; width:min(460px,calc(100vw - 24px)); box-sizing:border-box; padding:12px 14px; overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; border:1px solid var(--line,#d5d9df); border-radius:10px; background:var(--paper,var(--reader-ui-paper,#fff)); color:var(--ink,var(--reader-ui-ink,#222)); box-shadow:0 8px 30px #0002; font:14px/1.65 system-ui,sans-serif; text-align:left; white-space:normal; overflow-wrap:anywhere; user-select:text; }
-        .reader-sentence-tooltip-label { display:block; margin-bottom:6px; color:var(--muted,var(--reader-ui-muted,#666)); font-size:11px; font-weight:600; }
-        .reader-sentence-tooltip-text { white-space:pre-wrap; }
-        .reader-sentence-tooltip-note:not([hidden]) + .reader-sentence-tooltip-translation:not([hidden]) { margin-top:12px; padding-top:10px; border-top:1px solid var(--line,#d5d9df); }
-        .reader-sentence-tooltip-note-label { color:var(--annotation-color,var(--muted,#666)); font-size:11px; font-weight:600; }
-        .reader-sentence-tooltip-note-body { margin-top:6px; }
-        .reader-sentence-tooltip { animation:reader-sentence-tooltip-in 160ms cubic-bezier(.22,1,.36,1) both; }
-        @keyframes reader-sentence-tooltip-in { from { opacity:0; translate:0 3px; } to { opacity:1; translate:0 0; } }
         .annotation-note-editor[contenteditable="true"],
         .annotation-note-editor[contenteditable="true"] * {
           -webkit-user-select:text!important;
@@ -6752,8 +6840,7 @@
         @media (prefers-reduced-motion:reduce) {
           .reader-content .my-scholar-media-resizable,
           .reader-content .my-scholar-media-resize-handle,
-          .annotation-note-popover,
-          .reader-sentence-tooltip { transition:none; animation:none; }
+          .annotation-note-popover { transition:none; animation:none; }
         }
         :root:not([data-translation-display="original"]) .reader-content :is(
           h1.paper-title[data-block-id],
@@ -6802,7 +6889,10 @@
     doc.addEventListener('selectstart', guardFrameSelection);
     doc.addEventListener('copy', guardFrameSelection);
     const delayedSelection = (event) => window.setTimeout(() => {
-      if (readerMountMatches(mount, doc)) showSelection(event);
+      if (!readerMountMatches(mount, doc)) return;
+      if (event.type === 'keyup' && (/^[0-9]$/u.test(event.key) || event.key === 'Escape' || event.key === 'Enter')) return;
+      if (event.type === 'keyup' && state.selection?.origin === 'sentence-hover' && !doc.getSelection()?.toString().trim()) return;
+      showSelection(event);
     }, 20);
     doc.addEventListener('mouseup', delayedSelection);
     doc.addEventListener('keyup', delayedSelection);
@@ -6814,11 +6904,12 @@
     ['wheel', 'touchstart', 'pointerdown'].forEach((eventName) => doc.defaultView?.addEventListener(eventName, (event) => markReaderUserInteraction(mount, event), { passive: true, capture: true }));
     doc.defaultView?.addEventListener('scroll', () => {
       if (!readerMountMatches(mount, doc)) return;
-      if (readerDocumentState(doc).translationLayoutPending) positionReaderSentenceTooltip(doc);
+      const translationLayoutPending = readerDocumentState(doc).translationLayoutPending;
+      if (translationLayoutPending) positionReaderSentenceTooltip(doc);
       else clearReaderSentenceHover(doc);
       closeImageContextMenu();
       if (doc.getSelection()?.toString().trim()) showSelection();
-      else clearSelectionPopover({ clearState: true });
+      else if (!translationLayoutPending || state.selection?.origin !== 'sentence-hover') clearSelectionPopover({ clearState: true });
       const popover = doc.querySelector('.annotation-note-popover');
       if (popover?.dataset.annotationId && notePopoverHover.pinned && !popover.classList.contains('is-closing')) {
         const originalAnchor = notePopoverHover.anchor;
@@ -7300,7 +7391,7 @@
     readerSentenceState.hoverPoint = { x: rect.left, y: rect.top };
     cancelNoteHoverClose();
     cancelNoteHoverOpen();
-    setReaderSentenceHover(pair, hasAnnotationNote(annotation) ? annotation : null);
+    setReaderSentenceHover(pair, hasAnnotationHoverDetails(annotation) ? annotation : null);
   }
   function scheduleNoteHoverClose() {
     if (notePopoverHover.pinned || notePopoverHover.closeTimer) return;
@@ -7679,7 +7770,8 @@
 
   async function saveAnnotation(kind, { withNote = false, action = null } = {}) {
     if (!state.activeJob || !state.selection) return;
-    const selection = { ...state.selection };
+    const selectionTarget = state.selection;
+    const selection = { ...selectionTarget };
     if (!selection.block_id || !Number.isFinite(selection.start) || !Number.isFinite(selection.end)) {
       clearSelectionPopover({ clearState: true });
       showToast('无法定位选区。请在同一正文段落内重新选择。', true);
@@ -7702,9 +7794,16 @@
       if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
       if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
       state.annotations = payload.annotations || [];
+      const currentTarget = state.selection;
+      const hoverPairId = currentTarget !== selectionTarget && currentTarget?.origin === 'sentence-hover' ? currentTarget.pair_id : '';
+      const hoverAnnotation = readerSentenceState.annotation;
       renderFrameAnnotations();
       renderAnnotations();
-      clearSelectionPopover({ clearState: true, immediate: true });
+      if (currentTarget === selectionTarget) clearSelectionPopover({ clearState: true, immediate: true });
+      else if (hoverPairId) {
+        const pair = readerSentenceState.pairs.find((item) => item.id === hoverPairId);
+        if (pair) setReaderSentenceHover(pair, hoverAnnotation);
+      }
       const saved = state.annotations.find((item) => item.id === payload.annotation?.id) || payload.annotation;
       if (saved && !annotationAnchor(frameDocument(), saved.id)) {
         showToast('标注已保存，但当前页面无法显示它；重新打开文献后可再次定位。', true);
@@ -7747,12 +7846,55 @@
   const builtinAnnotationActions = { highlight: '高亮', highlight_note: '高亮笔记', underline: '划线', underline_note: '划线随笔', copy: '复制', chat: '加入 Chat' };
   function normalizeAnnotationActions(value) {
     return {
+      show_shortcut_hints: value?.show_shortcut_hints !== false,
       hidden_builtin: Array.isArray(value?.hidden_builtin) ? value.hidden_builtin.filter((key) => key in builtinAnnotationActions) : [],
       custom: Array.isArray(value?.custom) ? value.custom.map((item) => ({ id: String(item.id || ''), label: String(item.label || '').slice(0, 40), kind: item.kind === 'underline' ? 'underline' : 'highlight', color: normalizeAnnotationColor(item.color), enabled: item.enabled !== false })).filter((item) => item.id && item.label) : [],
     };
   }
+  const selectionNumberKeys = '1234567890';
+  let selectionNumberSaveTarget = null;
+
+  function selectionNumberActions() {
+    return [
+      ...Object.keys(builtinAnnotationActions).map((builtin) => ({ builtin })),
+      ...state.annotationActions.custom.filter((action) => action.enabled && action.label).map((action) => ({ action })),
+    ].slice(0, selectionNumberKeys.length);
+  }
+
+  function handleSelectionNumberShortcut(event) {
+    if (event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229
+      || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || !/^[0-9]$/u.test(event.key)
+      || isEditableAppSurface(event.target) || $('dialog[open]') || !readerShortcutReady()) return false;
+    const target = activeSelectionActionTarget();
+    const entry = target && selectionNumberActions()[selectionNumberKeys.indexOf(event.key)];
+    if (!entry) return false;
+    event.preventDefault();
+    if (entry.builtin === 'copy' || entry.builtin === 'chat') {
+      $(`[data-builtin-action="${entry.builtin}"]`)?.click();
+      return true;
+    }
+    if (selectionNumberSaveTarget === target) return true;
+    selectionNumberSaveTarget = target;
+    const kind = entry.action?.kind || (entry.builtin.startsWith('underline') ? 'underline' : 'highlight');
+    void saveAnnotation(kind, entry.action ? { action: entry.action } : { withNote: entry.builtin.endsWith('_note') }).finally(() => {
+      if (selectionNumberSaveTarget === target) selectionNumberSaveTarget = null;
+    });
+    return true;
+  }
+
   function renderSelectionActions() {
-    $$('[data-builtin-action]').forEach((button) => { button.hidden = state.annotationActions.hidden_builtin.includes(button.dataset.builtinAction); });
+    const showHints = state.annotationActions.show_shortcut_hints !== false;
+    $('#selection-popover')?.classList.toggle('hide-shortcut-hints', !showHints);
+    const shortcutSettings = $('#selection-shortcut-settings');
+    if (shortcutSettings) shortcutSettings.hidden = !showHints;
+    $$('[data-builtin-action]').forEach((button) => {
+      const builtin = button.dataset.builtinAction;
+      button.hidden = state.annotationActions.hidden_builtin.includes(builtin);
+      const key = selectionNumberKeys[Object.keys(builtinAnnotationActions).indexOf(builtin)];
+      button.dataset.selectionShortcut = key;
+      button.setAttribute('aria-keyshortcuts', key);
+      button.title = `${builtinAnnotationActions[builtin]}${showHints ? `（${key}）` : ''}`;
+    });
     const vocabularyButton = $('#selection-add-vocabulary');
     if (vocabularyButton) {
       const source = state.selection?.surface !== 'translation';
@@ -7763,9 +7905,14 @@
     if (!container) return;
     const actions = state.annotationActions.custom.filter((item) => item.enabled && item.label);
     container.hidden = !actions.length;
-    container.innerHTML = actions.map((item) => `<button type="button" data-semantic-action="${escapeHTML(item.id)}" style="--semantic-color:${normalizeAnnotationColor(item.color)}"><span class="semantic-action-swatch" aria-hidden="true"></span>${escapeHTML(item.label)}</button>`).join('');
+    container.innerHTML = actions.map((item, index) => {
+      const key = selectionNumberKeys[index + Object.keys(builtinAnnotationActions).length];
+      const title = `${item.label}${showHints && key ? `（${key}）` : ''}`;
+      return `<button type="button" data-semantic-action="${escapeHTML(item.id)}"${key ? ` data-selection-shortcut="${key}" aria-keyshortcuts="${key}"` : ''} title="${escapeHTML(title)}" style="--semantic-color:${normalizeAnnotationColor(item.color)}"><span class="semantic-action-swatch" aria-hidden="true"></span><span class="selection-action-label">${escapeHTML(item.label)}</span></button>`;
+    }).join('');
   }
   function renderAnnotationActionSettings() {
+    $('#setting-selection-shortcut-hints').checked = state.annotationActions.show_shortcut_hints !== false;
     $('#setting-annotation-builtins').innerHTML = Object.entries(builtinAnnotationActions).map(([key, label]) => `<label class="settings-toggle"><span>${label}</span><input type="checkbox" data-annotation-builtin="${key}"${state.annotationActions.hidden_builtin.includes(key) ? '' : ' checked'}></label>`).join('');
     $('#setting-annotation-custom').innerHTML = state.annotationActions.custom.map((item) => `
       <div class="annotation-action-row" data-annotation-action-id="${escapeHTML(item.id)}">
@@ -7776,6 +7923,15 @@
         <button type="button" class="toolbar-icon-button annotation-action-remove" data-remove-annotation-action aria-label="删除语义标记" title="删除标记"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v5M14 11v5"></path></svg></button>
       </div>`).join('');
   }
+  $('#setting-selection-shortcut-hints')?.addEventListener('change', (event) => {
+    state.annotationActions.show_shortcut_hints = event.target.checked;
+    renderSelectionActions();
+  });
+  $('#selection-shortcut-settings')?.addEventListener('click', () => {
+    switchView('settings-view');
+    showSettingsSection('settings-shortcuts');
+    window.requestAnimationFrame(() => $('#setting-selection-shortcut-hints')?.focus());
+  });
   $('#add-annotation-action')?.addEventListener('click', () => {
     if (state.annotationActions.custom.length >= 32) { showToast('最多添加 32 个语义标记。', true); return; }
     state.annotationActions.custom.push({ id: `action-${crypto.randomUUID()}`, label: '新标记', kind: 'highlight', color: '#f59e0b', enabled: true });
@@ -8972,7 +9128,7 @@
     const label = $('#full-translate-label');
     if (label) label.textContent = scope === 'body' ? '正文翻译' : '全文翻译';
     const button = $('#full-translate-button');
-    if (button) button.title = `${scope === 'body' ? '翻译正文（不含附录）' : '翻译全文（含附录）'}；按住 Option 点击可重新翻译已有译文的段落`;
+    if (button) setReaderShortcutHint(button, 'full_translation', `${scope === 'body' ? '翻译正文（不含附录）' : '翻译全文（含附录）'}；按住 Alt/Option 点击可重新翻译已有译文的段落`);
     $$('#translation-scope-menu [data-translation-scope]').forEach((item) => item.setAttribute('aria-checked', String(item.dataset.translationScope === scope)));
     syncTranslationVisibilityButton();
   }
@@ -12586,6 +12742,8 @@
     'shortcut-underline': 'underline',
     'shortcut-highlight-note': 'highlight_note',
     'shortcut-underline-note': 'underline_note',
+    'shortcut-full-translation': 'full_translation',
+    'shortcut-reflow': 'reflow',
   });
   const shortcutModifierTokens = new Set(['cmd', 'command', 'meta', 'ctrl', 'control', 'option', 'alt', 'shift']);
   const shortcutKeyAliases = Object.freeze({
@@ -12622,11 +12780,17 @@
   }
 
   function capturedShortcut(event) {
+    if (event.isComposing || event.keyCode === 229 || event.repeat) return '';
     if (!event.metaKey && !event.ctrlKey) return '';
     const key = canonicalShortcutKey(event.key);
     if (!key || shortcutModifierTokens.has(key.toLowerCase())) return '';
     return [event.metaKey && 'Cmd', event.ctrlKey && 'Ctrl', event.altKey && 'Option', event.shiftKey && 'Shift', key].filter(Boolean).join('+');
   }
+
+  const reservedShortcuts = new Set([
+    'Cmd+A', 'Ctrl+A', 'Cmd+F', 'Ctrl+F', 'Cmd+I', 'Cmd+Shift+F',
+    'Cmd+Backspace', 'Cmd+Delete', 'Cmd+W',
+  ]);
 
   function shortcutInputs() {
     return Object.entries(shortcutInputMap).map(([id, setting]) => ({ input: document.getElementById(id), setting })).filter(({ input }) => input);
@@ -12638,11 +12802,13 @@
     records.forEach(({ value }) => { if (value) counts.set(value, (counts.get(value) || 0) + 1); });
     let firstMessage = '';
     records.forEach((record) => {
-      const invalid = !record.value || counts.get(record.value) > 1;
+      const reserved = reservedShortcuts.has(record.value);
+      const invalid = !record.value || counts.get(record.value) > 1 || reserved;
       record.input.classList.toggle('is-invalid', invalid);
       record.input.setAttribute('aria-invalid', String(invalid));
       if (!record.value && !firstMessage) firstMessage = '快捷键需要包含 Command 或 Control，再加一个按键。';
       else if (counts.get(record.value) > 1 && !firstMessage) firstMessage = `“${record.value}”已被其他操作使用。`;
+      else if (reserved && !firstMessage) firstMessage = `“${record.value}”是搜索、文献库或标签页的保留快捷键。`;
     });
     const status = $('#shortcut-status');
     if (status && (announce || firstMessage)) {
@@ -12669,6 +12835,7 @@
     });
     input.addEventListener('paste', (event) => event.preventDefault());
     input.addEventListener('keydown', (event) => {
+      if (event.isComposing || event.keyCode === 229 || event.repeat) return;
       if (event.key === 'Tab') return;
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -13288,12 +13455,8 @@
       const shortcuts = settings.shortcuts || {};
       const normalizedShortcuts = Object.fromEntries(Object.entries({ ...state.shortcuts, ...shortcuts }).map(([key, value]) => [key, normalizeShortcut(value) || state.shortcuts[key]]));
       state.shortcuts = { ...state.shortcuts, ...normalizedShortcuts };
-      $('#shortcut-library').value = state.shortcuts.open_library;
-      $('#shortcut-settings').value = state.shortcuts.open_settings;
-      $('#shortcut-highlight').value = state.shortcuts.highlight;
-      $('#shortcut-underline').value = state.shortcuts.underline;
-      $('#shortcut-highlight-note').value = state.shortcuts.highlight_note;
-      $('#shortcut-underline-note').value = state.shortcuts.underline_note;
+      shortcutInputs().forEach(({ input, setting }) => { input.value = state.shortcuts[setting]; });
+      syncReaderShortcutHints();
       state.highlightColor = normalizeHexColor(settings.highlight_color, state.highlightColor);
       state.annotationColors = {
         highlight: normalizeAnnotationColor(settings.annotation_colors?.highlight),
@@ -13391,6 +13554,7 @@
           settingsLoadedAt = Date.now();
           state.appearance = normalizeAppearance(response?.settings?.appearance || submitted.appearance, submitted.appearance);
           state.shortcuts = { ...state.shortcuts, ...(response?.settings?.shortcuts || submitted.shortcuts) };
+          syncReaderShortcutHints();
           state.metadataAutoRetrieve = (response?.settings?.metadata || submitted.metadata).auto_retrieve !== false;
           renderAISettings(response?.settings?.ai || submitted.ai);
           state.annotationActions = normalizeAnnotationActions(response?.settings?.annotation_actions || submitted.annotation_actions);
@@ -14158,8 +14322,40 @@
     if (!state.selection) { showToast('请先在正文或译文中选择一段文字。', true); return; }
     saveAnnotation(action, { withNote });
   }
+  function setReaderShortcutHint(button, setting, label) {
+    const shortcut = normalizeShortcut(state.shortcuts[setting]);
+    const hint = `${label}（${shortcut}）`;
+    button.title = hint;
+    button.setAttribute('aria-label', hint);
+    button.setAttribute('aria-keyshortcuts', shortcut.replace(/Cmd/gu, 'Meta').replace(/Option/gu, 'Alt'));
+  }
+  function syncReaderShortcutHints() {
+    syncTranslationScopeControls();
+    const button = $('#reflow-button');
+    if (button) setReaderShortcutHint(button, 'reflow', 'AI 重排');
+  }
+  function readerShortcutReady() {
+    return Boolean($('#reader-view')?.classList.contains('active-view') && state.activeJob?.status === 'completed'
+      && readerMount?.ready && readerMount.jobId === state.activeJob.job_id && frameDocument() && !state.health?.readonly);
+  }
   function handleApplicationShortcut(event) {
-    if ($('#onboarding-dialog')?.open || event.defaultPrevented || event.repeat || isEditableAppSurface(event.target)) return false;
+    if (event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229
+      || $('dialog[open]') || event.target?.ownerDocument?.querySelector('dialog[open]')
+      || isEditableAppSurface(event.target) || event.target?.isContentEditable
+      || event.target?.closest?.('[contenteditable]:not([contenteditable="false"]), [role="textbox"]')) return false;
+    if (handleSelectionNumberShortcut(event)) return true;
+    if (shortcutMatches(event, state.shortcuts.full_translation)) {
+      if (!readerShortcutReady()) return false;
+      event.preventDefault();
+      if (!state.translationRuns.get(state.activeJob.job_id)?.running) void runFullTranslation();
+      return true;
+    }
+    if (shortcutMatches(event, state.shortcuts.reflow)) {
+      if (!readerShortcutReady()) return false;
+      event.preventDefault();
+      if (!reflowPreflightInFlight && !reflowRunIsActive(activeReflowRun())) void startReflow();
+      return true;
+    }
     if (shortcutMatches(event, state.shortcuts.highlight)) { event.preventDefault(); selectionShortcut('highlight'); return true; }
     if (shortcutMatches(event, state.shortcuts.underline)) { event.preventDefault(); selectionShortcut('underline'); return true; }
     if (shortcutMatches(event, state.shortcuts.highlight_note)) { event.preventDefault(); selectionShortcut('highlight', true); return true; }
@@ -14169,6 +14365,7 @@
     return false;
   }
   document.addEventListener('keydown', handleApplicationShortcut);
+  syncReaderShortcutHints();
 
   // Mobile shell: the sidebar and the details panel are overlays that must be
   // dismissible, and the app should be installable to the home screen.
