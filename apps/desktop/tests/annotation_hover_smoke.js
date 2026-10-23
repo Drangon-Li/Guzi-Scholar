@@ -81,6 +81,8 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
       await locator.scrollIntoViewIfNeeded();
       const position = await locator.evaluate((node, needle) => {
         const doc = node.ownerDocument;
+        const iframe = doc.defaultView.frameElement;
+        const iframeRect = iframe.getBoundingClientRect();
         const walker = doc.createTreeWalker(node, NodeFilter.SHOW_TEXT);
         let text;
         while ((text = walker.nextNode())) {
@@ -93,14 +95,16 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
             if (!rect) continue;
             const x = rect.left + rect.width / 2; const y = rect.top + rect.height / 2;
             const hit = doc.elementFromPoint(x, y);
-            if (node.contains(hit)) return { x, y };
+            const hostX = iframeRect.left + iframe.clientLeft + x;
+            const hostY = iframeRect.top + iframe.clientTop + y;
+            // A host toolbar can cover text without affecting the iframe's hit test.
+            if (node.contains(hit) && iframe.ownerDocument.elementFromPoint(hostX, hostY) === iframe) return { x: hostX, y: hostY };
           }
         }
         return null;
       }, needle);
       assert(position, 'Fixture text must be visible');
-      const iframe = await page.locator('#html-preview').boundingBox();
-      return { x: iframe.x + position.x, y: iframe.y + position.y };
+      return position;
     }
     async function hover(locator, needle = '') {
       const point = await textPoint(locator, needle);
