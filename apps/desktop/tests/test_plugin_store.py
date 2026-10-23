@@ -26,11 +26,12 @@ def manifest(version="1.0.0", permissions=None, plugin_id="example.reader"):
 
 def package(value=None, extra=None, prefix=""):
     output = io.BytesIO()
+    # Reinstalling the same fixture version must produce the same package hash.
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(prefix + "manifest.json", json.dumps(value or manifest()))
-        archive.writestr(prefix + "index.html", "<!doctype html><h1>Plugin</h1>")
+        archive.writestr(zipfile.ZipInfo(prefix + "manifest.json", (1980, 1, 1, 0, 0, 0)), json.dumps(value or manifest()), compress_type=zipfile.ZIP_DEFLATED)
+        archive.writestr(zipfile.ZipInfo(prefix + "index.html", (1980, 1, 1, 0, 0, 0)), "<!doctype html><h1>Plugin</h1>", compress_type=zipfile.ZIP_DEFLATED)
         for name, content in (extra or {}).items():
-            archive.writestr(name, content)
+            archive.writestr(zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0)), content, compress_type=zipfile.ZIP_DEFLATED)
     return output.getvalue()
 
 

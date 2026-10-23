@@ -3,10 +3,10 @@
   "platform": "darwin",
   "arch": "arm64",
   "channel": "internal",
-  "version": "0.6.0",
-  "download_url": "https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.6.0/Guzi-Scholar-0.6.0-arm64-internal.dmg",
-  "sha256": "d2c121d405eb0d15bac70ff75bcc39a534affe218c37748dcd7a3bd26835d51d",
-  "notes": "Guzi Scholar 0.6.0：本地 MCP 接口、插件市场、可启停生词本与独立草稿预览；插件须通过宿主安全检查后安装；修复文章对话引用传递。macOS Apple Silicon，ad-hoc 签名，未公证。",
-  "published_at": "2026-10-23T10:37:50Z",
+  "version": "0.6.1",
+  "download_url": "https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.6.1/Guzi-Scholar-0.6.1-arm64-internal.dmg",
+  "sha256": "cc6044845c2497b32bdccd0bd1c3c39f9e8825791a829169ab45451654501458",
+  "notes": "Guzi Scholar 0.6.1：减少全文检索重复索引与插件下载期间的管理等待；修复后台翻译回填、状态保存、文件夹修改及本地服务启动和响应中断问题。macOS Apple Silicon，ad-hoc 签名，未公证。",
+  "published_at": "2026-10-23T18:20:06Z",
   "minimum_system_version": "12.0"
 }

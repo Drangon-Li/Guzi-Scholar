@@ -351,6 +351,12 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Use an isola
     assert.equal(await page.locator('#html-preview').getAttribute('src'), readerSourceBeforePreview);
     assert.equal(await reader.locator('body').getAttribute('data-preview-keepalive'), 'retained', 'Returning from preview must preserve the original reader document');
     assert.equal(await reader.locator('body').evaluate((node) => node.ownerDocument.getSelection().toString()), readerSelectionBeforePreview, 'User preview navigation must preserve the verified article selection');
+    await page.waitForFunction((jobId) => {
+      const editor = document.querySelector('#notes-editor');
+      return editor?.dataset.jobId === jobId
+        && editor.contentEditable === 'true'
+        && editor.getAttribute('aria-busy') === 'false';
+    }, String(sourceJob.job_id));
     assert.equal(await page.locator('#notes-editor').innerText(), notesBeforePreview, 'User preview navigation must preserve article notes');
     await call('stop_plugin_preview', { pluginId: readerPreviewId, previewId: readerPreview.previewId });
     await page.locator(`iframe[data-plugin-id="${readerPreviewId}"]`).waitFor({ state: 'detached' });
