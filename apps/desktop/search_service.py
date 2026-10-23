@@ -83,10 +83,10 @@ class SearchService:
             raise
 
     @staticmethod
-    def _fingerprint(job_dir, item):
+    def _fingerprint(job_dir, metadata):
         active = _active_conversion_root(job_dir)
-        paths = [job_dir / 'notes.md', job_dir / 'annotations.json', job_dir / 'job.json', active / 'document.json']
-        values = [json.dumps(item, sort_keys=True, ensure_ascii=False), str(active)]
+        paths = [job_dir / 'notes.md', job_dir / 'annotations.json', active / 'document.json']
+        values = [metadata, str(active)]
         for path in paths:
             try:
                 stat = path.stat()
@@ -107,12 +107,13 @@ class SearchService:
                 continue
             active_ids.add(job_id)
             job_dir = Path(record['job_dir'])
-            fingerprint = self._fingerprint(job_dir, item)
-            if known.get(job_id) == fingerprint:
-                continue
             fields = item.get('metadata', {}).get('fields', {})
             metadata = ' '.join(str(value) if not isinstance(value, list) else ' '.join(map(str, value)) for value in fields.values())
-            rows = [('metadata', 'metadata', {}, ' '.join([str(record.get('source_filename', '')), str(item.get('alias', '')), metadata]))]
+            metadata = ' '.join([str(record.get('source_filename', '')), str(item.get('alias', '')), metadata])
+            fingerprint = self._fingerprint(job_dir, metadata)
+            if known.get(job_id) == fingerprint:
+                continue
+            rows = [('metadata', 'metadata', {}, metadata)]
             notes = job_dir / 'notes.md'
             if notes.is_file():
                 rows.append(('notes', 'notes', {}, notes.read_text(encoding='utf-8')))

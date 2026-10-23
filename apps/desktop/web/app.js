@@ -9074,14 +9074,19 @@
 
   // One paragraph of a run. The run works from its own snapshot of the source,
   // so the request goes out whether or not the document is still mounted; the
-  // result stays with its original live document, or in the cache after closing.
+  // result stays with its document, including a matching reader reopened later.
   async function translateSnapshot(snapshot, run, { refresh = false } = {}) {
     const { blockId, isTitle, source } = snapshot;
     if (!blockId || !source?.text) return false;
     const role = isTitle ? 'title' : '';
     const mountedDoc = () => {
       const { mount, document: originalDocument } = run;
-      return readerMountIsCurrent(mount) && mount.frame.contentDocument === originalDocument ? originalDocument : null;
+      if (readerMountIsCurrent(mount) && mount.frame.contentDocument === originalDocument) return originalDocument;
+      const reopenedMount = readerMounts.get(run.jobId);
+      if (!reopenedMount?.loaded || reopenedMount.generation !== run.generation) return null;
+      const doc = reopenedMount.frame.contentDocument;
+      const block = translationTarget(blockId, doc);
+      return block && translationSourceHash(paragraphSource(block)) === translationSourceHash(source) ? doc : null;
     };
     const profileId = translationProfileId();
     {
@@ -9200,7 +9205,7 @@
     if (!frameDocument()) return;
     // Keep DOM locals outside the async run so a queued task can release a closed paper.
     const { total, snapshots } = fullTranslationSnapshot(frameDocument(), scope, refresh);
-    const run = { jobId, mount: readerMount, document: frameDocument(), title: documentTitleFor(jobId), running: true, stop: false, phase: 'pending', wake: null, done: total - snapshots.length, total, failed: 0, detail: '', abortController: new AbortController() };
+    const run = { jobId, generation: readerMount.generation, mount: readerMount, document: frameDocument(), title: documentTitleFor(jobId), running: true, stop: false, phase: 'pending', wake: null, done: total - snapshots.length, total, failed: 0, detail: '', abortController: new AbortController() };
     state.translationRuns.set(jobId, run);
     syncTranslationControls();
     let nextIndex = 0;

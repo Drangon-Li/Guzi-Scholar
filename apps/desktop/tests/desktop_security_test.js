@@ -1,8 +1,11 @@
 'use strict';
 
 const assert = require('assert');
+const { EventEmitter } = require('events');
 const fs = require('fs');
+const http = require('http');
 const path = require('path');
+const vm = require('vm');
 const { hasTrustedOrigin } = require('../electron/url-security.cjs');
 
 const serverURL = 'http://127.0.0.1:8766/';
@@ -37,4 +40,76 @@ assert.match(preloadSource, /state: Object\.freeze[\s\S]*my-scholar:state-load[\
 const webSource = fs.readFileSync(path.join(__dirname, '..', 'web', 'app.js'), 'utf8');
 assert.match(webSource, /window\.__myScholarFlushBeforeClose[\s\S]*flushPendingArticleNotes[\s\S]*flushPendingSettings[\s\S]*flushPendingChatSessions/u, 'the renderer must expose one awaited close flush for notes, settings, and Chat');
 
-console.log('desktop security tests passed');
+async function testBackendStartupChunks() {
+  const expectedURL = 'http://127.0.0.1:45321';
+  const source = mainSource.slice(mainSource.indexOf('async function startServer()'), mainSource.indexOf('\nfunction secureWindowOptions()'));
+  const cases = [
+    [`My Scholar running at ${expectedURL}\n`],
+    ['My Scholar running at http://127.0.0.1:45', '321\n'],
+    ['x'.repeat(16384), '\nstartup logs\nMy Scholar running ', 'at http://127.0.0.1:45', '321\r\nState directory: /test/state\n'],
+  ];
+  for (const chunks of cases) {
+    const child = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(), stderr: new EventEmitter(), exitCode: null, signalCode: null, pid: 12345,
+    });
+    const context = {
+      serverStopPromise: null, serverStartupPromise: null, pythonServer: null, serverURL: null,
+      storageConfiguration: () => ({ projectRoot: '/test/project', stateDir: '/test/state', currentPath: '/test/library' }),
+      packagedToolchainEnvironment: () => ({}),
+      app: { isPackaged: false, getPath: () => '/test/user' }, process: { env: {}, platform: process.platform }, path,
+      backendExecutable: () => ({ command: 'test-server', args: [] }), spawn: () => child,
+      setTimeout: () => 1, clearTimeout() {}, signalServer: () => assert.fail('Startup should not time out'), diagnosticLog() {},
+      migrationControlToken: 'test', apiAccessToken: 'test', pluginAdmissionToken: 'test', DEVELOPMENT_BUILD: false,
+    };
+    const started = vm.runInNewContext(`${source}\nstartServer`, context)();
+    for (const [index, chunk] of chunks.entries()) {
+      child.stdout.emit('data', Buffer.from(chunk));
+      if (index < chunks.length - 1) assert.strictEqual(context.serverURL, null, 'Startup must wait for the complete ready line');
+    }
+    assert.strictEqual(context.serverURL, expectedURL, 'Startup must preserve the complete port across stdout chunks');
+    assert.strictEqual(await started, expectedURL);
+  }
+}
+
+async function testBackendResponses() {
+  const backend = http.createServer((request, response) => {
+    if (request.url === '/truncated') {
+      response.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': 100 });
+      response.write('{');
+      setImmediate(() => response.destroy());
+      return;
+    }
+    response.writeHead(request.url === '/error' ? 409 : 200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise((resolve, reject) => {
+    backend.once('error', reject);
+    backend.listen(0, '127.0.0.1', resolve);
+  });
+  try {
+    const source = mainSource.slice(mainSource.indexOf('function backendRequestJSON('), mainSource.indexOf('\nfunction backendJSON('));
+    const requestJSON = vm.runInNewContext(`${source}\nbackendRequestJSON`, {
+      http, URL, Buffer,
+      serverURL: `http://127.0.0.1:${backend.address().port}`,
+      apiAccessToken: 'test-api-token', pluginAdmissionToken: 'test-admission-token',
+    });
+    assert.strictEqual((await requestJSON('/ok')).ok, true);
+    await assert.rejects(requestJSON('/error'), (error) => error.statusCode === 409);
+    let timer;
+    try {
+      await assert.rejects(Promise.race([
+        requestJSON('/truncated', { timeout: 50 }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('截断响应未完成拒绝。')), 500); }),
+      ]), /本地服务响应中断|aborted/u);
+    } finally {
+      clearTimeout(timer);
+    }
+  } finally {
+    await new Promise((resolve) => backend.close(resolve));
+  }
+}
+
+testBackendStartupChunks().then(testBackendResponses).then(() => console.log('desktop security tests passed')).catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

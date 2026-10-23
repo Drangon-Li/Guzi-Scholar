@@ -103,9 +103,13 @@ class CapabilitiesTest(ServiceFixture):
         self.assertEqual(self.call('search_library', query='attention')['index']['updated_documents'], 0)
         notes = self.call('get_notes', job_id=self.job_id)
         self.call('save_notes', job_id=self.job_id, markdown='newly-indexed-note', expected_revision=notes['revision'])
-        self.assertEqual(self.call('search_library', query='newly-indexed-note')['total'], 1)
+        result = self.call('search_library', query='newly-indexed-note')
+        self.assertEqual(result['total'], 1)
+        self.assertEqual(result['index']['updated_documents'], 1)
         self.call('update_document_metadata', job_id=self.job_id, fields={'title': 'UpdatedUniqueTitle'})
-        self.assertEqual(self.call('search_library', query='UpdatedUniqueTitle')['total'], 1)
+        result = self.call('search_library', query='UpdatedUniqueTitle')
+        self.assertEqual(result['total'], 1)
+        self.assertEqual(result['index']['updated_documents'], 1)
         self.library.trash_item(self.job_id)
         self.assertEqual(self.call('search_library', query='attention')['total'], 0)
         with self.assertRaises(CapabilityError):
@@ -128,11 +132,53 @@ class CapabilitiesTest(ServiceFixture):
         with self.assertRaises(CapabilityError):
             self.call('save_notes', job_id=self.job_id, markdown='missing revision')
 
+    def test_search_organization_changes_do_not_reindex_content(self):
+        self.call('search_library', query='attention')
+        folder = self.library.create_folder('Search filter')
+        original_read = Path.read_text
+        content_reads = []
+        def read(path, *args, **kwargs):
+            if path.name == 'document.json':
+                content_reads.append(path)
+            return original_read(path, *args, **kwargs)
+        with patch.object(Path, 'read_text', read):
+            self.library.update_item(self.job_id, {'values': {'reading_status': '阅读中', 'importance': 4}, 'progress': {'percent': 25}})
+            self.assertEqual(self.call('search_library', query='attention')['index']['updated_documents'], 0)
+            self.store.update(self.job_id, stage='后台状态更新')
+            self.assertEqual(self.call('search_library', query='attention')['index']['updated_documents'], 0)
+            self.call('set_document_folders', job_id=self.job_id, add=[folder['id']])
+            result = self.call('search_library', query='attention', folder_id=folder['id'])
+            self.assertEqual(result['total'], 1)
+            self.assertEqual(result['index']['updated_documents'], 0)
+            self.call('set_document_folders', job_id=self.job_id, remove=[folder['id']])
+            result = self.call('search_library', query='attention', folder_id=folder['id'])
+            self.assertEqual(result['total'], 0)
+            self.assertEqual(result['index']['updated_documents'], 0)
+            self.assertEqual(content_reads, [])
+
+    def test_search_index_tracks_alias_filename_and_content_updates(self):
+        self.call('search_library', query='attention')
+        self.library.update_item(self.job_id, {'alias': 'UniqueSearchAlias'})
+        result = self.call('search_library', query='UniqueSearchAlias')
+        self.assertEqual(result['total'], 1)
+        self.assertEqual(result['index']['updated_documents'], 1)
+        self.store.update(self.job_id, source_filename='RenamedSearchSource.pdf')
+        result = self.call('search_library', query='RenamedSearchSource')
+        self.assertEqual(result['total'], 1)
+        self.assertEqual(result['index']['updated_documents'], 1)
+        self.document(self.job_dir, 'Changed searchable body text', 'changed-block')
+        result = self.call('search_library', query='Changed')
+        self.assertEqual(result['total'], 1)
+        self.assertEqual(result['index']['updated_documents'], 1)
+        self.assertEqual(self.call('search_library', query='attention')['total'], 0)
+
     def test_annotations_reuse_validation_and_index(self):
         result = self.call('create_annotation', job_id=self.job_id, quote='Fresh annotation content', block_id='base-block')
         annotation_id = result['annotation']['id']
         self.call('update_annotation', job_id=self.job_id, annotation_id=annotation_id, note='NewAnnotationNote')
-        self.assertEqual(self.call('search_library', query='NewAnnotationNote')['total'], 1)
+        result = self.call('search_library', query='NewAnnotationNote')
+        self.assertEqual(result['total'], 1)
+        self.assertEqual(result['index']['updated_documents'], 1)
         self.call('delete_annotation', job_id=self.job_id, annotation_id=annotation_id)
         self.assertEqual(self.call('search_library', query='NewAnnotationNote')['total'], 0)
         with self.assertRaises(CapabilityError):

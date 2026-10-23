@@ -65,7 +65,8 @@
             persistentStateFailures.delete(key);
             localStorage.removeItem(key);
           } catch (error) {
-            persistentStateFailures.set(key, { error, operation });
+            // A newer queued operation supersedes this failed in-flight write.
+            if (!persistentStatePending.has(key)) persistentStateFailures.set(key, { error, operation });
           }
         }
       }
@@ -93,6 +94,7 @@
       return;
     }
     persistentStateValues.set(key, text);
+    persistentStateFailures.delete(key);
     persistentStatePending.set(key, { type: 'set', value: text });
     void drainPersistentStateWrites();
   }
@@ -101,6 +103,7 @@
     localStorage.removeItem(key);
     if (!desktopPersistentState) return;
     persistentStateValues.delete(key);
+    persistentStateFailures.delete(key);
     persistentStatePending.set(key, { type: 'remove' });
     void drainPersistentStateWrites();
   }

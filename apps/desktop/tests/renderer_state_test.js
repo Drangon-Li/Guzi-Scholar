@@ -4,9 +4,88 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const vm = require('vm');
 const { MAX_VALUE_BYTES, RendererStateStore } = require('../electron/renderer-state.cjs');
 
+function rendererCoreHarness() {
+  const writes = [];
+  const pending = [];
+  const stored = new Map();
+  const write = (key, operation) => {
+    writes.push(operation);
+    return new Promise((resolve, reject) => pending.push({
+      reject,
+      resolve() {
+        if (operation.type === 'remove') stored.delete(key);
+        else stored.set(key, operation.value);
+        resolve();
+      },
+    }));
+  };
+  const context = vm.createContext({
+    module: { exports: {} },
+    localStorage: { getItem: () => null, removeItem() {} },
+    myScholarDesktop: { state: {
+      loadAll: async () => ({}),
+      set: (key, value) => write(key, { type: 'set', value }),
+      remove: (key) => write(key, { type: 'remove' }),
+    } },
+  });
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../web/core.js'), 'utf8'), context);
+  return { core: context.module.exports, writes, pending, stored };
+}
+
+async function testRendererWriteOrdering() {
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const key = 'my-scholar-open-documents';
+  const scenarios = [
+    [{ type: 'set', value: 'old' }, { type: 'set', value: 'new' }],
+    [{ type: 'remove' }, { type: 'set', value: 'new' }],
+    [{ type: 'set', value: 'old' }, { type: 'remove' }],
+  ];
+  for (const [older, newer] of scenarios) {
+    for (const failBeforeUpdate of [true, false]) {
+      const { core, writes, pending, stored } = rendererCoreHarness();
+      await core.ready;
+      const apply = (operation) => operation.type === 'remove'
+        ? core.persistentStateRemove(key) : core.persistentStateSet(key, operation.value);
+      apply(older);
+      const first = pending.shift();
+      if (failBeforeUpdate) {
+        first.reject(new Error('temporary write failure'));
+        await tick();
+        apply(newer);
+      } else {
+        apply(newer);
+        first.reject(new Error('temporary write failure'));
+      }
+      await tick();
+      assert.strictEqual(pending.length, 1, 'the newer write must be in flight');
+      const flushed = core.flushPersistentStateWrites();
+      pending.shift().resolve();
+      await tick();
+      assert.deepStrictEqual(writes, [older, newer], 'flush must not replay a superseded failure');
+      await flushed;
+      const expected = newer.type === 'remove' ? null : newer.value;
+      assert.strictEqual(core.persistentStateGet(key), expected);
+      assert.strictEqual(stored.get(key) ?? null, expected, 'disk must match the latest accepted operation');
+    }
+  }
+
+  const { core, writes, pending, stored } = rendererCoreHarness();
+  await core.ready;
+  core.persistentStateSet(key, 'retry');
+  pending.shift().reject(new Error('temporary write failure'));
+  await tick();
+  const flushed = core.flushPersistentStateWrites();
+  pending.shift().resolve();
+  await flushed;
+  assert.strictEqual(writes.length, 2, 'an unsuperseded failure must still be retried');
+  assert.strictEqual(stored.get(key), 'retry');
+}
+
 async function main() {
+  await testRendererWriteOrdering();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'my-scholar-renderer-state-'));
   try {
   const directory = path.join(root, 'state', 'renderer');

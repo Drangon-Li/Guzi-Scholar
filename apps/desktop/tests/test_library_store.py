@@ -72,6 +72,23 @@ class LibraryStoreTest(unittest.TestCase):
         self.assertEqual(self.store.state["items"][job_id]["updated_at"], metadata_updated_at)
         self.assertEqual(self.store.state["items"][job_id]["job_updated_at"], "2025-01-01")
 
+    def test_rejected_folder_parent_update_does_not_change_name(self) -> None:
+        parent = self.store.create_folder("父目录")
+        child = self.store.create_folder("子目录", parent["id"])
+        for parent_id in (parent["id"], child["id"], "missing-folder", "system-all"):
+            with self.subTest(parent_id=parent_id):
+                with self.assertRaises(LibraryValidationError):
+                    self.store.update_folder(parent["id"], {"name": "不应保存的新名称", "parent_id": parent_id})
+                current = next(folder for folder in self.store.state["folders"] if folder["id"] == parent["id"])
+                self.assertEqual(current, parent)
+                reloaded = LibraryStore(Path(self.temp.name))
+                persisted = next(folder for folder in reloaded.state["folders"] if folder["id"] == parent["id"])
+                self.assertEqual(persisted, parent)
+        self.store.create_folder("其他成功操作")
+        reloaded = LibraryStore(Path(self.temp.name))
+        persisted = next(folder for folder in reloaded.state["folders"] if folder["id"] == parent["id"])
+        self.assertEqual(persisted, parent)
+
     def test_custom_properties_validate_values_and_progress(self) -> None:
         prop = self.store.create_property({"label": "实验阶段", "type": "select", "options": ["基线", "消融"]})
         column = next(column for column in self.store.display()["columns"] if column["id"] == prop["id"])

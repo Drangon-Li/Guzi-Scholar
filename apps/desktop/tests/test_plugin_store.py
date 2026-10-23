@@ -1,4 +1,5 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import json
@@ -7,6 +8,7 @@ from pathlib import Path
 import stat
 import sys
 import tempfile
+import threading
 import unittest
 import uuid
 from unittest.mock import patch
@@ -490,6 +492,95 @@ class PluginStoreTests(unittest.TestCase):
             download.assert_called_once_with(release_url)
         self.assertEqual(result["plugin"]["source"], {"kind": "github", "url": release_url})
         self.assertEqual(result["plugin"]["version"], "2.0.0")
+
+    def test_slow_remote_download_does_not_block_plugin_listing(self):
+        started = threading.Event()
+        release = threading.Event()
+        listed = threading.Event()
+        url = "https://github.com/example/plugin/archive/" + "a" * 40 + ".zip"
+        def download(_url):
+            started.set()
+            if not release.wait(5):
+                raise TimeoutError("test download was not released")
+            return package()
+        def list_plugins():
+            result = self.store.list_plugins()
+            listed.set()
+            return result
+        with patch.object(self.store, "_download", side_effect=download), ThreadPoolExecutor(max_workers=2) as pool:
+            installing = pool.submit(self.store.install_plugin, githubUrl=url)
+            try:
+                self.assertTrue(started.wait(2), "download must start")
+                listing = pool.submit(list_plugins)
+                self.assertTrue(listed.wait(1), "plugin listing must finish while the download is blocked")
+                self.assertEqual(listing.result()["plugins"], [])
+            finally:
+                release.set()
+            self.assertEqual(installing.result(timeout=5)["plugin"]["id"], "example.reader")
+
+    def test_concurrent_remote_installs_preserve_both_registry_entries(self):
+        urls = ["https://github.com/example/plugin/archive/" + digit * 40 + ".zip" for digit in ("a", "b")]
+        started = {url: threading.Event() for url in urls}
+        release = threading.Event()
+        packages = {url: package(manifest(plugin_id=plugin_id)) for url, plugin_id in zip(urls, ("example.first", "example.second"), strict=True)}
+        def download(url):
+            started[url].set()
+            if not release.wait(5):
+                raise TimeoutError("test download was not released")
+            return packages[url]
+        with patch.object(self.store, "_download", side_effect=download), ThreadPoolExecutor(max_workers=2) as pool:
+            installing = [pool.submit(self.store.install_plugin, githubUrl=url) for url in urls]
+            try:
+                for url in urls:
+                    self.assertTrue(started[url].wait(2), "both downloads must start before either finishes")
+            finally:
+                release.set()
+            self.assertEqual({future.result(timeout=5)["plugin"]["id"] for future in installing}, {"example.first", "example.second"})
+        self.assertEqual({row["id"] for row in self.store.list_plugins()["plugins"]}, {"example.first", "example.second"})
+        restored = PluginStore(self.base / "state", self.base / "library", self.base / "bundled")
+        self.assertEqual({row["id"] for row in restored.list_plugins()["plugins"]}, {"example.first", "example.second"})
+
+    def test_remote_download_failure_preserves_registry(self):
+        self.install(grants=["storage"])
+        before = self.store.registry_path.read_bytes()
+        url = "https://github.com/example/plugin/archive/" + "a" * 40 + ".zip"
+        with patch.object(self.store, "_download", side_effect=OSError("download failed")), self.assertRaisesRegex(OSError, "download failed"):
+            self.store.install_plugin(githubUrl=url)
+        self.assertEqual(self.store.registry_path.read_bytes(), before)
+
+    def test_remote_install_rechecks_grants_after_uninstall_and_reinstall(self):
+        previous = self.install(enabled=True, grants=["storage"])["plugin"]
+        started = threading.Event()
+        release = threading.Event()
+        replaced = threading.Event()
+        url = "https://github.com/example/plugin/archive/" + "a" * 40 + ".zip"
+        def download(_url):
+            started.set()
+            if not release.wait(5):
+                raise TimeoutError("test download was not released")
+            return package(manifest("2.0.0"))
+        def replace():
+            self.store.uninstall_plugin("example.reader")
+            result = self.install(grants=[])["plugin"]
+            replaced.set()
+            return result
+        with patch.object(self.store, "_download", side_effect=download), ThreadPoolExecutor(max_workers=2) as pool:
+            installing = pool.submit(self.store.install_plugin, githubUrl=url, enabled=True)
+            try:
+                self.assertTrue(started.wait(2), "download must start")
+                replacing = pool.submit(replace)
+                self.assertTrue(replaced.wait(1), "uninstall and reinstall must finish while the download is blocked")
+                current = replacing.result(timeout=5)
+                self.assertNotEqual(current["epoch"], previous["epoch"])
+            finally:
+                release.set()
+            with self.assertRaisesRegex(ValueError, "授权"):
+                installing.result(timeout=5)
+        installed = self.store.list_plugins()["plugins"][0]
+        self.assertEqual(installed["version"], "1.0.0")
+        self.assertEqual(installed["epoch"], current["epoch"])
+        self.assertEqual(installed["grants"], [])
+        self.assertFalse(installed["enabled"])
 
     def test_lifecycle_and_failed_commits_preserve_plugin_storage_and_library_bytes(self):
         self.install(enabled=True, grants=["storage"])

@@ -352,6 +352,8 @@ function backendRequestJSON(route, { method = 'GET', timeout = 10000, headers = 
     }, (response) => {
       const chunks = [];
       let size = 0;
+      response.once('aborted', () => reject(new Error('本地服务响应中断。')));
+      response.once('error', reject);
       response.on('data', (chunk) => {
         size += chunk.length;
         if (size > 32 * 1024 * 1024) {
@@ -766,6 +768,7 @@ async function startServer() {
     );
     pythonServer = child;
     let output = '';
+    let stdoutRemainder = '';
     let ready = false;
     const appendOutput = (text) => { output = `${output}${text}`.slice(-8192); };
     const timer = setTimeout(() => {
@@ -773,9 +776,14 @@ async function startServer() {
       reject(new Error(`本地服务启动超时。\n${output.slice(-2000)}`));
     }, 30000);
     const onData = (chunk) => {
+      if (ready) return;
       const text = chunk.toString();
-      if (!ready) appendOutput(text);
-      const match = text.match(/My Scholar running at (http:\/\/127\.0\.0\.1:\d+)/u);
+      appendOutput(text);
+      const pending = `${stdoutRemainder}${text}`;
+      const lastNewline = pending.lastIndexOf('\n');
+      stdoutRemainder = pending.slice(lastNewline + 1).slice(-8192);
+      if (lastNewline < 0) return;
+      const match = pending.slice(0, lastNewline).match(/My Scholar running at (http:\/\/127\.0\.0\.1:\d+)/u);
       if (match) {
         ready = true;
         clearTimeout(timer);
