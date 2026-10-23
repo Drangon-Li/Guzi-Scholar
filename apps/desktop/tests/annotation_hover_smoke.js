@@ -149,7 +149,8 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
 
     await hover(mark('first-note'));
     await tooltip().filter({ hasText: '第一条：研究方法笔记' }).filter({ hasText: '这是模拟句译结果' }).waitFor();
-    assert.equal(sentences().length, 1, 'A noted range also requests its sentence translation');
+    assert.equal(sentences().filter((body) => body.text === annotations[0].quote).length, 1,
+      `A noted range requests its sentence translation exactly once; sentence requests: ${JSON.stringify(sentences().map((body) => body.text))}`);
     assert(await tooltip().locator('button').count() > 0, 'Sentence hover exposes the complete selection toolbar');
     assert.equal(await frame.locator('body').evaluate((node) => node.ownerDocument.getSelection().toString()), '', 'Hover actions do not require native text selection');
     assert.equal(await popup().count(), 0);
