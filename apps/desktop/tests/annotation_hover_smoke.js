@@ -6,7 +6,7 @@ if (!baseURL) throw new Error('Run through run_ui_tests.js --only=annotation-hov
 const ids = ['cccccccccccccccc', 'bbbbbbbbbbbbbbbb'];
 const texts = {
   first: 'The first annotated sentence explains the research method and its evaluation protocol. The remaining unmarked sentence discusses limitations.',
-  second: 'The second annotated sentence describes an independent result with a different personal note.',
+  second: 'The second annotated sentence describes an independent result with a different personal note, including the separate evaluation dataset, the measurements collected across repeated trials, the practical interpretation of the observed differences, and the limitations that should guide any comparison with the research method discussed in the preceding paragraph.',
   empty: 'This highlighted sentence has no personal note and should still offer a translation.',
   nested: 'This outer annotation includes an overlapping inner highlight and a personal note.',
   delayed: 'This sentence waits for a delayed translation response while the pointer moves to a note.',
@@ -79,10 +79,12 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     }
     async function textPoint(locator, needle = '') {
       await locator.scrollIntoViewIfNeeded();
-      const position = await locator.evaluate((node, needle) => {
+      const result = await locator.evaluate((node, needle) => {
         const doc = node.ownerDocument;
         const iframe = doc.defaultView.frameElement;
         const iframeRect = iframe.getBoundingClientRect();
+        const describe = (element) => element ? { tag: element.tagName, id: element.id, className: element.getAttribute('class'), rect: element.getBoundingClientRect().toJSON() } : null;
+        const blockers = new Map();
         const walker = doc.createTreeWalker(node, NodeFilter.SHOW_TEXT);
         let text;
         while ((text = walker.nextNode())) {
@@ -97,14 +99,19 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
             const hit = doc.elementFromPoint(x, y);
             const hostX = iframeRect.left + iframe.clientLeft + x;
             const hostY = iframeRect.top + iframe.clientTop + y;
+            const hostHit = iframe.ownerDocument.elementFromPoint(hostX, hostY);
             // A host toolbar can cover text without affecting the iframe's hit test.
-            if (node.contains(hit) && iframe.ownerDocument.elementFromPoint(hostX, hostY) === iframe) return { x: hostX, y: hostY };
+            if (node.contains(hit) && hostHit === iframe) return { point: { x: hostX, y: hostY } };
+            if (!blockers.has(hostHit)) blockers.set(hostHit, { host: describe(hostHit), frame: describe(hit), count: 0, first: { x: hostX, y: hostY } });
+            const blocker = blockers.get(hostHit);
+            blocker.count += 1;
+            blocker.last = { x: hostX, y: hostY };
           }
         }
-        return null;
+        return { point: null, diagnostics: { target: describe(node), iframe: describe(iframe), popover: describe(iframe.ownerDocument.querySelector('#selection-popover:not([hidden])')), blockers: [...blockers.values()] } };
       }, needle);
-      assert(position, 'Fixture text must be visible');
-      return position;
+      assert(result.point, `Fixture text must be visible: ${JSON.stringify(result.diagnostics)}`);
+      return result.point;
     }
     async function hover(locator, needle = '') {
       const point = await textPoint(locator, needle);
