@@ -3,10 +3,10 @@
   "platform": "darwin",
   "arch": "arm64",
   "channel": "internal",
-  "version": "0.5.1",
-  "download_url": "https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.5.1/Guzi-Scholar-0.5.1-arm64-internal.dmg",
-  "sha256": "e0e83833c49e05e2ee3580692007162ffb306939f5624dbbfc531f46014495f0",
-  "notes": "Guzi Scholar 0.5.1：数字标注快捷键、统一悬停工具栏、可关闭的快捷键提示与自定义标记详情；修复跨图续段翻译。macOS Apple Silicon，ad-hoc 签名，未公证。",
-  "published_at": "2026-10-23T04:29:24Z",
+  "version": "0.6.0",
+  "download_url": "https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.6.0/Guzi-Scholar-0.6.0-arm64-internal.dmg",
+  "sha256": "d2c121d405eb0d15bac70ff75bcc39a534affe218c37748dcd7a3bd26835d51d",
+  "notes": "Guzi Scholar 0.6.0：本地 MCP 接口、插件市场、可启停生词本与独立草稿预览；插件须通过宿主安全检查后安装；修复文章对话引用传递。macOS Apple Silicon，ad-hoc 签名，未公证。",
+  "published_at": "2026-10-23T10:37:50Z",
   "minimum_system_version": "12.0"
 }
