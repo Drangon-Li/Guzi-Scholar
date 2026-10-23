@@ -50,6 +50,8 @@ jobs:
         run: |
           npm --prefix apps/desktop run test:graph
           npm --prefix apps/desktop run test:storage
+      - name: Run MCP and plugin checks
+        run: npm --prefix apps/desktop run test:mcp
 
   lint:
     name: Lint

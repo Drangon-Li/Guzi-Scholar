@@ -698,6 +698,12 @@ class PluginStore:
             raise ValueError("enabled 必须为布尔值。")
         if sha256 is not None and (not isinstance(sha256, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", sha256)):
             raise ValueError("sha256 必须为 64 位十六进制。")
+        if githubUrl is not None:
+            _github_url(githubUrl)
+            if "/releases/download/" in githubUrl and sha256 is None:
+                raise ValueError("安装 GitHub release 插件必须提供 sha256。")
+            data = self._download(githubUrl)
+            source = {"kind": "github", "url": githubUrl}
         with self.lock:
             if draftId is not None:
                 draft_root = self._draft(draftId)
@@ -712,12 +718,6 @@ class PluginStore:
                 except (binascii.Error, ValueError) as error:
                     raise ValueError("packageBase64 无效。") from error
                 source = {"kind": "local"}
-            else:
-                _github_url(githubUrl)
-                if "/releases/download/" in githubUrl and sha256 is None:
-                    raise ValueError("安装 GitHub release 插件必须提供 sha256。")
-                data = self._download(githubUrl)
-                source = {"kind": "github", "url": githubUrl}
             digest = hashlib.sha256(data).hexdigest()
             if sha256 is not None and digest != sha256.lower():
                 raise ValueError("插件包 sha256 与预期不符。")

@@ -573,7 +573,6 @@ class LibraryStore:
                 name = str(payload.get("name") or "").strip()
                 if not name or len(name) > 120:
                     raise LibraryValidationError("文件夹名称不能为空且不能超过 120 个字符。")
-                folder["name"] = name
             if "parent_id" in payload:
                 parent_id = payload.get("parent_id") or None
                 if parent_id == folder_id:
@@ -590,6 +589,9 @@ class LibraryStore:
                         visited.add(ancestor_id)
                         ancestor = self._find_folder(ancestor_id)
                         ancestor_id = str(ancestor.get("parent_id") or "")
+            if "name" in payload:
+                folder["name"] = name
+            if "parent_id" in payload:
                 folder["parent_id"] = parent_id
             self._save_locked()
             return copy.deepcopy(folder)
