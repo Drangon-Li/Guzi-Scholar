@@ -83,6 +83,7 @@ json.dump(output, sys.stdout, ensure_ascii=False)
       const request = route.request(); const pathname = new URL(request.url()).pathname;
       let payload = {};
       if (pathname === '/api/jobs') payload = { jobs: [job] };
+      else if (pathname === '/api/plugins' && route.request().method() === 'GET') payload = { plugins: [], drafts: [], previews: [] };
       else if (pathname === '/api/library') payload = { library };
       else if (pathname === '/api/health') payload = { ok: true, ai: { services: { translation: { enabled: false }, chat: { enabled: false } } } };
       else if (pathname === '/api/settings') payload = { metadata: { auto_retrieve: false }, ai: { translation: { enabled: false }, chat: { enabled: false } } };

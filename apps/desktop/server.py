@@ -58,12 +58,14 @@ from config import AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE, TRANSLATION_P
 from ai import test_connection as ai_test_connection, translation_target_language
 from ai import _safe_connection_error
 from translation_providers import language_code
-from content_store import MAX_NOTE_ASSET_BYTES, _active_conversion_root, _atomic_temp_path, _ensure_content_layout, _normalize_media_layout_items, _note_image_type, _read_media_layout, _store_note_asset, _sync_content_file, _translation_key, _translation_records, _translation_records_need_persist, _write_media_layout, _write_translation_records
+from content_store import MAX_NOTE_ASSET_BYTES, _active_conversion_root, _atomic_temp_path, _atomic_write_text, _ensure_content_layout, _normalize_media_layout_items, _note_image_type, _read_media_layout, _store_note_asset, _sync_content_file, _translation_key, _translation_records, _translation_records_need_persist, _write_media_layout, _write_translation_records
 # Re-exported for the tests, which reach these through the server module.
 from content_store import MAX_MEDIA_LAYOUT_ITEMS, _write_content_manifest, _write_english_snapshot  # noqa: F401
 from job_store import JOB_ID_RE, RENDER_GENERATION_RE, JobStore, ReflowCancelledError, ReflowConflictError, _read_json_file, set_artifact_migrator
 from library_store import LibraryStore, LibraryValidationError
 from vocabulary_store import VocabularyStore, VocabularyValidationError, source_snapshot
+from mcp_access import MCPAccess
+from scholar_service import CapabilityError, ScholarService, notes_snapshot, save_document_notes
 from vocabulary_ai import explain as explain_vocabulary
 from layout_pipeline import (
     LayoutPipelineError,
@@ -123,6 +125,7 @@ MIGRATION_REQUEST_CONDITION = threading.Condition(threading.RLock())
 MIGRATION_QUIESCING = False
 MIGRATION_ACTIVE_REQUESTS = 0
 MIGRATION_ACTIVE_MUTATIONS = 0
+CAPABILITY_INIT_LOCK = threading.RLock()
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
@@ -1403,7 +1406,7 @@ def _sync_ai_annotations(job_dir: Path, result: Dict[str, Any]) -> None:
         ai_positions[identity] = len(cleaned)
         cleaned.append(item)
     if changed:
-        path.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write_text(path, json.dumps(cleaned, ensure_ascii=False, indent=2))
 
 
 def _is_ai_annotation(item: Dict[str, Any]) -> bool:
@@ -1483,6 +1486,9 @@ set_artifact_migrator(_migrate_job_artifacts)
 STORE: Any = None
 LIBRARY: Any = None
 VOCABULARY: Any = None
+SCHOLAR_SERVICE: Any = None
+MCP_ACCESS: Any = None
+PLUGIN_STORE: Any = None
 ZOTERO_IMPORTS: Optional[ZoteroImports] = None
 ZOTERO_IMPORTS_LOCK = threading.RLock()
 
@@ -1618,6 +1624,55 @@ def _initialize_runtime_stores() -> None:
     LIBRARY.sync_jobs(STORE.list())
     for record in STORE.list():
         _apply_requested_folders(record)
+
+
+def _scholar_service() -> ScholarService:
+    with CAPABILITY_INIT_LOCK:
+        global SCHOLAR_SERVICE
+        if SCHOLAR_SERVICE is None or SCHOLAR_SERVICE.store is not STORE or SCHOLAR_SERVICE.library is not LIBRARY or SCHOLAR_SERVICE.search_index.path != LIBRARY_ROOT / "cache" / "search.sqlite3":
+            if SCHOLAR_SERVICE is not None:
+                SCHOLAR_SERVICE.search_index.close()
+            SCHOLAR_SERVICE = ScholarService(sys.modules[__name__])
+        return SCHOLAR_SERVICE
+
+
+def _mcp_access() -> MCPAccess:
+    with CAPABILITY_INIT_LOCK:
+        global MCP_ACCESS
+        if MCP_ACCESS is None or MCP_ACCESS.root != DATA_ROOT / "mcp":
+            MCP_ACCESS = MCPAccess(DATA_ROOT)
+        return MCP_ACCESS
+
+
+def _plugin_store() -> Any:
+    with CAPABILITY_INIT_LOCK:
+        global PLUGIN_STORE
+        if PLUGIN_STORE is None:
+            from plugin_store import PluginStore
+            PLUGIN_STORE = PluginStore(DATA_ROOT, LIBRARY_ROOT, PROJECT_ROOT / "web" / "plugins", template_root=PROJECT_ROOT / "plugin_templates" / "starter")
+        return PLUGIN_STORE
+
+
+def _capability_tools(scopes: Any = None) -> List[Dict[str, Any]]:
+    tools = [*_scholar_service().tools(), *_plugin_store().tools()]
+    return [tool for tool in tools if scopes is None or set(tool.get("requiresScopes", [tool.get("scope")])).issubset(scopes)]
+
+
+def _call_capability(name: str, arguments: Any, scopes: Any = None) -> Any:
+    service = _scholar_service()
+    if name in service.descriptors:
+        return service.call(name, arguments, scopes)
+    tools = {tool["name"]: tool for tool in _plugin_store().tools()}
+    if name not in tools:
+        raise CapabilityError("未知能力。", 404, "unknown_tool")
+    if scopes is not None and tools[name].get("scope", "plugins.manage") not in scopes:
+        raise CapabilityError("未授予插件管理权限。", 403, "scope_denied")
+    if runtime.READONLY_MODE:
+        raise CapabilityError("只读演示模式，暂不支持插件管理。", 403, "readonly")
+    if not isinstance(arguments, dict):
+        raise CapabilityError("arguments 必须是对象。")
+    _assert_annotation_style_writable()
+    return _plugin_store().call(name, arguments, allowed_permissions=scopes)
 
 
 def _migration_request_enter(*, mutation: bool = False) -> bool:
@@ -2448,6 +2503,34 @@ class ScholarHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
+        if path in {"/api/capabilities", "/api/mcp/status", "/api/plugins", "/api/plugins/runtime-status"}:
+            try:
+                if path == "/api/capabilities":
+                    self._send_json({"tools": _capability_tools(getattr(self, "_capability_scopes", None))})
+                elif path == "/api/mcp/status":
+                    self._send_json(_mcp_access().status())
+                elif path == "/api/plugins/runtime-status":
+                    self._send_json(_plugin_store().get_plugin_runtime_status(parse_qs(parsed.query).get("pluginId", [""])[0]))
+                else:
+                    self._send_json(_plugin_store().call("list_plugins", {}))
+            except (ValueError, OSError, CapabilityError) as exc:
+                self._send_error_json(str(exc), getattr(exc, "status", 400))
+            return
+        plugin_match = re.fullmatch(r"/plugins/([a-zA-Z0-9._-]+)/(.+)", path)
+        if plugin_match:
+            try:
+                body, content_type = _plugin_store().asset(*plugin_match.groups())
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            except (ValueError, OSError) as exc:
+                self._send_error_json(str(exc), HTTPStatus.FORBIDDEN if isinstance(exc, PermissionError) else HTTPStatus.NOT_FOUND)
+            return
         if path == "/api/vocabulary":
             self._vocabulary_request("list")
             return
@@ -2466,6 +2549,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
             shell_name = os.environ.get("MY_SCHOLAR_SHELL", "reference").strip().lower()
             index = WEB_ROOT / "classic" / "index.html" if shell_name in {"classic", "legacy"} else WEB_ROOT / "index.html"
             self._serve_file(index)
+            return
+        if path == "/plugin-sdk.js":
+            self._serve_file(WEB_ROOT / "plugin-sdk.js")
             return
         if path == "/favicon.ico":
             self._send_bytes(b"", "image/x-icon", HTTPStatus.NO_CONTENT)
@@ -2557,9 +2643,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     payload = _annotation_payload(_read_json_file(job_dir / "annotations.json", []))
                 self._send_json(payload)
             else:
-                notes_path = job_dir / "notes.md"
                 _ensure_content_layout(job_dir)
-                self._send_json({"markdown": notes_path.read_text(encoding="utf-8") if notes_path.is_file() else ""})
+                with _job_mutation_lock(match.group(1)):
+                    self._send_json(notes_snapshot(job_dir))
             return
         match = re.fullmatch(r"/api/jobs/([a-f0-9]{12,40})/translations", path)
         if match:
@@ -2683,6 +2769,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         parsed = urlsplit(self.path)
         path = unquote(parsed.path)
+        if path in {"/api/capabilities/call", "/api/plugins/call", "/api/plugins/runtime-event", "/api/plugins/admission", "/api/mcp/configure", "/api/mcp/rotate"} or re.fullmatch(r"/api/plugins/([a-zA-Z0-9._-]+)/invoke", path):
+            self._capability_request(path)
+            return
         if path == "/api/vocabulary":
             self._vocabulary_request("add")
             return
@@ -2819,6 +2908,37 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._library_item_action(match.group(1), match.group(2))
             return
         self._send_error_json("未找到接口。", HTTPStatus.NOT_FOUND)
+
+    def _capability_request(self, path: str) -> None:
+        try:
+            payload = self._read_json_body(max_bytes=32 * 1024 * 1024)
+            if path == "/api/mcp/configure":
+                self._send_json(_mcp_access().configure(payload.get("enabled"), payload.get("scopes", [])))
+            elif path == "/api/mcp/rotate":
+                self._send_json(_mcp_access().rotate())
+            elif path in {"/api/plugins/runtime-event", "/api/plugins/admission"}:
+                if getattr(self, "_capability_scopes", None) is not None:
+                    raise PermissionError("插件验收只能由桌面宿主执行。")
+                if path == "/api/plugins/admission":
+                    expected = os.environ.get("MY_SCHOLAR_PLUGIN_ADMISSION_TOKEN", "")
+                    supplied = str(self.headers.get("X-My-Scholar-Plugin-Admission") or "")
+                    if not expected or not hmac.compare_digest(supplied, expected):
+                        raise PermissionError("只有桌面宿主运行检查器可以签发插件验收。")
+                method = _plugin_store().report_plugin_runtime_event if path.endswith("runtime-event") else _plugin_store().complete_plugin_admission
+                self._send_json(method(**payload))
+            elif path.endswith("/invoke"):
+                plugin_id = path.split("/")[3]
+                result = _plugin_store().invoke(plugin_id, payload.get("name"), payload.get("arguments", {}), lambda name, args: _scholar_service().call(name, args, _plugin_store().granted_permissions(plugin_id, preview_session=payload.get("previewSession"), plugin_session=payload.get("pluginSession"))), preview_session=payload.get("previewSession"), plugin_session=payload.get("pluginSession"))
+                self._send_json({"result": result})
+            else:
+                name = payload.get("name")
+                if not isinstance(name, str):
+                    raise CapabilityError("name 必须是能力名称。")
+                if path == "/api/plugins/call" and name not in {tool["name"] for tool in _plugin_store().tools()}:
+                    raise CapabilityError("未知插件管理能力。", 404)
+                self._send_json({"result": _call_capability(name, payload.get("arguments", {}), getattr(self, "_capability_scopes", None))})
+        except (CapabilityError, PipelineError, ValueError, KeyError, TypeError, OSError) as exc:
+            self._send_error_json(str(exc), getattr(exc, "status", HTTPStatus.FORBIDDEN if isinstance(exc, PermissionError) else HTTPStatus.BAD_REQUEST), code=getattr(exc, "code", "capability_error"))
 
     def _test_ai_connection(self) -> None:
         try:
@@ -3491,7 +3611,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     item["suggestion_key"] = _highlight_signature(item["block_id"], item["quote"], item["category"])
                     item["suggestion_state"] = "suggested"
                 annotations.append(item)
-                (job_dir / "annotations.json").write_text(json.dumps(annotations, ensure_ascii=False, indent=2), encoding="utf-8")
+                _atomic_write_text(job_dir / "annotations.json", json.dumps(annotations, ensure_ascii=False, indent=2))
                 _sync_content_file(job_dir, "annotations/annotations.json", annotations)
                 self._send_json(_annotation_payload(annotations, annotation=item), HTTPStatus.CREATED)
         except (PipelineError, OSError) as exc:
@@ -3506,7 +3626,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             _assert_annotation_style_writable()
             annotations = _read_json_file(job_dir / "annotations.json", [])
             annotations = [item for item in annotations if isinstance(item, dict) and item.get("id") != annotation_id]
-            (job_dir / "annotations.json").write_text(json.dumps(annotations, ensure_ascii=False, indent=2), encoding="utf-8")
+            _atomic_write_text(job_dir / "annotations.json", json.dumps(annotations, ensure_ascii=False, indent=2))
             _sync_content_file(job_dir, "annotations/annotations.json", annotations)
             payload = _annotation_payload(annotations)
         self._send_json(payload)
@@ -3523,7 +3643,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 annotations = []
             kept = [item for item in annotations if isinstance(item, dict) and _is_ai_annotation(item)]
             deleted = sum(1 for item in annotations if isinstance(item, dict) and not _is_ai_annotation(item))
-            (job_dir / "annotations.json").write_text(json.dumps(kept, ensure_ascii=False, indent=2), encoding="utf-8")
+            _atomic_write_text(job_dir / "annotations.json", json.dumps(kept, ensure_ascii=False, indent=2))
             _sync_content_file(job_dir, "annotations/annotations.json", kept)
             payload = _annotation_payload(kept, deleted=deleted)
         self._send_json(payload)
@@ -3596,7 +3716,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     updated.pop("action_id", None)
                     updated.pop("label", None)
                     updated.update(action_snapshot)
-                (job_dir / "annotations.json").write_text(json.dumps(annotations, ensure_ascii=False, indent=2), encoding="utf-8")
+                _atomic_write_text(job_dir / "annotations.json", json.dumps(annotations, ensure_ascii=False, indent=2))
                 _sync_content_file(job_dir, "annotations/annotations.json", annotations)
                 result = _annotation_payload(annotations, annotation=updated)
             self._send_json(result)
@@ -3610,14 +3730,10 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return
         try:
             payload = self._read_json_body(max_bytes=5 * 1024 * 1024)
-            markdown = str(payload.get("markdown", ""))
-            if len(markdown) > 2_000_000:
-                raise PipelineError("笔记超过 2 MB。")
-            (job_dir / "notes.md").write_text(markdown, encoding="utf-8")
-            _sync_content_file(job_dir, "notes/notes.md", markdown)
-            self._send_json({"markdown": markdown, "saved_at": utc_now()})
-        except (PipelineError, OSError) as exc:
-            self._send_error_json(str(exc))
+            result = save_document_notes(job_dir, payload.get("markdown", ""), payload.get("expected_revision"))
+            self._send_json({**result, "saved_at": utc_now()})
+        except (CapabilityError, PipelineError, OSError) as exc:
+            self._send_error_json(str(exc), getattr(exc, "status", HTTPStatus.BAD_REQUEST))
 
     def _translate(self, job_id: str) -> None:
         try:
@@ -4501,7 +4617,20 @@ def _request_security_failure(handler: Any) -> Optional[tuple[str, int]]:
     # BaseHTTPRequestHandler requests always provide both attributes.
     if headers is None or server is None:
         return None
-    if runtime.API_ACCESS_TOKEN:
+    bearer = str(headers.get("Authorization") or "")
+    bridge_token = str(headers.get("X-My-Scholar-MCP-Token") or "")
+    if bearer.lower().startswith("bearer "):
+        bridge_token = bearer[7:].strip()
+    bridge_request = bool(bridge_token)
+    if bridge_request:
+        access = _mcp_access()
+        if not access.authenticate(bridge_token):
+            return "MCP 访问凭据无效或已停用。", HTTPStatus.UNAUTHORIZED
+        path = unquote(urlsplit(handler.path).path)
+        if (getattr(handler, "command", "GET"), path) not in {("GET", "/api/capabilities"), ("POST", "/api/capabilities/call")}:
+            return "MCP 凭据只能访问能力入口。", HTTPStatus.FORBIDDEN
+        handler._capability_scopes = access.status()["scopes"]
+    elif runtime.API_ACCESS_TOKEN:
         provided = str(headers.get("X-My-Scholar-Api-Token") or "")
         if not hmac.compare_digest(provided, runtime.API_ACCESS_TOKEN):
             return "本地服务访问凭据无效。", HTTPStatus.UNAUTHORIZED
@@ -4511,11 +4640,13 @@ def _request_security_failure(handler: Any) -> Optional[tuple[str, int]]:
     except (AttributeError, IndexError, TypeError, ValueError):
         return "本地服务无法确认请求来源。", HTTPStatus.FORBIDDEN
     if bound_host not in LOOPBACK_HOSTS:
-        return None
+        return ("MCP 仅允许localhost连接。", HTTPStatus.FORBIDDEN) if bridge_request else None
     if not _loopback_host_matches(str(headers.get("Host") or ""), expected_port):
         return "请求主机无效。", HTTPStatus.FORBIDDEN
     origin = str(headers.get("Origin") or "").strip()
-    if origin and not _loopback_origin_matches(origin, expected_port):
+    static_path = unquote(urlsplit(getattr(handler, "path", "")).path)
+    plugin_static = static_path == "/plugin-sdk.js" or re.fullmatch(r"/plugins/[a-zA-Z0-9._-]+/.+", static_path) is not None
+    if origin and not (origin == "null" and plugin_static) and not _loopback_origin_matches(origin, expected_port):
         return "请求来源无效。", HTTPStatus.FORBIDDEN
     return None
 
@@ -4600,7 +4731,10 @@ def main() -> None:
 
         connection = sqlite3.connect(":memory:")
         try:
-            connection.execute("SELECT 1").fetchone()
+            connection.execute("CREATE VIRTUAL TABLE fts_probe USING fts5(text, tokenize='unicode61')")
+            connection.execute("INSERT INTO fts_probe VALUES('search 测 试')")
+            if connection.execute("SELECT count(*) FROM fts_probe WHERE fts_probe MATCH ?", ('"测 试"',)).fetchone()[0] != 1:
+                raise RuntimeError("SQLite FTS5 tokenizer probe failed")
         finally:
             connection.close()
         ssl.create_default_context()
@@ -4658,6 +4792,11 @@ def main() -> None:
             previous_handlers[shutdown_signal] = signal.getsignal(shutdown_signal)
             signal.signal(shutdown_signal, request_shutdown)
         actual_port = int(httpd.server_address[1])
+        if args.host in LOOPBACK_HOSTS:
+            authority = f"[{args.host}]" if ":" in args.host else args.host
+            _mcp_access().bind(f"http://{authority}:{actual_port}")
+        else:
+            _mcp_access().close()
         print(f"My Scholar running at http://{args.host}:{actual_port}", flush=True)
         print(f"State directory: {DATA_ROOT}", flush=True)
         print(f"Library directory: {LIBRARY_ROOT}", flush=True)
@@ -4670,6 +4809,9 @@ def main() -> None:
         except KeyboardInterrupt:
             print("\nStopping My Scholar", flush=True)
         finally:
+            _mcp_access().close()
+            if SCHOLAR_SERVICE is not None:
+                SCHOLAR_SERVICE.search_index.close()
             httpd.server_close()
             if PARSING_PROVIDERS is not None:
                 PARSING_PROVIDERS.get("remote-guzi").connection.close()

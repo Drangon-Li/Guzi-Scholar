@@ -18,6 +18,20 @@
     return `${bytes} B`;
   }
 
+  function validSelectionTerm(value) {
+    const term = String(value || '').trim();
+    return Boolean(term && !/\p{Cc}/u.test(term) && Array.from(term).length <= 120);
+  }
+
+  function sentenceContext(text, start, end) {
+    const before = text.slice(0, start);
+    const boundary = /[.!?。！？]\s+/gu;
+    let left = 0;
+    for (const match of before.matchAll(boundary)) left = match.index + match[0].length;
+    const tail = text.slice(end).match(/[.!?。！？](?:\s|$)/u);
+    return text.slice(left, tail ? end + tail.index + 1 : text.length).trim().slice(0, 10000);
+  }
+
   const desktopPersistentState = root.myScholarDesktop?.state || null;
   const isDesktopApp = Boolean(desktopPersistentState);
   const persistentStateValues = new Map();
@@ -120,6 +134,8 @@
     $,
     $$,
     formatBytes,
+    sentenceContext,
+    validSelectionTerm,
     desktopPersistentState,
     isDesktopApp,
     ready,

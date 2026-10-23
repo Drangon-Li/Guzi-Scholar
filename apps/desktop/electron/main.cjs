@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, shell } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, powerMonitor, shell, webContents } = require('electron');
 const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -18,19 +18,31 @@ const {
 } = require('./library-storage.cjs');
 const { resolvePythonRuntime } = require('./python-runtime.cjs');
 const { RendererStateStore } = require('./renderer-state.cjs');
-const { hasTrustedOrigin } = require('./url-security.cjs');
+const { hasTrustedOrigin, localRequestPolicy } = require('./url-security.cjs');
+const { mcpClientConfiguration } = require('./mcp-config.cjs');
 const { checkForUpdate } = require('./update-service.cjs');
 const { consumeInstallationMarker, requestMacInstallation } = require('./macos-installation.cjs');
+const { configurePluginIsolation, checkPreviewBoundaries, PluginProcessGuard } = require('./plugin-guard.cjs');
+
+configurePluginIsolation(app.commandLine);
 
 const packageMetadata = require('../package.json');
 const LOCAL_TEST_BUILD = typeof packageMetadata.localTestBuild === 'string' ? packageMetadata.localTestBuild.trim() : '';
-const PRODUCT_NAME = LOCAL_TEST_BUILD ? '谷子学术测试版' : '谷子学术';
+const developmentArguments = !app.isPackaged ? (process.argv || []) : [];
+const DEVELOPMENT_BUILD = developmentArguments.includes('--guzi-development') ? 'MCP · Plugins' : '';
+const isolatedBuild = Boolean(LOCAL_TEST_BUILD || DEVELOPMENT_BUILD);
+const PRODUCT_NAME = DEVELOPMENT_BUILD ? '谷子学术开发版' : LOCAL_TEST_BUILD ? '谷子学术测试版' : '谷子学术';
 const UPDATE_CHANNEL = 'internal';
 const UPDATE_MANIFEST_URL = process.env.MY_SCHOLAR_UPDATE_MANIFEST_URL || 'https://raw.githubusercontent.com/Drangon-Li/Guzi-Scholar/main/release-manifests/macos-arm64.json';
 const UPDATE_ALLOWED_ORIGINS = Object.freeze(['https://raw.githubusercontent.com', 'https://github.com']);
 const defaultUserDataPath = app.getPath('userData');
 app.setName(PRODUCT_NAME);
-if (LOCAL_TEST_BUILD) {
+if (DEVELOPMENT_BUILD) {
+  const requestedRoot = developmentArguments.find((argument) => argument.startsWith('--guzi-dev-root='))?.slice('--guzi-dev-root='.length);
+  if (requestedRoot && !path.isAbsolute(requestedRoot)) throw new Error('开发版数据目录必须使用绝对路径。');
+  app.setPath('userData', requestedRoot || path.join(app.getPath('appData'), 'GuziScholar-Development'));
+  app.setAppLogsPath(path.join(app.getPath('userData'), 'logs'));
+} else if (LOCAL_TEST_BUILD) {
   app.setPath('userData', path.join(app.getPath('appData'), 'GuziScholar-LocalTest'));
   app.setAppLogsPath(path.join(app.getPath('userData'), 'logs'));
 } else if (!app.isPackaged) app.setPath('userData', `${defaultUserDataPath}-development`);
@@ -49,8 +61,11 @@ let rendererStateStore = null;
 let rendererCrashShutdownPromise = null;
 let startupStorageReport = { state: 'pending', adopted: false, current: null, legacy: [] };
 let availableUpdate = null;
+let pluginGuard = null;
+const pluginRuntimeChecks = new Map();
 const migrationControlToken = crypto.randomBytes(32).toString('hex');
 const apiAccessToken = crypto.randomBytes(32).toString('hex');
+const pluginAdmissionToken = crypto.randomBytes(32).toString('hex');
 
 function requireMainWindowSender(event) {
   const mainFrame = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents.mainFrame : null;
@@ -132,16 +147,73 @@ ipcMain.handle('my-scholar:get-startup-context', (event) => {
       version: app.getVersion(),
       platform: process.platform,
       arch: process.arch,
-      channel: LOCAL_TEST_BUILD ? 'local-test' : UPDATE_CHANNEL,
+      channel: DEVELOPMENT_BUILD ? 'development' : LOCAL_TEST_BUILD ? 'local-test' : UPDATE_CHANNEL,
       ...(LOCAL_TEST_BUILD ? { localTestBuild: LOCAL_TEST_BUILD } : {}),
+      ...(DEVELOPMENT_BUILD ? { developmentBuild: DEVELOPMENT_BUILD } : {}),
     },
     storage: startupStorageReport,
   };
 });
 
+async function pluginSession(payload) {
+  const registry = await backendRequestJSON('/api/plugins');
+  const previewSession = payload.previewSession || null;
+  if (previewSession) {
+    const preview = (registry.previews || []).find((item) => (item.pluginId || item.id) === payload.pluginId && item.previewId === previewSession);
+    if (!preview) throw new Error('插件预览会话已失效。');
+    return { pluginId: payload.pluginId, previewSession };
+  }
+  const record = (registry.plugins || []).find((item) => item.id === payload.pluginId && item.enabled);
+  if (!record || (payload.pluginSession && payload.pluginSession !== record.epoch)) throw new Error('插件运行会话已失效。');
+  return { pluginId: payload.pluginId, pluginSession: record.epoch };
+}
+
+ipcMain.handle('my-scholar:plugin-runtime-check', async (event, payload) => {
+  requireMainWindowSender(event);
+  if (!payload || typeof payload !== 'object' || !/^[a-z0-9][a-z0-9._-]*$/u.test(payload.pluginId || '') ||
+      (payload.previewSession != null && !/^[a-f0-9]{32}$/u.test(payload.previewSession)) ||
+      (payload.pluginSession != null && !/^[a-f0-9]{32}$/u.test(payload.pluginSession)) ||
+      (!payload.previewSession && !payload.pluginSession)) throw new Error('插件运行检查参数无效。');
+  const key = JSON.stringify([payload.pluginId, payload.previewSession, payload.pluginSession]);
+  if (pluginRuntimeChecks.has(key)) return pluginRuntimeChecks.get(key);
+  const guard = pluginGuard;
+  if (!guard) throw new Error('插件运行守卫尚未启动。');
+  const check = (async () => {
+    const session = await pluginSession(payload);
+    const verifyRuntime = async () => {
+      const response = await backendRequestJSON(`/api/plugins/runtime-status?pluginId=${encodeURIComponent(payload.pluginId)}`);
+      const runtime = response.runtime || response;
+      if (runtime.status !== 'ready' || runtime.errorCount ||
+          (session.previewSession && runtime.previewId !== session.previewSession) ||
+          (!session.previewSession && runtime.epoch !== session.pluginSession)) throw new Error('插件 SDK 尚未就绪、发生错误，或运行会话已失效。');
+    };
+    await verifyRuntime();
+    const result = await guard.check(payload);
+    requireMainWindowSender(event);
+    if (pluginGuard !== guard) throw new Error('插件运行守卫已重置。');
+    await pluginSession(payload);
+    await verifyRuntime();
+    if (!session.previewSession) return result;
+    const boundaries = await checkPreviewBoundaries(backendRequestJSON, session);
+    const admission = await backendRequestJSON('/api/plugins/admission', { method: 'POST', body: {
+      ...session,
+      checks: { processIsolation: true, sdkHandshake: true, runtimeStable: true, hostResponsive: true, ...boundaries },
+    } });
+    return { ...result, admission: admission.admission || admission };
+  })().finally(() => pluginRuntimeChecks.delete(key));
+  pluginRuntimeChecks.set(key, check);
+  return check;
+});
+
+ipcMain.handle('my-scholar:mcp-config', async (event) => {
+  requireMainWindowSender(event);
+  const status = await backendRequestJSON('/api/mcp/status');
+  return { ok: true, ...mcpClientConfiguration({ executable: process.execPath, projectRoot: path.resolve(__dirname, '..'), connectionFile: status.connection_file }) };
+});
+
 ipcMain.handle('my-scholar:check-for-updates', async (event) => {
   requireMainWindowSender(event);
-  if (LOCAL_TEST_BUILD) return { ok: false, error: '本地测试版不连接正式更新服务，请使用单独提供的测试包更新。' };
+  if (isolatedBuild) return { ok: false, error: '开发和测试版本不连接正式更新服务。' };
   try {
     const result = await checkForUpdate({
       manifestURL: UPDATE_MANIFEST_URL,
@@ -163,7 +235,7 @@ ipcMain.handle('my-scholar:check-for-updates', async (event) => {
 
 ipcMain.handle('my-scholar:open-update-download', async (event) => {
   requireMainWindowSender(event);
-  if (LOCAL_TEST_BUILD) return { ok: false, error: '本地测试版不提供正式版本更新下载。' };
+  if (isolatedBuild) return { ok: false, error: '开发和测试版本不提供正式版本更新下载。' };
   if (!availableUpdate?.downloadURL) return { ok: false, error: '请先检查更新。' };
   await shell.openExternal(availableUpdate.downloadURL, { activate: true });
   return { ok: true };
@@ -215,13 +287,13 @@ app.on('second-instance', () => {
 function storageConfiguration() {
   const projectRoot = path.resolve(__dirname, '..');
   // A test launch must not inherit a production library or state override.
-  const storageEnvironment = LOCAL_TEST_BUILD
+  const storageEnvironment = isolatedBuild
     ? { ...process.env, MY_SCHOLAR_DATA_DIR: '', MY_SCHOLAR_LIBRARY_DIR: '' }
     : process.env;
   const layout = desktopStorageLayout({
     projectRoot,
     userDataDir: app.getPath('userData'),
-    isPackaged: app.isPackaged || Boolean(LOCAL_TEST_BUILD),
+    isPackaged: app.isPackaged || isolatedBuild,
     env: storageEnvironment,
   });
   const location = resolveLibraryLocation({ defaultLibraryDir: layout.defaultLibraryDir, pointerPath: layout.pointerPath, env: storageEnvironment });
@@ -230,7 +302,7 @@ function storageConfiguration() {
 
 async function prepareDesktopStorage() {
   let storage = storageConfiguration();
-  if (LOCAL_TEST_BUILD) {
+  if (isolatedBuild) {
     startupStorageReport = { state: 'none', adopted: false, current: await inspectLibraryDirectory(storage.currentPath), legacy: [] };
     return;
   }
@@ -267,13 +339,16 @@ function reportLibraryMigration(progress) {
   mainWindow.webContents.send('my-scholar:library-migration-progress', progress);
 }
 
-function backendRequestJSON(route, { method = 'GET', timeout = 10000, headers = {} } = {}) {
+function backendRequestJSON(route, { method = 'GET', timeout = 10000, headers = {}, body } = {}) {
   if (!serverURL) return Promise.reject(new Error('本地服务尚未启动。'));
   const target = new URL(route, serverURL);
+  const serialized = body === undefined ? undefined : JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const request = http.request(target, {
       method,
-      headers: { Accept: 'application/json', ...headers, 'X-My-Scholar-Api-Token': apiAccessToken },
+      headers: { Accept: 'application/json', ...headers, ...(serialized === undefined ? {} : { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(serialized) }), 'X-My-Scholar-Api-Token': apiAccessToken,
+        ...(target.pathname === '/api/plugins/admission' ? { 'X-My-Scholar-Plugin-Admission': pluginAdmissionToken } : {}),
+      },
     }, (response) => {
       const chunks = [];
       let size = 0;
@@ -287,7 +362,9 @@ function backendRequestJSON(route, { method = 'GET', timeout = 10000, headers = 
       });
       response.once('end', () => {
         if ((response.statusCode || 500) >= 400) {
-          reject(new Error(`本地服务请求失败（HTTP ${response.statusCode || 500}）。`));
+          const error = new Error(`本地服务请求失败（HTTP ${response.statusCode || 500}）。`);
+          error.statusCode = response.statusCode || 500;
+          reject(error);
           return;
         }
         try {
@@ -299,7 +376,7 @@ function backendRequestJSON(route, { method = 'GET', timeout = 10000, headers = 
     });
     request.setTimeout(timeout, () => request.destroy(new Error('本地服务响应超时。')));
     request.once('error', reject);
-    request.end();
+    request.end(serialized);
   });
 }
 
@@ -677,6 +754,7 @@ async function startServer() {
       MY_SCHOLAR_PACKAGED: app.isPackaged ? '1' : '0',
       MY_SCHOLAR_MIGRATION_TOKEN: migrationControlToken,
       MY_SCHOLAR_API_TOKEN: apiAccessToken,
+      MY_SCHOLAR_PLUGIN_ADMISSION_TOKEN: pluginAdmissionToken,
       MY_SCHOLAR_BACKEND: process.env.MY_SCHOLAR_BACKEND || 'auto',
       MY_SCHOLAR_READONLY: '',
     };
@@ -702,6 +780,9 @@ async function startServer() {
         ready = true;
         clearTimeout(timer);
         serverURL = match[1];
+        if (DEVELOPMENT_BUILD) {
+          fs.writeFileSync(path.join(app.getPath('userData'), 'development-runtime.json'), JSON.stringify({ pid: process.pid, backendPid: child.pid, url: serverURL, stateDir: storage.stateDir, libraryDir: storage.currentPath }, null, 2), { mode: 0o600 });
+        }
         resolve(serverURL);
       }
     };
@@ -752,11 +833,17 @@ function secureWindowOptions() {
 }
 
 function installLocalApiAuthorization(window) {
+  const pluginFrames = new Map();
   window.webContents.session.webRequest.onBeforeSendHeaders(
-    { urls: ['http://127.0.0.1/*', 'http://localhost/*'] },
+    { urls: ['<all_urls>'] },
     (details, callback) => {
+      const policy = localRequestPolicy(details, serverURL, window.webContents.mainFrame, pluginFrames);
+      if (policy.cancel) { callback({ cancel: true }); return; }
       const requestHeaders = { ...details.requestHeaders };
-      if (hasTrustedOrigin(details.url, serverURL)) {
+      for (const key of Object.keys(requestHeaders)) {
+        if (key.toLowerCase() === 'x-my-scholar-api-token') delete requestHeaders[key];
+      }
+      if (hasTrustedOrigin(details.url, serverURL) && policy.authorize) {
         requestHeaders['X-My-Scholar-Api-Token'] = apiAccessToken;
       }
       callback({ requestHeaders });
@@ -820,6 +907,26 @@ async function createWindow() {
   diagnosticLog('create-window', `shell=${process.env.MY_SCHOLAR_SHELL || 'reference'} url=${url}`);
   installLocalApiAuthorization(mainWindow);
   hardenWindow(mainWindow);
+  const guardedWindow = mainWindow;
+  pluginGuard?.dispose();
+  pluginGuard = new PluginProcessGuard({
+    contents: guardedWindow.webContents,
+    getServerURL: () => serverURL,
+    allWebContents: () => webContents.getAllWebContents(),
+    getMetrics: () => app.getAppMetrics(),
+    killProcess: (pid) => process.kill(pid, 'SIGKILL'),
+    onStart: (entry) => pluginSession(entry),
+    onStop: async (entry, details) => {
+      if (!guardedWindow.isDestroyed() && hasTrustedOrigin(guardedWindow.webContents.mainFrame.url, serverURL)) {
+        guardedWindow.webContents.mainFrame.send('my-scholar:plugin-stopped', { pluginId: entry.pluginId, previewSession: entry.previewSession, ...details });
+      }
+      const session = await entry.metadata;
+      if (session) await backendRequestJSON('/api/plugins/runtime-event', { method: 'POST', body: {
+        ...session, level: 'error', message: details.message, details: { reason: details.reason, containment: true, terminated: details.terminated },
+      } });
+    },
+    log: diagnosticLog,
+  });
   await mainWindow.loadURL(url);
   console.log('My Scholar desktop window ready');
   let closeAfterFlush = false;
@@ -841,6 +948,8 @@ async function createWindow() {
       .finally(() => { closeFlushPromise = null; });
   });
   mainWindow.on('closed', () => {
+    pluginGuard?.dispose();
+    pluginGuard = null;
     mainWindow = null;
     stopServer().catch((error) => diagnosticLog('stop-after-window-close-error', error.message || String(error)));
   });
@@ -854,8 +963,10 @@ function ensureWindow() {
 }
 
 app.whenReady().then(async () => {
-  const installationCompletion = LOCAL_TEST_BUILD ? null : consumeInstallationMarker({ app });
-  const installation = LOCAL_TEST_BUILD ? { action: 'continue' } : requestMacInstallation({ app, dialog });
+  powerMonitor.on('suspend', () => pluginGuard?.suspend());
+  powerMonitor.on('resume', () => pluginGuard?.resume());
+  const installationCompletion = isolatedBuild ? null : consumeInstallationMarker({ app });
+  const installation = isolatedBuild ? { action: 'continue' } : requestMacInstallation({ app, dialog });
   if (installation.action !== 'continue') {
     if (installation.action === 'quit') app.quit();
     return;

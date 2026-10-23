@@ -229,6 +229,8 @@
   let notesEditorSession = 0;
   let articleNoteImageRange = null;
   const articleNoteDrafts = new Map();
+  const articleNoteServerRevisions = new Map();
+  const articleNoteConflicts = new Map();
   const assistantOverlayQuery = window.matchMedia('(max-width: 880px)');
   const reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
   const colorSchemeQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -315,17 +317,18 @@
     return payload;
   };
   const jsonOptions = (body, method = 'POST') => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const vocabulary = window.MyScholarVocabulary.create({
-    api, jsonOptions, escapeHTML, toast: showToast, confirm: requestConfirmation,
-    openSource: async (source) => {
-      try { await openVocabularySource(source); }
-      catch (error) { showToast(error.message, true); throw error; }
-    },
+  const pluginHost = window.MyScholarPluginHost.create({
+    api, jsonOptions, navigate: openPrimaryView, toast: showToast, confirm: requestConfirmation,
+    onRemoved: () => switchView('library-view'),
+    onContributionsChanged: renderSelectionActions,
+    openSource: openPluginSource,
     translate: async (term, jobId) => {
       if (!aiServiceEnabled('translation')) throw new Error('翻译服务当前不可用，词条已保留，可稍后重试。');
       return (await requestTranslation(term, null, [], { jobId })).text;
     },
   });
+  const market = window.MyScholarMarket.create({ host: pluginHost, escapeHTML, confirm: requestConfirmation, navigate: openPrimaryView, toast: showToast });
+  const mcpSettings = window.MyScholarMcpSettings.create({ api, jsonOptions, escapeHTML, confirm: requestConfirmation, toast: showToast });
 
   const onboarding = window.MyScholarOnboarding.create({ reducedMotionQuery });
   window.MyScholarZoteroImport.create({
@@ -448,6 +451,7 @@
     window.setTimeout(finish, 240);
   }
   function switchView(viewId, { enteringDocumentId = null } = {}) {
+    if (viewId !== 'plugin-preview-view') void market.leavePreview();
     if (viewId !== 'library-view' && state.groupingMenuOpen) setGroupingMenuOpen(false);
     if (viewId !== 'library-view' && viewId !== 'views-view') closeLibraryCellEditor();
     if (viewId !== 'reader-view') closeChatSessionMenu();
@@ -485,11 +489,11 @@
       }
       view.classList.toggle('active-view', active);
     });
-    if (viewId !== 'reader-view') state.primaryView = viewId;
+    if (viewId !== 'reader-view') state.primaryView = viewId === 'plugin-preview-view' ? 'market-view' : viewId;
     // The document tab is the active surface while reading. Keep the library
     // or saved-view context in state for returning there, but do not paint a
     // second, misleading underline in the primary navigation.
-    const activeNavView = viewId === 'reader-view' ? null : viewId;
+    const activeNavView = viewId === 'reader-view' ? null : viewId === 'plugin-preview-view' ? 'market-view' : viewId;
     $$('.nav-button').forEach((button) => button.classList.toggle('active', button.dataset.view === activeNavView));
     document.body.classList.toggle('reader-mode', viewId === 'reader-view');
     // Open document tabs remain available outside the reader, but only the
@@ -503,7 +507,8 @@
     }
     if (viewId === 'library-view') renderLibrary(state.jobs, { reuse: true });
     if (viewId === 'views-view') renderViews();
-    if (viewId === 'vocabulary-view') void vocabulary.load();
+    pluginHost.openView(viewId);
+    if (viewId === 'market-view') void market.load();
     if (viewId === 'settings-view') {
       loadSettings();
       window.requestAnimationFrame(updateSettingsNavigation);
@@ -542,6 +547,7 @@
     });
     setActiveSettingsNavigation(target.id);
     if (target.id === 'settings-parsing') void loadParsingProviders();
+    if (target.id === 'settings-mcp') void mcpSettings.load();
     if (updateHash && location.hash !== `#${target.id}`) history.replaceState(null, '', `#${target.id}`);
     if (scroll) window.scrollTo({ top: 0, behavior: 'auto' });
   }
@@ -5188,7 +5194,7 @@
       origin: 'selection',
       job_id: state.activeJob?.job_id,
       quote: text.slice(0, 10000),
-      sentence: window.MyScholarVocabulary.sentenceContext(canonicalText, start, end),
+      sentence: window.MyScholarCore.sentenceContext(canonicalText, start, end),
       block_id: block?.dataset.blockId || null,
       source_block_id: translation?.dataset.translationFor || null,
       surface: translation ? 'translation' : 'paper',
@@ -7897,9 +7903,16 @@
     });
     const vocabularyButton = $('#selection-add-vocabulary');
     if (vocabularyButton) {
+      vocabularyButton.hidden = !pluginHost.selectionActions().some((action) => action.pluginId === 'guzi.vocabulary' && action.id === 'keep');
       const source = state.selection?.surface !== 'translation';
-      vocabularyButton.disabled = !source || !window.MyScholarVocabulary.validTerm(state.selection?.quote);
+      vocabularyButton.disabled = !source || !window.MyScholarCore.validSelectionTerm(state.selection?.quote);
       vocabularyButton.title = !source ? '请在原文中选择单词或短语。' : '保存词条、原句及来源；支持不超过 120 字符且无换行的短语。';
+    }
+    const pluginActions = $('#selection-plugin-actions');
+    if (pluginActions) {
+      const actions = pluginHost.selectionActions().filter((action) => action.pluginId !== 'guzi.vocabulary' || action.id !== 'keep');
+      pluginActions.hidden = !actions.length;
+      pluginActions.innerHTML = actions.map((action) => `<button type="button" data-plugin-selection="${escapeHTML(action.pluginId)}" data-plugin-action="${escapeHTML(action.id)}"${!state.selection ? ' disabled' : ''}>${escapeHTML(action.title)}</button>`).join('');
     }
     const container = $('#selection-custom-actions');
     if (!container) return;
@@ -9273,16 +9286,16 @@
     beginSelectionTranslation({ ...state.selection }, { immediate: true });
   });
 
-  $('#selection-add-vocabulary')?.addEventListener('click', async (event) => {
+  async function invokeSelectionPlugin(pluginId, actionId, button) {
     const selection = state.selection;
-    if (!selection || selection.surface === 'translation' || !window.MyScholarVocabulary.validTerm(selection.quote)) return;
-    const jobId = state.activeJob?.job_id;
+    if (!selection) return;
+    if (pluginId === 'guzi.vocabulary' && (selection.surface === 'translation' || !window.MyScholarCore.validSelectionTerm(selection.quote))) return;
     const record = selectionTranslationRecord?.key === selectionRequestKey(selection) ? selectionTranslationRecord : null;
     const snapshot = {
       term: selection.quote.trim(),
       source: {
-        job_id: jobId, quote: selection.sentence || selection.quote, selected_text: selection.quote,
-        block_id: selection.block_id, source_block_id: selection.source_block_id, surface: 'source',
+        job_id: state.activeJob?.job_id, quote: selection.sentence || selection.quote, selected_text: selection.quote,
+        block_id: selection.block_id, source_block_id: selection.source_block_id, surface: selection.surface === 'translation' ? 'translation' : 'source',
         page: selection.page ? Number(selection.page) : null,
         start: selection.start, end: selection.end,
         quote_prefix: selection.quote_prefix, quote_suffix: selection.quote_suffix,
@@ -9290,22 +9303,30 @@
       },
     };
     if (record) record.keepForVocabulary = true;
-    const button = event.currentTarget;
     button.disabled = true;
     try {
-      await vocabulary.saveSelection(snapshot, { meaning: record?.text || '', translation: record?.promise || null });
-      if (!record?.text) showToast('词条与原句已保存，释义可稍后补全或重试。');
-    } catch (error) { showToast(`保存失败：${error.message}`, true); }
+      await pluginHost.dispatchAction(pluginId, actionId, { snapshot, selection: { ...selection }, meaning: record?.text || '' }, record?.promise || null);
+    } catch (error) { showToast(`插件动作失败：${error.message}`, true); }
     finally { renderSelectionActions(); }
+  }
+  $('#selection-add-vocabulary')?.addEventListener('click', (event) => void invokeSelectionPlugin('guzi.vocabulary', 'keep', event.currentTarget));
+  $('#selection-plugin-actions')?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-plugin-selection]');
+    if (button && !button.disabled) void invokeSelectionPlugin(button.dataset.pluginSelection, button.dataset.pluginAction, button);
   });
 
-  async function openVocabularySource(source) {
+  async function openPluginSource(source) {
     const job = state.jobs.find((item) => item.job_id === source?.job_id);
     if (!job || job.status !== 'completed' || state.library?.items?.[source.job_id]?.deleted_at) {
-      throw new Error('来源文献已删除、在回收站中或尚不可用，已保留原句快照。');
+      throw new Error('来源文献已删除、在回收站中或尚不可用，请在插件中查看保留的来源快照。');
+    }
+    const expected = String(source.selected_text || '');
+    if (!source.block_id && !expected) {
+      openReader(job);
+      return;
     }
     const generation = String(source.render_generation || 'base');
-    if (generation !== activeChatSourceGeneration(job)) throw new Error('来源属于另一版正文或 AI 重排结果，无法安全跳转。原句快照仍可查看。');
+    if (generation !== activeChatSourceGeneration(job)) throw new Error('来源属于另一版正文或 AI 重排结果，无法安全跳转。请在插件中查看保留的来源快照。');
     openReader(job);
     const mount = readerMount;
     const deadline = Date.now() + 10000;
@@ -9315,15 +9336,22 @@
     if (generation !== activeChatSourceGeneration()) throw new Error('正文版本已变化，无法安全跳转。');
     const doc = frameDocument();
     const block = doc?.querySelector(`[data-block-id="${cssEscape(source.block_id || '')}"]`);
-    const expected = String(source.selected_text || '');
-    const text = block ? canonicalBlockText(block, doc) : '';
+    const page = block?.dataset.page || block?.closest('[data-page]')?.dataset.page;
+    if (!block || block.closest('.my-scholar-translation') || (source.page && String(source.page) !== String(page))) {
+      showToast('未找到可确认的原文位置，正文可能已重排或更改。请在插件中查看保留的来源快照。', true);
+      return;
+    }
+    if (!expected) {
+      block.scrollIntoView({ block: 'center', behavior: reducedMotionQuery.matches ? 'auto' : 'smooth' });
+      return;
+    }
+    const text = canonicalBlockText(block, doc);
     const start = Number(source.start);
     const end = Number(source.end);
-    const page = block?.dataset.page || block?.closest('[data-page]')?.dataset.page;
     const prefixMatches = !source.quote_prefix || text.slice(Math.max(0, start - source.quote_prefix.length), start) === source.quote_prefix;
     const suffixMatches = !source.quote_suffix || text.slice(end, end + source.quote_suffix.length) === source.quote_suffix;
     if (!block || block.closest('.my-scholar-translation') || !expected || !Number.isInteger(start) || !Number.isInteger(end) || end <= start || text.slice(start, end) !== expected || !prefixMatches || !suffixMatches || (source.page && String(source.page) !== String(page))) {
-      showToast('未找到可确认的原文位置，正文可能已重排或更改。原句快照仍保留在生词本。', true);
+      showToast('未找到可确认的原文位置，正文可能已重排或更改。请在插件中查看保留的来源快照。', true);
       return;
     }
     const range = rangeAtOffsets(block, start, end, doc);
@@ -10992,7 +11020,7 @@
     });
     // The shared notes editor keeps its own session and draft protection.
     const notesPromise = Promise.resolve(notesReady).catch(() => {}).then(() => api(`/api/jobs/${jobId}/notes`)).then((payload) => {
-      if (readerMountIsCurrent(mount)) loadArticleNotes(jobId, payload.markdown || '', notesSession);
+      if (readerMountIsCurrent(mount)) loadArticleNotes(jobId, payload.markdown || '', notesSession, payload.revision);
     }).catch((error) => {
       if (readerMountIsCurrent(mount)) handleArticleNotesLoadError(jobId, error, notesSession);
     });
@@ -11680,7 +11708,7 @@
       const stored = JSON.parse(persistentStateGet(articleNoteDraftStorageKey) || '{}');
       Object.entries(stored && typeof stored === 'object' ? stored : {}).forEach(([jobId, draft]) => {
         if (!jobId || typeof draft?.markdown !== 'string') return;
-        articleNoteDrafts.set(jobId, { jobId, markdown: draft.markdown, revision: Number(draft.revision || 0) });
+        articleNoteDrafts.set(jobId, { jobId, markdown: draft.markdown, revision: Number(draft.revision || 0), baseRevision: draft.baseRevision });
       });
     } catch (_error) {}
   }
@@ -11694,6 +11722,7 @@
       const payload = Object.fromEntries([...articleNoteDrafts.entries()].map(([jobId, draft]) => [jobId, {
         markdown: draft.markdown,
         revision: Number(draft.revision || 0),
+        baseRevision: draft.baseRevision,
       }]));
       persistentStateSet(articleNoteDraftStorageKey, JSON.stringify(payload));
     } catch (_error) {}
@@ -11758,9 +11787,10 @@
     return editor.dataset.session;
   }
 
-  function loadArticleNotes(jobId, markdown, session = null) {
+  function loadArticleNotes(jobId, markdown, session = null, serverRevision = null) {
     const editor = $('#notes-editor');
     if (!isArticleNoteSession(jobId, session)) return;
+    articleNoteServerRevisions.set(String(jobId), serverRevision);
     let draft = articleNoteDrafts.get(String(jobId));
     if (draft?.markdown === String(markdown || '')) {
       discardArticleNoteDraft(jobId);
@@ -11773,9 +11803,13 @@
     editor.setAttribute('aria-busy', 'false');
     setArticleNotesControlsDisabled(false);
     const revision = bumpArticleNotesRevision(editor);
-    if (draft) retainArticleNoteDraft({ ...draft, revision });
+    if (draft) {
+      retainArticleNoteDraft({ ...draft, revision });
+      if (serverRevision && draft.baseRevision !== serverRevision) articleNoteConflicts.set(String(jobId), { markdown, revision: serverRevision });
+    }
     updateArticleNotesEmptyState(editor);
-    setArticleNotesStatus(draft ? '未保存草稿' : '');
+    renderArticleNoteConflict(jobId);
+    setArticleNotesStatus(articleNoteConflicts.has(String(jobId)) ? '外部笔记已更新，请合并后保存。草稿已保留。' : draft ? '未保存草稿' : '');
   }
 
   function handleArticleNotesLoadError(jobId, error, session = null) {
@@ -11808,6 +11842,7 @@
       jobId,
       markdown: annotationEditorMarkdown(editor),
       revision: Number(editor.dataset.revision || 0),
+      baseRevision: articleNoteServerRevisions.get(jobId),
     };
   }
 
@@ -11834,12 +11869,25 @@
     if (announce) setArticleNotesStatus('正在保存…', snapshot);
     const run = async () => {
       try {
-        await api(`/api/jobs/${snapshot.jobId}/notes`, jsonOptions({ markdown: snapshot.markdown }, 'PUT'));
+        if (articleNoteConflicts.has(snapshot.jobId)) throw new Error('外部笔记已更新，请先合并。当前草稿已保留。');
+        const saved = await api(`/api/jobs/${snapshot.jobId}/notes`, jsonOptions({ markdown: snapshot.markdown, expected_revision: articleNoteServerRevisions.get(snapshot.jobId) ?? snapshot.baseRevision }, 'PUT'));
+        articleNoteServerRevisions.set(snapshot.jobId, saved.revision);
+        const newer = articleNoteDrafts.get(snapshot.jobId);
+        if (newer) { newer.baseRevision = saved.revision; persistArticleNoteDrafts(); }
         const draft = articleNoteDrafts.get(snapshot.jobId);
         if (draft?.revision === snapshot.revision && draft.markdown === snapshot.markdown) discardArticleNoteDraft(snapshot.jobId);
         setArticleNotesStatus('已保存', snapshot, 1800);
         return true;
       } catch (error) {
+        if (error.status === 409) {
+          articleNoteConflicts.set(snapshot.jobId, { markdown: '', revision: null });
+          try {
+            const latest = await api(`/api/jobs/${snapshot.jobId}/notes`);
+            articleNoteConflicts.set(snapshot.jobId, latest);
+          } catch (_error) {}
+          renderArticleNoteConflict(snapshot.jobId);
+          error.message = '外部笔记已更新，请合并后保存。当前草稿已保留。';
+        }
         const draft = articleNoteDrafts.get(snapshot.jobId);
         if (!draft || draft.revision <= snapshot.revision) retainArticleNoteDraft(snapshot);
         setArticleNotesStatus(error.message, snapshot, 0, true);
@@ -11849,6 +11897,36 @@
     notesSaveQueue = notesSaveQueue.catch(() => {}).then(run);
     return notesSaveQueue;
   }
+
+  function renderArticleNoteConflict(jobId) {
+    if ($('#notes-editor')?.dataset.jobId !== String(jobId)) return;
+    const conflict = articleNoteConflicts.get(String(jobId));
+    const panel = $('#notes-conflict');
+    panel.hidden = !conflict;
+    if (conflict) $('#notes-external-version').value = conflict.markdown || '外部版本暂不可读取，请重新打开文献。';
+  }
+  $('#notes-conflict-merge')?.addEventListener('click', async () => {
+    const snapshot = articleNotesSnapshot();
+    if (!snapshot || !articleNoteConflicts.has(snapshot.jobId)) return;
+    const conflict = articleNoteConflicts.get(snapshot.jobId);
+    if (!conflict.revision) { showToast('请重新打开文献以读取最新笔记。', true); return; }
+    if (!await requestConfirmation('确认已将外部版本中的所需内容合并到当前笔记？将保存当前编辑内容。', '保存合并结果？')) return;
+    articleNoteServerRevisions.set(snapshot.jobId, conflict.revision);
+    articleNoteConflicts.delete(snapshot.jobId);
+    renderArticleNoteConflict(snapshot.jobId);
+    await saveNotes();
+  });
+  $('#notes-conflict-reload')?.addEventListener('click', async () => {
+    const snapshot = articleNotesSnapshot();
+    if (!snapshot || !await requestConfirmation('当前本地草稿将被外部版本替换。', '使用外部笔记？')) return;
+    try {
+      const latest = await api(`/api/jobs/${snapshot.jobId}/notes`);
+      if ($('#notes-editor')?.dataset.jobId !== snapshot.jobId) return;
+      window.clearTimeout(notesTimer); pendingNotesSnapshot = null;
+      discardArticleNoteDraft(snapshot.jobId); articleNoteConflicts.delete(snapshot.jobId);
+      loadArticleNotes(snapshot.jobId, latest.markdown, null, latest.revision);
+    } catch (error) { showToast(error.message, true); }
+  });
 
   function flushPendingArticleNotes(jobId = null) {
     const snapshot = pendingNotesSnapshot;
@@ -12137,10 +12215,11 @@
     captureCurrentReadingLocation();
     window.clearTimeout(notesTimer);
     articleNoteDrafts.forEach((draft, jobId) => {
+      if (articleNoteConflicts.has(jobId) || !(articleNoteServerRevisions.get(jobId) || draft.baseRevision)) return;
       fetch(`/api/jobs/${jobId}/notes`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ markdown: draft.markdown }),
+        body: JSON.stringify({ markdown: draft.markdown, expected_revision: articleNoteServerRevisions.get(jobId) || draft.baseRevision }),
         keepalive: true,
       }).catch(() => {});
     });
@@ -13617,13 +13696,13 @@
   }
   $('#settings-form').addEventListener('submit', (event) => event.preventDefault());
   $('#settings-form').addEventListener('change', (event) => {
-    if (event.target.closest('.shortcut-grid')) return;
+    if (event.target.closest('.shortcut-grid, #settings-mcp')) return;
     if (event.target.id.endsWith('-reasoning-effort') && event.target.value === 'custom') return;
     if (event.target.id === 'setting-parsing-backend') syncParsingServerField();
     queueSettingsSave(true);
   });
   $('#settings-form').addEventListener('input', (event) => {
-    if (event.target.closest('.shortcut-grid')) return;
+    if (event.target.closest('.shortcut-grid, #settings-mcp')) return;
     if (event.target.matches('input[type="text"], input[type="email"], input[type="url"], input[type="password"], input[type="number"]')) queueSettingsSave(false);
   });
   document.addEventListener('visibilitychange', () => {
@@ -14421,6 +14500,8 @@
       if ($('#settings-view')?.classList.contains('active-view')) showSettingsSection(target.id, { updateHash: false });
     }
   });
+  void pluginHost.refresh().catch((error) => showToast(`插件载入失败：${error.message}`, true));
+  window.addEventListener('focus', () => void pluginHost.refresh().catch(() => {}));
   checkHealth();
   loadLibrary();
   if (requestedSettingsSection?.classList.contains('settings-section')) {

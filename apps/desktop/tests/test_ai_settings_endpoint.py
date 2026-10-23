@@ -55,9 +55,14 @@ class AIOptionsEndpointTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             options = {"reasoning_effort": "high", "context_window": 48000, "thinking_budget": 1024}
             selection = "用户选文" * 2000
+            messages = [
+                {"role": "user", "content": "Explain earlier", "quote": "Earlier quote"},
+                {"role": "assistant", "content": "Earlier answer"},
+                {"role": "user", "content": "Explain this", "quote": selection},
+            ]
             handler = object.__new__(server.ScholarHandler)
             handler._completed_job_dir = lambda _: Path(directory)
-            handler._read_json_body = lambda **_: {"messages": [{"role": "user", "content": "Explain"}], "selected_text": selection, "options": options, "stream": True}
+            handler._read_json_body = lambda **_: {"messages": messages, "selected_text": selection, "options": options, "stream": True}
             handler.send_response = handler.send_header = handler.end_headers = lambda *_: None
             handler.wfile = io.BytesIO()
             handler._send_error_json = lambda error, *_: self.fail(error)
@@ -70,6 +75,7 @@ class AIOptionsEndpointTest(unittest.TestCase):
             for call in (info.call_args, streamed.call_args, plain.call_args):
                 self.assertEqual(call.kwargs["options"], options)
                 self.assertEqual(call.kwargs["selected_text"], selection)
+                self.assertEqual(call.kwargs.get("messages", call.args[0] if call.args else None), messages)
             events = [json.loads(line[6:]) for line in handler.wfile.getvalue().decode().splitlines() if line.startswith("data: ")]
             self.assertEqual(events[-1], {"result": {"text": "Answer"}, "context": {"window": 48000}})
 

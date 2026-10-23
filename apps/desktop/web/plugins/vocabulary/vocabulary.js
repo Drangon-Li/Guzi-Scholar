@@ -157,7 +157,7 @@
       list.innerHTML = shown.length ? shown.map((entry) => {
         const editing = entry.id === editingId;
         const model = editing ? draft : entry;
-        return `<article class="vocabulary-card" data-vocabulary-id="${h(entry.id)}"><div class="vocabulary-card-heading"><h2>${h(entry.term)}</h2><span class="vocabulary-review-status">${entry.review?.status === 'mastered' ? '已掌握' : '未掌握'}</span><div class="vocabulary-card-actions"><button data-vocab-action="edit" class="tiny-button" type="button">编辑</button><button data-vocab-action="delete" class="tiny-button" type="button">删除</button></div></div>${editing ? `<form class="vocabulary-edit"><label>释义<textarea name="meaning" rows="3" maxlength="10000">${h(model.meaning || '')}</textarea></label><label>标签<span class="vocabulary-field-hint">逗号分隔，修改后保存即可分类或改名</span><input name="tags" maxlength="1000" value="${h(model.tags || '')}" placeholder="例如：机器学习, 数学"></label><label>备注<textarea name="note" rows="2" maxlength="10000">${h(model.note || '')}</textarea></label>${detailsMarkup({ ...entry, details: model.details }, { editing: true })}<div class="vocabulary-edit-actions"><button class="primary-button compact-button" type="submit">保存</button><button data-vocab-action="cancel-edit" class="secondary-button compact-button" type="button">取消</button></div></form>` : `<p class="vocabulary-meaning">${h(entry.meaning || '暂无释义')}</p>${!entry.meaning ? `<button data-vocab-action="complete" class="tiny-button" type="button"${completing.has(entry.id) ? ' disabled' : ''}>${completing.has(entry.id) ? '补全中…' : '补全释义 / 重试'}</button>` : ''}${entry.note ? `<p class="vocabulary-note">${h(entry.note)}</p>` : ''}${detailsMarkup(entry)}${!hasDetails(entry.details) ? `<button data-vocab-action="explain" class="tiny-button vocabulary-explain" type="button"${explaining.has(entry.id) ? ' disabled aria-busy="true"' : ''}>${explaining.has(entry.id) ? '详细释义生成中…' : '生成详细释义 / 重试'}</button>` : ''}<div class="vocabulary-tags">${(entry.tags || []).map((tag) => `<button data-vocab-action="tag" data-tag="${h(tag)}" type="button">${h(tag)}</button>`).join('')}</div>`}<div class="vocabulary-sources">${(entry.sources || []).map((source, index) => `<div class="vocabulary-source"><blockquote>${h(source.quote || source.selected_text || entry.term)}</blockquote><button data-vocab-action="source" data-source-index="${index}" class="tiny-button" type="button">${h(source.title || '来源文献')}${source.page ? ` · 第 ${h(source.page)} 页` : ''} ↗</button></div>`).join('')}</div></article>`;
+        return `<article class="vocabulary-card" data-vocabulary-id="${h(entry.id)}"><div class="vocabulary-card-heading"><h2>${h(entry.term)}</h2><span class="vocabulary-review-status">${entry.review?.status === 'mastered' ? '已掌握' : '未掌握'}</span><div class="vocabulary-card-actions"><button data-vocab-action="edit" class="tiny-button" type="button">编辑</button><button data-vocab-action="delete" class="tiny-button" type="button">删除</button></div></div>${editing ? `<form class="vocabulary-edit"><label>释义<textarea name="meaning" rows="3" maxlength="10000">${h(model.meaning || '')}</textarea></label><label>标签<span class="vocabulary-field-hint">逗号分隔，修改后保存即可分类或改名</span><input name="tags" maxlength="1000" value="${h(model.tags || '')}" placeholder="例如：机器学习, 数学"></label><label>备注<textarea name="note" rows="2" maxlength="10000">${h(model.note || '')}</textarea></label>${detailsMarkup({ ...entry, details: model.details }, { editing: true })}<div class="vocabulary-edit-actions"><button data-vocab-action="save-edit" class="primary-button compact-button" type="button">保存</button><button data-vocab-action="cancel-edit" class="secondary-button compact-button" type="button">取消</button></div></form>` : `<p class="vocabulary-meaning">${h(entry.meaning || '暂无释义')}</p>${!entry.meaning ? `<button data-vocab-action="complete" class="tiny-button" type="button"${completing.has(entry.id) ? ' disabled' : ''}>${completing.has(entry.id) ? '补全中…' : '补全释义 / 重试'}</button>` : ''}${entry.note ? `<p class="vocabulary-note">${h(entry.note)}</p>` : ''}${detailsMarkup(entry)}${!hasDetails(entry.details) ? `<button data-vocab-action="explain" class="tiny-button vocabulary-explain" type="button"${explaining.has(entry.id) ? ' disabled aria-busy="true"' : ''}>${explaining.has(entry.id) ? '详细释义生成中…' : '生成详细释义 / 重试'}</button>` : ''}<div class="vocabulary-tags">${(entry.tags || []).map((tag) => `<button data-vocab-action="tag" data-tag="${h(tag)}" type="button">${h(tag)}</button>`).join('')}</div>`}<div class="vocabulary-sources">${(entry.sources || []).map((source, index) => `<div class="vocabulary-source"><blockquote>${h(source.quote || source.selected_text || entry.term)}</blockquote><button data-vocab-action="source" data-source-index="${index}" class="tiny-button" type="button">${h(source.title || '来源文献')}${source.page ? ` · 第 ${h(source.page)} 页` : ''} ↗</button></div>`).join('')}</div></article>`;
       }).join('') : '<div class="empty-state">没有匹配的词条。阅读原文时选中单词或短语，点击「加入生词本」。</div>';
       renderReview();
     }
@@ -222,9 +222,7 @@
         draftFields.add(event.target.name);
       }
     });
-    root.addEventListener('submit', async (event) => {
-      if (!event.target.matches('.vocabulary-edit')) return;
-      event.preventDefault();
+    async function saveDraft() {
       const id = editingId;
       const body = {};
       for (const field of draftFields) {
@@ -239,6 +237,11 @@
         applyPatchResponse(id, before, body, payload.entry);
         report('已保存。');
       } catch (error) { report(error.message, true); }
+    }
+    root.addEventListener('submit', (event) => {
+      if (!event.target.matches('.vocabulary-edit')) return;
+      event.preventDefault();
+      void saveDraft();
     });
     root.addEventListener('click', async (event) => {
       const button = event.target.closest('[data-vocab-action]');
@@ -247,6 +250,7 @@
       const id = button.closest('[data-vocabulary-id]')?.dataset.vocabularyId;
       const entry = entries.find((item) => item.id === id);
       try {
+        if (action === 'save-edit') { await saveDraft(); return; }
         if (action === 'edit' && entry) { expandedDetails.delete(`edit:${id}`); editingId = id; draft = { meaning: entry.meaning || '', note: entry.note || '', tags: (entry.tags || []).join(', '), details: normalizeDetails(entry.details) }; draftFields = new Set(); render(); }
         if (action === 'cancel-edit') { editingId = ''; draft = null; render(); }
         if (action === 'delete' && entry && await confirm(`将删除「${entry.term}」的释义、复习记录和来源。原论文与批注不会被删除。`, '删除生词？')) {

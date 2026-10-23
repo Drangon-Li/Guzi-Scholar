@@ -554,8 +554,14 @@ class LibraryStore:
                 if parent.get("system"):
                     raise LibraryValidationError("自定义文件夹不能嵌套在系统文件夹下。")
             folder = {"id": f"folder-{uuid.uuid4().hex[:12]}", "name": name, "parent_id": parent_id, "system": False, "sort_order": len(self.state["folders"]), "created_at": utc_now()}
+            previous_updated_at = self.state.get("updated_at")
             self.state["folders"].append(folder)
-            self._save_locked()
+            try:
+                self._save_locked()
+            except OSError:
+                self.state["folders"].remove(folder)
+                self.state["updated_at"] = previous_updated_at
+                raise
             return copy.deepcopy(folder)
 
     def update_folder(self, folder_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -696,10 +702,8 @@ class LibraryStore:
         with self.lock:
             if str(job_id or "").strip() in self.state.get("permanently_deleted", []):
                 raise LibraryValidationError("文献已被彻底清除。")
-            item = self.state["items"].get(job_id)
-            if not isinstance(item, dict):
-                item = self._job_defaults({"job_id": job_id})
-                self.state["items"][job_id] = item
+            previous = self.state["items"].get(job_id)
+            item = copy.deepcopy(previous) if isinstance(previous, dict) else self._job_defaults({"job_id": job_id})
             if "folder_ids" in payload:
                 folder_ids = []
                 for folder_id in _as_list(payload.get("folder_ids")):
@@ -727,7 +731,17 @@ class LibraryStore:
                     raise LibraryValidationError("显示名称不能超过 200 个字符。")
                 item["alias"] = alias
             item["updated_at"] = utc_now()
-            self._save_locked()
+            previous_updated_at = self.state.get("updated_at")
+            self.state["items"][job_id] = item
+            try:
+                self._save_locked()
+            except OSError:
+                self.state["updated_at"] = previous_updated_at
+                if previous is None:
+                    self.state["items"].pop(job_id, None)
+                else:
+                    self.state["items"][job_id] = previous
+                raise
             return copy.deepcopy(item)
 
     def add_to_folder(self, job_id: str, folder_id: str) -> Dict[str, Any]:
@@ -926,6 +940,8 @@ class LibraryStore:
             item = self.state["items"].get(job_id)
             if not isinstance(item, dict):
                 raise LibraryValidationError("文献不存在。")
+            previous_item = copy.deepcopy(item)
+            previous_updated_at = self.state.get("updated_at")
             metadata = self._normalize_metadata(item.get("metadata"))
             metadata["fields"].update(fields)
             locked = set(metadata.get("locked_fields", []))
@@ -938,7 +954,12 @@ class LibraryStore:
             metadata["error"] = ""
             item["metadata"] = metadata
             item["updated_at"] = utc_now()
-            self._save_locked()
+            try:
+                self._save_locked()
+            except OSError:
+                self.state["items"][job_id] = previous_item
+                self.state["updated_at"] = previous_updated_at
+                raise
             return copy.deepcopy(metadata)
 
     def mark_metadata_retrieving(self, job_id: str) -> Dict[str, Any]:

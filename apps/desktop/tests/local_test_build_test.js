@@ -14,7 +14,7 @@ const mainPath = path.join(root, 'electron', 'main.cjs');
 const mainSource = fs.readFileSync(mainPath, 'utf8');
 const badgeSource = fs.readFileSync(path.join(root, 'web', 'test-build.js'), 'utf8');
 
-function loadMain(metadata, directory) {
+function loadMain(metadata, directory, development = false) {
   const paths = { appData: directory, userData: path.join(directory, 'production') };
   const calls = [];
   const handlers = new Map();
@@ -22,7 +22,8 @@ function loadMain(metadata, directory) {
   const webContents = { mainFrame: frame };
   let startup;
   const app = {
-    isPackaged: true,
+    commandLine: { getSwitchValue: () => '', appendSwitch: () => {}, removeSwitch: () => {} },
+    isPackaged: !development,
     getPath: (key) => paths[key],
     setPath: (key, value) => { paths[key] = value; calls.push(['setPath', key, value]); },
     setName: (value) => calls.push(['setName', value]),
@@ -36,7 +37,7 @@ function loadMain(metadata, directory) {
   const counters = { updates: 0, legacy: 0, installation: 0 };
   const context = vm.createContext({
     require: (name) => {
-      if (name === 'electron') return { app, ipcMain: { handle: (key, handler) => handlers.set(key, handler) } };
+      if (name === 'electron') return { app, powerMonitor: { on: () => {} }, ipcMain: { handle: (key, handler) => handlers.set(key, handler) } };
       if (name === '../package.json') return metadata;
       if (name === './update-service.cjs') return { checkForUpdate: () => { counters.updates += 1; } };
       if (name === './macos-installation.cjs') return {
@@ -55,6 +56,7 @@ function loadMain(metadata, directory) {
     __dirname: path.dirname(mainPath),
     process: {
       platform: 'darwin', arch: 'arm64',
+      argv: development ? ['electron', '--guzi-development', `--guzi-dev-root=${path.join(directory, 'isolated-development')}`] : [],
       env: { MY_SCHOLAR_DATA_DIR: path.join(directory, 'production-state'), MY_SCHOLAR_LIBRARY_DIR: path.join(directory, 'production-library') },
     },
     console,
@@ -125,6 +127,19 @@ async function main() {
     assert.strictEqual((await test.handlers.get('my-scholar:check-for-updates')(test.event)).ok, false);
     assert.strictEqual((await test.handlers.get('my-scholar:open-update-download')(test.event)).ok, false);
     assert.strictEqual(test.counters.updates, 0, 'test build must never query a production manifest');
+    const development = loadMain({}, directory, true);
+    const developmentRoot = path.join(directory, 'isolated-development');
+    assert.strictEqual(development.paths.userData, developmentRoot);
+    const developmentStorage = vm.runInContext('storageConfiguration()', development.context);
+    assert.strictEqual(developmentStorage.stateDir, path.join(developmentRoot, 'state'));
+    assert.strictEqual(developmentStorage.currentPath, path.join(developmentRoot, 'library'));
+    await development.startup();
+    assert.strictEqual(development.counters.legacy, 0, 'development must not adopt production data');
+    assert.strictEqual(development.counters.installation, 0);
+    const developmentContext = development.handlers.get('my-scholar:get-startup-context')(development.event);
+    assert.strictEqual(developmentContext.app.channel, 'development');
+    assert.strictEqual(developmentContext.app.name, '谷子学术开发版');
+    assert.strictEqual((await development.handlers.get('my-scholar:check-for-updates')(development.event)).ok, false);
     const production = loadMain({}, directory);
     assert.strictEqual(production.paths.userData, path.join(directory, 'production'));
     assert.strictEqual(vm.runInContext('storageConfiguration().stateDir', production.context), path.join(directory, 'production-state'));
@@ -145,6 +160,8 @@ async function main() {
   const productionBadge = await renderBadge({ ok: true, app: {} });
   assert.strictEqual(productionBadge.elements.size, 0);
   assert.strictEqual(productionBadge.styles.length, 0);
+  const developmentBadge = await renderBadge({ ok: true, app: { developmentBuild: 'MCP · Plugins' } });
+  assert.strictEqual(developmentBadge.elements.get('localTestBuildBadge').textContent, '开发版 · MCP · Plugins');
   console.log('local test build tests passed');
 }
 

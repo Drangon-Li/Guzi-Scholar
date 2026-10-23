@@ -117,6 +117,18 @@ def _atomic_temp_path(target: Path) -> Path:
     """Give each concurrent writer its own temporary file."""
     return target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
 
+def _atomic_write_text(target: Path, text: str) -> None:
+    temporary = _atomic_temp_path(target)
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _empty_media_layout() -> Dict[str, Any]:
     return {"version": 1, "items": {}}
 

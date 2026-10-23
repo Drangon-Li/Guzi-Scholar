@@ -73,7 +73,7 @@ let browserSession;
 
   async function openFirstDocument() {
     await page.goto(baseURL, { waitUntil: 'networkidle' });
-    const card = requestedJobId ? page.locator(`.library-card[data-job-id="${requestedJobId}"]`).first() : page.locator('.library-card[data-status="completed"]').first();
+    const card = requestedJobId ? page.locator(`.library-card[data-job-id="${requestedJobId}"]`).first() : process.env.MY_SCHOLAR_TEST_DATA ? page.locator('#library-view .library-card[data-status="completed"]').filter({ hasText: 'OneLLM: One Framework to Align All Modalities with Language' }) : page.locator('.library-card[data-status="completed"]').first();
     await card.waitFor();
     await card.locator('.library-row-name').dblclick();
     await page.locator('#reader-view.active-view').waitFor();

@@ -1,6 +1,6 @@
 {
   "name": "my-scholar",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "private": true,
   "license": "Apache-2.0",
   "description": "Clean-room local academic PDF reader",
@@ -9,8 +9,8 @@
   "scripts": {
     "start": "node electron/launcher.cjs",
     "dev": "node electron/launcher.cjs",
-    "check": "npm run check:syntax && npm run test:unit && npm run test:graph && npm run test:storage && npm run test:runtime",
-    "check:syntax": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/library-storage.cjs && node --check electron/update-service.cjs && node --check electron/renderer-state.cjs && node --check electron/url-security.cjs && node --check electron/python-runtime.cjs && node --check electron/macos-installation.cjs && node --check electron/launcher.cjs && node --check scripts/after-pack.cjs && node --check scripts/build-mac-target.cjs && node --check web/graph-model.js && node --check web/graph-view.js && node --check web/core.js && node --check web/background-tasks.js && node --check web/onboarding.js && node --check web/paragraph_continuation.js && node --check web/app.js && node --check tests/playwright.cjs && node --check tests/run_python_tests.js && node --check tests/run_ui_tests.js && node --check tests/web_smoke.js && node --check tests/feature_smoke.js && node --check tests/translation_smoke.js && node --check tests/math_typography_smoke.js && node --check tests/reader_experience_smoke.js && node --check tests/reader_transition_smoke.js && node --check tests/reader_keepalive_smoke.js && node --check tests/reader_memory_smoke.js && node --check tests/reader_switch_performance_smoke.js && node --check tests/navigation_performance_smoke.js && node --check tests/citation_anchor_smoke.js && node --check tests/library_smoke.js && node --check tests/library_v3_smoke.js && node --check tests/library_interactions_v4.js && node --check tests/reading_progress_retirement_smoke.js && node --check tests/interaction_regression.js && node --check tests/graph_model_smoke.js && node --check tests/graph_ui_smoke.js && node --check tests/onboarding_smoke.js && node --check tests/library_storage_test.js && node --check tests/update_service_test.js && node --check tests/renderer_state_test.js && node --check tests/desktop_security_test.js && node --check tests/python_runtime_test.js && node --check tests/macos_installation_test.js && node --check tests/mac_release_test.js && node --check tests/tencent_deploy_test.js && sh -n run.sh && zsh -n run-my-scholar.command && zsh -n scripts/fetch-pandoc.sh && zsh -n scripts/prepare-mac-release.sh && zsh -n scripts/remote-ai-tunnel.sh && zsh -n scripts/lsl-proxy-command.sh && node --check tests/translation_queue_test.js && node --check tests/translation_cache_identity_test.js && node --check tests/chat_math_cache_test.js && node --check web/zotero-import.js && node --check tests/ai_controls_test.js && node --check tests/ai_controls_smoke.js && node --check tests/zotero_import_test.js && node --check tests/zotero_import_smoke.js && node --check tests/translation_controls_test.js && node --check tests/translation_controls_smoke.js && node --check tests/annotation_hover_smoke.js && node --check tests/annotation_colors_smoke.js && node --check web/vocabulary.js && node --check web/test-build.js && node --check tests/vocabulary_unit.js && node --check tests/vocabulary_smoke.js && node --check tests/local_test_build_test.js && node --check scripts/local-test-builder-config.cjs && node --check tests/translation_incremental_test.js && node --check tests/annotation_action_sync_test.js && node --check tests/zotero_note_markers_test.js && node --check tests/zotero_note_markers_smoke.js && node --check tests/zotero_anchor_mapping_smoke.js && node --check tests/selection_shortcuts_test.js && node --check tests/sentence_hover_toolbar_test.js && node --check tests/reader_shortcuts_test.js",
+    "check": "npm run check:syntax && npm run test:unit && npm run test:graph && npm run test:storage && npm run test:runtime && npm run test:mcp",
+    "check:syntax": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/library-storage.cjs && node --check electron/update-service.cjs && node --check electron/renderer-state.cjs && node --check electron/url-security.cjs && node --check electron/python-runtime.cjs && node --check electron/macos-installation.cjs && node --check electron/launcher.cjs && node --check scripts/after-pack.cjs && node --check scripts/build-mac-target.cjs && node --check web/graph-model.js && node --check web/graph-view.js && node --check web/core.js && node --check web/background-tasks.js && node --check web/onboarding.js && node --check web/paragraph_continuation.js && node --check web/app.js && node --check tests/playwright.cjs && node --check tests/run_python_tests.js && node --check tests/run_ui_tests.js && node --check tests/web_smoke.js && node --check tests/feature_smoke.js && node --check tests/translation_smoke.js && node --check tests/math_typography_smoke.js && node --check tests/reader_experience_smoke.js && node --check tests/reader_transition_smoke.js && node --check tests/reader_keepalive_smoke.js && node --check tests/reader_memory_smoke.js && node --check tests/reader_switch_performance_smoke.js && node --check tests/navigation_performance_smoke.js && node --check tests/citation_anchor_smoke.js && node --check tests/library_smoke.js && node --check tests/library_v3_smoke.js && node --check tests/library_interactions_v4.js && node --check tests/reading_progress_retirement_smoke.js && node --check tests/interaction_regression.js && node --check tests/graph_model_smoke.js && node --check tests/graph_ui_smoke.js && node --check tests/onboarding_smoke.js && node --check tests/library_storage_test.js && node --check tests/update_service_test.js && node --check tests/renderer_state_test.js && node --check tests/desktop_security_test.js && node --check tests/python_runtime_test.js && node --check tests/macos_installation_test.js && node --check tests/mac_release_test.js && node --check tests/tencent_deploy_test.js && sh -n run.sh && zsh -n run-my-scholar.command && zsh -n scripts/fetch-pandoc.sh && zsh -n scripts/prepare-mac-release.sh && zsh -n scripts/remote-ai-tunnel.sh && zsh -n scripts/lsl-proxy-command.sh && node --check tests/translation_queue_test.js && node --check tests/translation_cache_identity_test.js && node --check tests/chat_math_cache_test.js && node --check web/zotero-import.js && node --check tests/ai_controls_test.js && node --check tests/ai_controls_smoke.js && node --check tests/zotero_import_test.js && node --check tests/zotero_import_smoke.js && node --check tests/translation_controls_test.js && node --check tests/translation_controls_smoke.js && node --check tests/annotation_hover_smoke.js && node --check tests/annotation_colors_smoke.js && node --check web/plugins/vocabulary/vocabulary.js && node --check web/test-build.js && node --check tests/vocabulary_unit.js && node --check tests/vocabulary_smoke.js && node --check tests/local_test_build_test.js && node --check scripts/local-test-builder-config.cjs && node --check tests/translation_incremental_test.js && node --check tests/annotation_action_sync_test.js && node --check tests/zotero_note_markers_test.js && node --check tests/zotero_note_markers_smoke.js && node --check tests/zotero_anchor_mapping_smoke.js && node --check tests/selection_shortcuts_test.js && node --check tests/sentence_hover_toolbar_test.js && node --check tests/reader_shortcuts_test.js && node --check mcp/bridge-source.cjs && node --check electron/mcp-config.cjs && node --check scripts/build-mcp.cjs && node --check scripts/start-development.cjs && node --check web/plugin-host.js && node --check web/plugin-sdk.js && node --check web/market.js && node --check web/mcp-settings.js && node --check web/plugins/vocabulary/main.js && node --check tests/plugin_market_smoke.js && node --check tests/notes_revision_smoke.js && node --check tests/mcp_bridge_test.js && node --check tests/plugin_security_test.js && node --check tests/plugin_sdk_test.js && node --check electron/plugin-guard.cjs && node --check tests/plugin_guard_test.js",
     "test": "npm run check",
     "lint": "npm run lint:js && npm run lint:py",
     "lint:js": "eslint .",
@@ -38,7 +38,7 @@
     "test:ui:reading-progress": "node tests/reading_progress_retirement_smoke.js",
     "test:ui:graph": "node tests/graph_ui_smoke.js",
     "test:ui:onboarding": "node tests/onboarding_smoke.js",
-    "prepare:mac": "zsh scripts/prepare-mac-release.sh",
+    "prepare:mac": "npm run mcp:build && zsh scripts/prepare-mac-release.sh",
     "fetch:odl": "zsh scripts/fetch-opendataloader.sh",
     "pack:mac": "npm run prepare:mac && node scripts/build-mac-target.cjs dir internal",
     "dist:mac": "node scripts/build-mac-target.cjs check release && MY_SCHOLAR_RELEASE_BUILD=1 npm run prepare:mac && node scripts/build-mac-target.cjs dmg release",
@@ -50,11 +50,21 @@
     "test:ui:zotero-import": "node tests/run_ui_tests.js --only=zotero-import",
     "test:ui:zotero-anchor-mapping": "node tests/run_ui_tests.js --only=zotero-anchor-mapping",
     "test:ui:translation-controls": "node tests/run_ui_tests.js --only=translation-controls",
-    "test:ui:vocabulary": "node tests/run_ui_tests.js --only=vocabulary"
+    "test:ui:vocabulary": "node tests/run_ui_tests.js --only=vocabulary",
+    "mcp:build": "node scripts/build-mcp.cjs",
+    "dev:plugins": "node scripts/start-development.cjs",
+    "prestart": "npm run mcp:build",
+    "predev": "npm run mcp:build",
+    "test:mcp": "npm run mcp:build && node tests/mcp_bridge_test.js && node tests/plugin_security_test.js && node tests/plugin_sdk_test.js && node tests/plugin_guard_test.js",
+    "test:ui:plugin-market": "node tests/run_ui_tests.js --only=plugin-market",
+    "test:ui:notes-revision": "node tests/run_ui_tests.js --only=notes-revision"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.3.1",
+    "@modelcontextprotocol/server": "2.3.1",
     "electron": "43.2.0",
     "electron-builder": "26.15.3",
+    "esbuild": "0.28.2",
     "eslint": "^9.39.5",
     "globals": "^17.11.0"
   },
@@ -83,7 +93,10 @@
       "!**/*.key",
       "!**/__pycache__{,/**/*}",
       "!**/*.py[cod]",
-      "!**/.DS_Store"
+      "!**/.DS_Store",
+      "mcp/bridge.cjs",
+      "mcp/bridge.cjs.LEGAL.txt",
+      "plugin_templates/**/*"
     ],
     "extraResources": [
       {

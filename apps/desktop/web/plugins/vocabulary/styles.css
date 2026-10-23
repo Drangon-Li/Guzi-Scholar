@@ -1,0 +1,122 @@
+:root {
+  color-scheme: light dark;
+  --ink: #1c2731;
+  --muted: #5f6f7a;
+  --text-secondary: #4f5f6c;
+  --text-tertiary: #5f6b76;
+  --line: #e1e7eb;
+  --paper: #fff;
+  --canvas: #f5f7f8;
+  --soft: #f8fafb;
+  /* Warm My Scholar accent. Category colors stay distinct, while the
+     application chrome and manual annotations use the user's amber accent. */
+  --accent: #b45309;
+  --accent-dark: #92400e;
+  --accent-soft: #fff3d6;
+  --accent-fill: #b45309;
+  --accent-fill-hover: #92400e;
+  --on-accent: #fff;
+  --green: #299a73;
+  --yellow: #f1a340;
+  --blue: #2f7fc1;
+  --highlight-orange: #f59e0b;
+  --user-highlight: #f59e0b;
+  --highlight-goal: #2f9d72;
+  --highlight-method: #e39a22;
+  --highlight-innovation: #8b6edb;
+  --highlight-conclusion: #d15d79;
+  /* Elevation follows the macOS pattern: a hairline definition ring plus a
+     soft, wide ambient shadow that grows with the surface's height. */
+  --shadow: 0 1px 3px rgba(28, 39, 49, .07);
+  --shadow-pop: 0 0 0 .5px rgba(20, 32, 45, .08), 0 2px 10px rgba(20, 32, 45, .08), 0 12px 40px rgba(20, 32, 45, .18);
+  --shadow-window: 0 0 0 .5px rgba(20, 32, 45, .10), 0 10px 30px rgba(20, 32, 45, .16), 0 28px 90px rgba(20, 32, 45, .26);
+  --material-bar: color-mix(in srgb, var(--paper) 76%, transparent);
+  --material-overlay: color-mix(in srgb, var(--paper) 70%, transparent);
+  --material-filter: blur(28px) saturate(190%);
+  /* Motion mirrors AppKit timing: menus snap open, panels glide, and page
+     transitions decelerate. The spring curve overshoots by a hair, the way
+     macOS popovers settle. */
+  --motion-fast: 150ms;
+  --motion-panel: 200ms;
+  --motion-page: 260ms;
+  --motion-ease-out: cubic-bezier(.22, 1, .36, 1);
+  --motion-ease-spring: cubic-bezier(.3, 1.25, .4, 1);
+  --motion-ease-exit: cubic-bezier(.4, 0, 1, 1);
+  --reader-font: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", "Segoe UI", sans-serif;
+  --app-font: var(--reader-font);
+  --toolbar-font-size: 11px;
+  --reader-font-scale: 1;
+  --reader-line-height: 1.72;
+  --reader-content-font-family: "Times New Roman", Times, "Songti SC", STSong, "Noto Serif CJK SC", serif;
+  --reader-content-font-size: 17px;
+  --reader-heading-font-size: 15px;
+  --reader-support-font-size: 14px;
+  --reader-caption-font-size: 12px;
+}
+
+.vocabulary-layout { max-width: 1120px; margin: 0 auto; padding: 30px 32px 60px; }
+.vocabulary-toolbar,.vocabulary-filters,.vocabulary-card-heading,.vocabulary-card-actions,.vocabulary-edit-actions,.vocabulary-review-heading,.vocabulary-review-actions { display: flex; align-items: center; gap: 12px; }
+.vocabulary-filters { flex-wrap: wrap; margin: 8px 0 22px; }
+.vocabulary-filters .search-box { flex: 1; min-width: 230px; }
+.vocabulary-filters select { max-width: 220px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink); }
+.vocabulary-list { display: grid; gap: 16px; }
+.vocabulary-card,.vocabulary-review { padding: 22px 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
+.vocabulary-card h2 { margin: 0; font-size: 21px; overflow-wrap: anywhere; }
+.vocabulary-review-status { flex-shrink: 0; color: var(--muted); font-size: 12px; }
+.vocabulary-card-actions { margin-left: auto; flex-shrink: 0; gap: 5px; }
+.vocabulary-meaning,.vocabulary-note,.vocabulary-review-meaning { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; -webkit-user-select: text; user-select: text; }
+.vocabulary-note,.vocabulary-field-hint { color: var(--muted); font-size: 13px; }
+.vocabulary-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+.vocabulary-tags button { padding: 3px 9px; background: var(--accent-soft); color: var(--accent-dark); border: 0; border-radius: 12px; font-size: 12px; }
+.vocabulary-sources { margin-top: 15px; display: grid; gap: 10px; }
+.vocabulary-source { border-left: 2px solid var(--line); padding-left: 12px; }
+.vocabulary-source blockquote,.vocabulary-review blockquote { margin: 0 0 5px; color: var(--text-secondary); line-height: 1.65; overflow-wrap: anywhere; white-space: pre-wrap; user-select: text; }
+.vocabulary-edit { display: grid; gap: 12px; margin-top: 16px; }
+.vocabulary-edit label { display: grid; gap: 6px; font-size: 13px; }
+.vocabulary-edit input,.vocabulary-edit textarea { box-sizing: border-box; width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--canvas); color: var(--ink); font: inherit; }
+.vocabulary-edit textarea { resize: vertical; }
+.vocabulary-review { max-width: 740px; margin: 25px auto; padding: 30px; }
+.vocabulary-review h2 { font-size: 32px; margin: 35px 0 20px; overflow-wrap: anywhere; }
+.vocabulary-review-heading { justify-content: space-between; color: var(--muted); }
+.vocabulary-review blockquote { margin-bottom: 25px; }
+.vocabulary-review-actions { margin-top: 24px; }
+.vocabulary-review-meaning { margin-top: 20px; }
+.vocabulary-details { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.vocabulary-details > summary { cursor: pointer; font-size: 13px; color: var(--text-secondary); }
+.vocabulary-details-badge { margin-left: 8px; color: var(--muted); font-size: 11px; font-weight: 400; }
+.vocabulary-details dl { display: grid; gap: 14px; margin: 16px 0 0; }
+.vocabulary-detail-field dt { color: var(--text-secondary); font-size: 12px; font-weight: 600; }
+.vocabulary-detail-field dd { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; user-select: text; }
+.vocabulary-details-editor { display: grid; gap: 12px; margin-top: 14px; }
+.vocabulary-explain { margin-top: 8px; }
+#vocabulary-status.error { color: #c24136; }
+#selection-add-vocabulary:disabled { color: var(--muted); cursor: default; }
+@media (max-width: 700px) {
+  .vocabulary-layout { padding: 20px 16px 50px; }
+  .vocabulary-card { padding: 17px; }
+  .vocabulary-card-heading { flex-wrap: wrap; gap: 8px; }
+  .vocabulary-card h2 { font-size: 19px; }
+  .vocabulary-toolbar { flex-wrap: wrap; }
+  .vocabulary-review { padding: 20px; }
+}
+* { box-sizing: border-box; }
+/* Application chrome is an interaction surface, not document content. Keep
+   selection available only for fields and the user's own rendered notes. */
+*, *::before, *::after { -webkit-user-select: none; user-select: none; }
+input, textarea, [contenteditable="true"] { -webkit-user-select: text; user-select: text; }
+[hidden] { display: none !important; }
+html, body { min-height: 100%; }
+body { margin: 0; background: var(--canvas); color: var(--ink); font-family: var(--app-font); line-height: 1.55; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility; }
+button, input, textarea { font: inherit; }
+button { cursor: pointer; }
+button:not(:disabled):active { transform: translateY(.5px) scale(.99); filter: brightness(.97); }
+button:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 1px; }
+
+/* Overlay-style scrollbars, matching macOS "show when scrolling" bars. */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 99px; background-clip: padding-box; background-color: color-mix(in srgb, var(--ink) 22%, transparent); }
+::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--ink) 36%, transparent); }
+
+
+.library-main-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;margin-bottom:24px}.library-main-heading h1{margin:3px 0;font-size:28px}.eyebrow{font-size:11px;letter-spacing:.12em;color:var(--accent);font-weight:600}.library-subtitle{font-size:13px;color:var(--muted);margin:4px 0}.primary-button,.secondary-button,.tiny-button{border:1px solid var(--line);border-radius:8px;padding:7px 12px;background:var(--paper);color:var(--ink)}.primary-button{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}.tiny-button{font-size:12px;padding:4px 8px}.compact-button{font-size:13px}.empty-state{padding:40px 20px;text-align:center;color:var(--muted)}.search-box{display:flex;align-items:center;gap:8px;padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--paper)}.search-box input{border:0;outline:0;background:transparent;color:inherit;width:100%}.panel-status{font-size:13px;color:var(--muted)}button:disabled{opacity:.5;cursor:default}@media(prefers-color-scheme:dark){:root{--ink:#e4e9ee;--muted:#9caab5;--text-secondary:#b7c3cd;--line:#343c43;--paper:#21262b;--canvas:#171b1f;--soft:#262c32;--accent:#e6a04b;--accent-dark:#f3bf7a;--accent-soft:#453321;--on-accent:#1c2731}}@media(max-width:700px){.library-main-heading{align-items:flex-start;flex-direction:column}}

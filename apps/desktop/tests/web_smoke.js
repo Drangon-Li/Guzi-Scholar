@@ -182,7 +182,7 @@ let browserSession;
       navigationIcons: navigationLinks.map((link) => link.querySelectorAll('.settings-navigation-icon svg').length),
     };
   });
-  const expectedSettingsSections = ['settings-reading', 'settings-shortcuts', 'settings-metadata', 'settings-parsing', 'settings-ai', 'settings-updates'];
+  const expectedSettingsSections = ['settings-reading', 'settings-shortcuts', 'settings-metadata', 'settings-parsing', 'settings-ai', 'settings-mcp', 'settings-updates'];
   if ((await page.locator('.settings-navigation a[href="#settings-shortcuts"]').innerText()).trim() !== '快捷操作') throw new Error('Quick actions category label is incorrect');
   if (await page.locator('#settings-shortcuts .annotation-action-settings').count() !== 1 || await page.locator('#settings-reading .annotation-action-settings').count()) throw new Error('Selection toolbar preferences are not in Quick actions');
   if (await page.locator('.ai-advanced-settings:not([open])').count() !== 2) throw new Error('AI advanced settings must start collapsed');
