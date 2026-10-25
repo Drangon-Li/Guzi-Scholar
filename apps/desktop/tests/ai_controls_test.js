@@ -32,7 +32,9 @@ const context = vm.createContext({
   aiStreamMaxBytes: 1000000, aiStreamMaxBufferChars: 200000,
   jsonOptions: (body) => ({ body }),
 });
-vm.runInContext(segment('  function newChatThread(', '  function recoverInterruptedChat(')
+vm.runInContext('const browserDemo = null; let demoResetting = false;\n'
+  + segment('  const request = ', '  const appearanceDefaults = ')
+  + segment('  function newChatThread(', '  function recoverInterruptedChat(')
   + segment('  function normalizeChatPinnedAt(', '  function newChatThread(')
   + segment('  function serializableChatEnvelope(', '  function persistChatSession(')
   + segment('  async function streamApiRequest(', '  async function requestTranslation(')

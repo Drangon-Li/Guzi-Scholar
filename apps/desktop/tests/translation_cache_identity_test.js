@@ -43,6 +43,35 @@ vm.runInContext([
   'this.hover = setReaderSentenceHover; this.replay = renderCachedTranslations; this.preview = previewCaptionTranslation; this.usable = hasUsableTranslation;',
 ].join('\n'), context);
 
+const archived = { block_id: 'archived-block', source_hash: 'archived-source', target_language: '中文', profile_id: 'archived-profile', text: '已有译文' };
+const current = { ...archived, profile_id: 'current-profile', text: '当前译文' };
+const french = { ...archived, target_language: 'fr', text: 'Traduction' };
+const profileContext = vm.createContext({
+  state: { health: { ai: { services: { translation: { target_language: 'zh' } } } } },
+  translationCacheFor: () => [archived, current, french],
+});
+vm.runInContext([
+  section('function healthAIService(', 'function clearRenderedTranslations('),
+  section('function translationTargetLanguage(', 'async function streamApiRequest('),
+  'this.filter = translationsForActiveProfile; this.cached = cachedTranslation;',
+].join('\n'), profileContext);
+const filteredProfiles = () => Array.from(profileContext.filter([archived, current, french]), (record) => record.profile_id);
+assert.deepEqual(filteredProfiles(), [], 'Desktop mode without an active profile cannot replay archived translations.');
+assert.equal(profileContext.cached('archived-block', 'archived-source', 'zh', 'fixture'), null);
+profileContext.state.health.readonly = true;
+assert.deepEqual(filteredProfiles(), ['archived-profile', 'current-profile'], 'Read-only replay ignores profiles while retaining the target language.');
+assert.strictEqual(profileContext.cached('archived-block', 'archived-source', 'zh', 'fixture'), archived);
+assert.equal(profileContext.cached('other-block', 'archived-source', 'zh', 'fixture'), undefined, 'Read-only cache lookup still requires the source block.');
+assert.equal(profileContext.cached('archived-block', 'other-source', 'zh', 'fixture'), undefined, 'Read-only cache lookup still requires the source hash.');
+assert.equal(profileContext.cached('archived-block', 'archived-source', 'de', 'fixture'), undefined, 'Read-only cache lookup still requires the target language.');
+profileContext.state.health.ai.services.translation.profile_id = 'current-profile';
+assert.strictEqual(profileContext.cached('archived-block', 'archived-source', 'zh', 'fixture'), archived, 'An active profile does not hide archived showcase translations.');
+for (const readonly of [false, undefined, 'true']) {
+  profileContext.state.health.readonly = readonly;
+  assert.deepEqual(filteredProfiles(), ['current-profile'], 'Only a boolean read-only flag bypasses desktop profile isolation.');
+  assert.strictEqual(profileContext.cached('archived-block', 'archived-source', 'zh', 'fixture'), current);
+}
+
 (async () => {
   await context.request(sentence, null, math('x'));
   const y = await context.request(sentence, null, math('y'));
@@ -160,5 +189,5 @@ vm.runInContext([
   assert.match(section('function setReaderSentenceHover(', 'function installReaderSentenceHover('), /translationSourceIdentity\(source\)/, 'Hover pending requests use the complete structured identity.');
   const consumers = app.replace(section('function hashText(', 'function paragraphSource('), '');
   assert.doesNotMatch(consumers, /cachedTranslation\(\w+, hashText\(source\.text\)/, 'Cache consumers must use the same source identity.');
-  console.log(JSON.stringify({ translationCacheIdentity: true, formulaVariants: 6, markerAndStyleVariants: 4, persistedReload: true, verifiedLegacyReuse: true, plainTextCompatibility: true }));
+  console.log(JSON.stringify({ translationCacheIdentity: true, formulaVariants: 6, markerAndStyleVariants: 4, persistedReload: true, verifiedLegacyReuse: true, plainTextCompatibility: true, readonlyArchivedReplay: true, desktopProfileIsolation: true }));
 })().catch((error) => { console.error(error); process.exitCode = 1; });

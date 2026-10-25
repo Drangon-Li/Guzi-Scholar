@@ -32,6 +32,8 @@
     return text.slice(left, tail ? end + tail.index + 1 : text.length).trim().slice(0, 10000);
   }
 
+  const browserDemo = root.MyScholarDemo?.enabled ? root.MyScholarDemo : null;
+  const browserStateKey = (key) => browserDemo ? `${browserDemo.statePrefix}${key}` : key;
   const desktopPersistentState = root.myScholarDesktop?.state || null;
   const isDesktopApp = Boolean(desktopPersistentState);
   const persistentStateValues = new Map();
@@ -41,6 +43,7 @@
   let persistentStateLoadError = null;
 
   const ready = (async () => {
+    if (browserDemo) await browserDemo.ready;
     if (!desktopPersistentState) return;
     try {
       const values = await desktopPersistentState.loadAll();
@@ -78,7 +81,8 @@
   }
 
   function persistentStateGet(key) {
-    if (!desktopPersistentState) return localStorage.getItem(key);
+    if (browserDemo?.invalidated) return null;
+    if (!desktopPersistentState) return localStorage.getItem(browserStateKey(key));
     const pending = persistentStatePending.get(key);
     if (pending) return pending.type === 'remove' ? null : pending.value;
     if (persistentStateValues.has(key)) return persistentStateValues.get(key);
@@ -88,9 +92,10 @@
   }
 
   function persistentStateSet(key, value) {
+    if (browserDemo?.invalidated) return false;
     const text = String(value);
     if (!desktopPersistentState) {
-      localStorage.setItem(key, text);
+      localStorage.setItem(browserStateKey(key), text);
       return;
     }
     persistentStateValues.set(key, text);
@@ -100,7 +105,8 @@
   }
 
   function persistentStateRemove(key) {
-    localStorage.removeItem(key);
+    if (browserDemo?.invalidated) return false;
+    localStorage.removeItem(browserStateKey(key));
     if (!desktopPersistentState) return;
     persistentStateValues.delete(key);
     persistentStateFailures.delete(key);

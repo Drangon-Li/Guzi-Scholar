@@ -25,6 +25,8 @@ const context = vm.createContext({
   fetch: async () => new Promise((resolve) => pending.push((payload) => resolve({ ok: true, json: async () => payload }))),
 });
 vm.runInContext([
+  'const browserDemo = null; let demoResetting = false;',
+  section('const request =', 'const appearanceDefaults ='),
   section('const annotationStyleSyncs =', 'const jsonOptions ='),
   section('function applyAnnotationActionFields(', 'const builtinAnnotationActions ='),
   'this.api = api; this.sync = applyAnnotationActionSync;',

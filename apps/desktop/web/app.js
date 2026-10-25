@@ -13,7 +13,40 @@
     persistentStateRemove,
     persistentStateSet,
   } = window.MyScholarCore;
-  await window.MyScholarCore.ready;
+  const browserDemo = window.MyScholarDemo?.enabled ? window.MyScholarDemo : null;
+  let demoResetting = false;
+  if (browserDemo) window.addEventListener('my-scholar-demo-invalidated', showBrowserDemoInvalidation);
+  if (browserDemo) {
+    try {
+      await window.MyScholarCore.ready;
+      await browserDemo.ready;
+    } catch (_) {
+      if (browserDemo.invalidated) { showBrowserDemoInvalidation(); return; }
+      document.title = '谷子学术 · 本地测试版启动失败';
+      const notice = document.createElement('div');
+      notice.id = 'browser-demo-startup-error';
+      notice.className = 'browser-demo-ai-notice';
+      notice.setAttribute('role', 'alert');
+      const message = document.createElement('p');
+      message.textContent = '浏览器本地测试版无法启动。请刷新页面，并确认浏览器允许本网站使用本地存储。若仍失败，请稍后重试。';
+      const retry = document.createElement('button');
+      retry.type = 'button';
+      retry.className = 'secondary-button compact-button';
+      retry.textContent = '刷新重试';
+      retry.addEventListener('click', () => location.reload());
+      notice.append(message, retry);
+      document.body.prepend(notice);
+      return;
+    }
+  } else {
+    await window.MyScholarCore.ready;
+  }
+  if (browserDemo?.invalidated) { showBrowserDemoInvalidation(); return; }
+  const request = (url, options = {}) => {
+    if (demoResetting) return Promise.reject(new Error('正在重置测试数据。'));
+    if (browserDemo?.invalidated) return Promise.reject(new Error('测试数据已重置，请刷新后继续。'));
+    return browserDemo ? browserDemo.fetch(url, options) : fetch(url, options);
+  };
 
   const appearanceDefaults = Object.freeze({ app_font: 'system', reader_font: 'academic', accent: 'amber' });
   const appearanceOptions = Object.freeze({
@@ -320,7 +353,7 @@
   const annotationStyleSyncs = [];
   const annotationResponseRevisions = new WeakMap();
   const api = async (url, options = {}) => {
-    const response = await fetch(url, options);
+    const response = await request(url, options);
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       const errorBody = payload?.error && typeof payload.error === 'object' ? payload.error : {};
@@ -374,6 +407,10 @@
 
   function translationsForActiveProfile(records) {
     const values = Array.isArray(records) ? records : [];
+    if (state.health?.readonly === true) {
+      const normalizedLanguage = (value) => ['zh', 'ZH', '中文', 'Chinese'].includes(String(value)) ? 'zh' : String(value).toLowerCase();
+      return values.filter((record) => normalizedLanguage(record?.target_language) === normalizedLanguage(translationTargetLanguage()));
+    }
     const profileId = translationProfileId();
     // An empty profile must never render a translation produced by a previous
     // model. Cache records remain on disk for an explicit switch-back, but
@@ -474,6 +511,10 @@
     window.setTimeout(finish, 240);
   }
   function switchView(viewId, { enteringDocumentId = null } = {}) {
+    if (browserDemo && ['market-view', 'plugin-preview-view'].includes(viewId)) {
+      showToast('浏览器本地测试版不安装或开发插件，请使用桌面版。');
+      return;
+    }
     if (viewId !== 'plugin-preview-view') void market.leavePreview();
     if (viewId !== 'library-view' && state.groupingMenuOpen) setGroupingMenuOpen(false);
     if (viewId !== 'library-view' && viewId !== 'views-view') closeLibraryCellEditor();
@@ -569,8 +610,8 @@
       section.classList.toggle('is-active', active);
     });
     setActiveSettingsNavigation(target.id);
-    if (target.id === 'settings-parsing') void loadParsingProviders();
-    if (target.id === 'settings-mcp') void mcpSettings.load();
+    if (!browserDemo && target.id === 'settings-parsing') void loadParsingProviders();
+    if (!browserDemo && target.id === 'settings-mcp') void mcpSettings.load();
     if (updateHash && location.hash !== `#${target.id}`) history.replaceState(null, '', `#${target.id}`);
     if (scroll) window.scrollTo({ top: 0, behavior: 'auto' });
   }
@@ -922,6 +963,7 @@
   function importFileKey(file) { return `${file.name}:${file.size}:${Number(file.lastModified || 0)}`; }
 
   function enqueueFiles(files) {
+    if (browserDemo) { showToast('浏览器本地测试版仅使用内置样例，不支持上传 PDF。'); return; }
     showError('');
     if (importQueueDismissTimer) { window.clearTimeout(importQueueDismissTimer); importQueueDismissTimer = null; }
     const incoming = [...(files || [])];
@@ -1399,6 +1441,7 @@
     if (!button || !list || !menu) return;
     const field = activeGroupField();
     button.textContent = `${groupFieldLabel(field)}⌄`;
+    button.disabled = state.health?.readonly === true;
     button.dataset.groupBy = field;
     button.setAttribute('aria-expanded', String(state.groupingMenuOpen));
     const options = groupableColumns();
@@ -1971,7 +2014,7 @@
       // A trashed paper is restored before it is edited, so its cells stay flat.
       const editableCell = (propertyId, inner, label) => (entry.item?.deleted_at
         ? inner
-        : `<button class="row-cell-button" type="button" data-cell-edit="${escapeHTML(propertyId)}" data-cell-job="${escapeHTML(entry.jobId)}" aria-haspopup="dialog" aria-label="设置${escapeHTML(label)}">${inner}</button>`);
+        : `<button class="row-cell-button" type="button"${state.health?.readonly === true ? ' disabled' : ''} data-cell-edit="${escapeHTML(propertyId)}" data-cell-job="${escapeHTML(entry.jobId)}" aria-haspopup="dialog" aria-label="设置${escapeHTML(label)}">${inner}</button>`);
       const topics = Array.isArray(values.research_topic) ? values.research_topic : [];
       const title = itemTitle(entry);
       const cell = (column) => {
@@ -2151,7 +2194,7 @@
     $('#library-grouping-list').hidden = graphMode;
     if (graphMode) {
       $('#library-heading').textContent = '关系图谱';
-      $('#library-subtitle').textContent = '属性关系与可解释的内容相似连接';
+      $('#library-subtitle').textContent = state.health?.readonly === true ? '公开样例 · 只读体验 · 关系图谱' : '属性关系与可解释的内容相似连接';
       renderLibraryGraph();
       syncGraphSelectionDetails();
       return;
@@ -2173,7 +2216,7 @@
     if (state.libraryStatusFilter) entries = entries.filter((entry) => String(itemValues(entry).reading_status || '未开始') === state.libraryStatusFilter);
     entries.sort((a, b) => compareLibraryEntries(a, b, state.librarySort));
     const activeFolder = folderById(state.activeFolderId); const selectedView = activeView(); $('#library-heading').textContent = activeFolder?.name || selectedView?.name || (state.activeGroupValue ? `${groupFieldLabel()}：${state.activeGroupValue}` : (state.activeFolderId === 'system-trash' ? '回收站' : '全部文献'));
-    $('#library-subtitle').textContent = state.activeFolderId === 'system-trash' ? '可恢复的本地文献' : `${entries.length} 篇${state.libraryStatusFilter ? ` · 阅读状态：${state.libraryStatusFilter}` : ''} · 本机保存 · HTML 连续阅读`;
+    $('#library-subtitle').textContent = state.health?.readonly === true ? `${entries.length} 篇 · 公开样例 · 只读体验` : state.activeFolderId === 'system-trash' ? '可恢复的本地文献' : `${entries.length} 篇${state.libraryStatusFilter ? ` · 阅读状态：${state.libraryStatusFilter}` : ''} · 本机保存 · HTML 连续阅读`;
     if ($('#library-sort')) $('#library-sort').value = state.librarySort;
     const columns = visibleLibraryColumns();
     const template = libraryGridTemplate(columns);
@@ -2486,8 +2529,8 @@
       <div class="details-actions">${actions}</div>
       <dl class="details-fields">
         ${field('显示名称', `<span class="details-edit-value"><span>${itemAlias(entry) ? escapeHTML(itemAlias(entry)) : '<span class="property-placeholder">未设置</span>'}</span>${editButton('alias')}</span>`)}
-        ${field('重要程度', `<span class="details-stars" role="radiogroup" aria-label="重要程度">${Array.from({ length: 5 }, (_, index) => { const score = index + 1; return `<button type="button" class="${score <= rating ? 'is-filled' : ''}" data-details-importance="${score}" role="radio" aria-checked="${score === rating ? 'true' : 'false'}" aria-label="设为 ${score} 星">★</button>`; }).join('')}</span>`)}
-        ${field('阅读状态', `<select class="details-status-select" data-details-status-select aria-label="阅读状态">${readingStatusOptions().map((option) => `<option${option === currentStatus ? ' selected' : ''}>${escapeHTML(option)}</option>`).join('')}</select>`)}
+        ${field('重要程度', `<span class="details-stars" role="radiogroup" aria-label="重要程度">${Array.from({ length: 5 }, (_, index) => { const score = index + 1; return `<button type="button"${state.health?.readonly === true ? ' disabled' : ''} class="${score <= rating ? 'is-filled' : ''}" data-details-importance="${score}" role="radio" aria-checked="${score === rating ? 'true' : 'false'}" aria-label="设为 ${score} 星">★</button>`; }).join('')}</span>`)}
+        ${field('阅读状态', `<select class="details-status-select"${state.health?.readonly === true ? ' disabled' : ''} data-details-status-select aria-label="阅读状态">${readingStatusOptions().map((option) => `<option${option === currentStatus ? ' selected' : ''}>${escapeHTML(option)}</option>`).join('')}</select>`)}
         ${field('研究主题', `<span class="details-edit-value">${topics.length ? topics.map((topic) => `<span class="tag-chip">${escapeHTML(topic)}</span>`).join('') : '<span class="property-placeholder">未设置</span>'}${editButton('research_topic')}</span>`)}
         ${field('接收/来源', `<span class="details-edit-value"><span>${escapeHTML(itemVenue(entry) || '未设置')}</span>${editButton('venue')}</span>`)}
         ${customProperties.map((property) => { const raw = values[property.id]; const has = Array.isArray(raw) ? raw.length : raw != null && raw !== ''; return field(property.label || property.id, `<span class="details-edit-value"><span>${has ? escapeHTML(formatPropertyValue(property, raw)) : '<span class="property-placeholder">未设置</span>'}</span>${editButton(property.id)}</span>`); }).join('')}
@@ -5555,7 +5598,7 @@
     output.replaceChildren();
     const loading = document.createElement('div');
     loading.className = 'quick-preview-ai-source';
-    loading.textContent = '正在从可信学术来源检索元数据、摘要或公开内容…';
+    loading.textContent = browserDemo ? '正在准备 AI 示例分析…' : '正在从可信学术来源检索元数据、摘要或公开内容…';
     output.append(loading);
     try {
       const payload = await api(`/api/jobs/${jobId}/reference-summary`, jsonOptions({
@@ -5569,7 +5612,7 @@
       const source = document.createElement('div');
       source.className = 'quick-preview-ai-source';
       const providers = Array.isArray(result.sources) ? result.sources.map((item) => item.label || item.provider).filter(Boolean) : [];
-      source.textContent = providers.length ? `证据来源：${providers.join(' · ')}` : '未找到可核验的在线摘要；以上分析仅基于参考文献条目和当前上下文。';
+      source.textContent = browserDemo ? 'AI 示例分析 · 基于内置样例，无在线检索或真实模型调用。' : providers.length ? `证据来源：${providers.join(' · ')}` : '未找到可核验的在线摘要；以上分析仅基于参考文献条目和当前上下文。';
       output.append(source);
     } catch (error) {
       if (state.activeJob?.job_id !== jobId || !output.isConnected) return;
@@ -8207,6 +8250,11 @@
       <button type="button" class="annotation-note-insert-image" title="插入图片" aria-label="插入图片">图片</button>
       <input class="annotation-note-image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
     `;
+    if (browserDemo) {
+      const imageButton = toolbar.querySelector('.annotation-note-insert-image');
+      imageButton.disabled = true;
+      imageButton.title = '浏览器本地测试版不上传图片，可继续编辑文字笔记。';
+    }
     const editor = doc.createElement('div');
     editor.className = 'annotation-note-editor';
     editor.contentEditable = 'true';
@@ -8705,13 +8753,14 @@
 
   function cachedTranslation(blockId, sourceHash, targetLanguage = translationTargetLanguage(), jobId = state.activeJob?.job_id) {
     const profileId = translationProfileId();
-    if (!profileId) return null;
+    const readonly = state.health?.readonly === true;
+    if (!readonly && !profileId) return null;
     const normalizedLanguage = (value) => ['zh', 'ZH', '中文', 'Chinese'].includes(String(value)) ? 'zh' : String(value).toLowerCase();
-    return translationCacheFor(jobId).find((item) => item.block_id === (blockId || '') && item.source_hash === sourceHash && normalizedLanguage(item.target_language) === normalizedLanguage(targetLanguage) && String(item.profile_id || '') === profileId);
+    return translationCacheFor(jobId).find((item) => item.block_id === (blockId || '') && item.source_hash === sourceHash && normalizedLanguage(item.target_language) === normalizedLanguage(targetLanguage) && (readonly || String(item.profile_id || '') === profileId));
   }
 
   async function streamApiRequest(url, body, onDelta, signal = null, onMetadata = null) {
-    const response = await fetch(url, { ...jsonOptions({ ...body, stream: true }), ...(signal ? { signal } : {}) });
+    const response = await request(url, { ...jsonOptions({ ...body, stream: true }), ...(signal ? { signal } : {}) });
     const contentType = response.headers.get('Content-Type') || '';
     if (!response.ok || !response.body || !contentType.includes('text/event-stream')) {
       const payload = await response.json().catch(() => ({}));
@@ -8874,6 +8923,13 @@
     body.className = 'translation-text';
     const rendered = renderTranslationText(text, formulas, doc, markers, emphasis);
     if (rendered) body.append(rendered); else body.textContent = text;
+    if (doc.defaultView?.parent?.MyScholarDemo?.enabled) {
+      const label = doc.createElement('small');
+      label.className = 'browser-demo-translation-label';
+      label.textContent = 'AI 示例译文 · 非真实模型输出';
+      label.style.cssText = 'display:block;font:11px/1.6 system-ui,sans-serif;color:var(--muted,#756b60);margin-bottom:3px';
+      node.append(label);
+    }
     node.append(body);
     if (block.classList.contains('paper-abstract-body')) {
       node.classList.add('paper-abstract-translation');
@@ -9411,6 +9467,7 @@
   // Reading assistant panels, AI highlights and document-scoped chat.
   function setPanelStatus(message, error = false) { const node = $('#chat-status'); node.textContent = message || ''; node.hidden = !message; node.classList.toggle('error', error); }
   function switchSidebar(panelId, { open = true } = {}) {
+    if (state.health?.readonly === true && !['outline-panel', 'quick-preview-panel'].includes(panelId)) panelId = 'outline-panel';
     const target = document.getElementById(panelId);
     if (!target?.classList.contains('sidebar-panel')) return;
     if (panelId !== 'chat-panel') closeChatSessionMenu();
@@ -9447,7 +9504,8 @@
       if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
       event.preventDefault();
       const step = event.key === 'ArrowRight' ? 1 : -1;
-      const next = tabs[(index + step + tabs.length) % tabs.length];
+      const available = state.health?.readonly === true ? tabs.filter((item) => ['outline-panel', 'quick-preview-panel'].includes(item.dataset.panel) && !item.hidden) : tabs;
+      const next = available[(available.indexOf(tab) + step + available.length) % available.length];
       switchSidebar(next.dataset.panel);
       next.focus();
     });
@@ -10683,7 +10741,7 @@
     else delete bubble.dataset.chatSourceGeneration;
     bubble.dataset.chatRevision = revision;
     const label = document.createElement('small');
-    label.textContent = isUser ? '你' : '文章助手';
+    label.textContent = isUser ? '你' : browserDemo ? '文章助手 · AI 示例' : '文章助手';
     const body = document.createElement('div');
     body.className = 'chat-message-body';
     if (isUser) {
@@ -11132,6 +11190,7 @@
   }
 
   async function uploadNoteAsset(file, jobId = state.activeJob?.job_id) {
+    if (browserDemo) throw new Error('浏览器本地测试版不支持上传图片，可继续编辑文字笔记。');
     if (!jobId) throw new Error('请先打开一篇文献。');
     if (!file?.type?.startsWith('image/')) throw new Error('请选择 PNG、JPEG、WebP 或 GIF 图片。');
     const form = new FormData();
@@ -12238,11 +12297,12 @@
     }
   });
   window.addEventListener('pagehide', () => {
+    if (demoResetting || browserDemo?.invalidated) return;
     captureCurrentReadingLocation();
     window.clearTimeout(notesTimer);
     articleNoteDrafts.forEach((draft, jobId) => {
       if (articleNoteConflicts.has(jobId) || !(articleNoteServerRevisions.get(jobId) || draft.baseRevision)) return;
-      fetch(`/api/jobs/${jobId}/notes`, {
+      request(`/api/jobs/${jobId}/notes`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ markdown: draft.markdown, expected_revision: articleNoteServerRevisions.get(jobId) || draft.baseRevision }),
@@ -13605,6 +13665,11 @@
 
   function settingsPayload() {
     const shortcutValidation = validateShortcutInputs();
+    if (browserDemo) return {
+      annotation_actions: state.annotationActions,
+      shortcuts: shortcutValidation.shortcuts,
+      appearance: appearanceFromControls(),
+    };
     return {
       ai: aiSettingsFromControls(),
       annotation_actions: state.annotationActions,
@@ -13641,6 +13706,7 @@
     status.dataset.state = stateName;
   }
   async function persistSettings() {
+    if (browserDemo?.invalidated) return false;
     const invalidAction = state.annotationActions.custom.find((item) => !item.label.trim());
     if (invalidAction) {
       setSettingsSaveStatus('语义标记名称不能为空', 'error');
@@ -13658,7 +13724,7 @@
       return settingsSaveInFlight;
     }
     const revision = settingsSaveRevision;
-    if (!validateAISettingsControls()) { setSettingsSaveStatus('请检查 AI 选项', 'error'); return false; }
+    if (!browserDemo && !validateAISettingsControls()) { setSettingsSaveStatus('请检查 AI 选项', 'error'); return false; }
     const submitted = settingsPayload();
     settingsSaveRequested = false;
     setSettingsSaveStatus('正在保存…', 'saving');
@@ -13672,7 +13738,7 @@
           state.appearance = normalizeAppearance(response?.settings?.appearance || submitted.appearance, submitted.appearance);
           state.shortcuts = { ...state.shortcuts, ...(response?.settings?.shortcuts || submitted.shortcuts) };
           syncReaderShortcutHints();
-          state.metadataAutoRetrieve = (response?.settings?.metadata || submitted.metadata).auto_retrieve !== false;
+          if (!browserDemo) state.metadataAutoRetrieve = (response?.settings?.metadata || submitted.metadata).auto_retrieve !== false;
           renderAISettings(response?.settings?.ai || submitted.ai);
           state.annotationActions = normalizeAnnotationActions(response?.settings?.annotation_actions || submitted.annotation_actions);
           renderSelectionActions();
@@ -13726,33 +13792,38 @@
   function flushSettingsOnExit() {
     if (settingsExitFlushedRevision === settingsSaveRevision || settingsSavedRevision >= settingsSaveRevision) return;
     const validation = validateShortcutInputs();
-    if (!validation.valid || !validateAISettingsControls()) return;
+    if (demoResetting || browserDemo?.invalidated || !validation.valid || (!browserDemo && !validateAISettingsControls())) return;
     window.clearTimeout(settingsSaveTimer);
     settingsSaveTimer = null;
     settingsExitFlushedRevision = settingsSaveRevision;
-    fetch('/api/settings', { ...jsonOptions(settingsPayload()), keepalive: true }).catch(() => {});
+    request('/api/settings', { ...jsonOptions(settingsPayload()), keepalive: true }).catch(() => {});
   }
   $('#settings-form').addEventListener('submit', (event) => event.preventDefault());
   $('#settings-form').addEventListener('change', (event) => {
+    if (browserDemo?.invalidated) return;
     if (event.target.closest('.shortcut-grid, #settings-mcp')) return;
     if (event.target.id.endsWith('-reasoning-effort') && event.target.value === 'custom') return;
     if (event.target.id === 'setting-parsing-backend') syncParsingServerField();
     queueSettingsSave(true);
   });
   $('#settings-form').addEventListener('input', (event) => {
+    if (browserDemo?.invalidated) return;
     if (event.target.closest('.shortcut-grid, #settings-mcp')) return;
     if (event.target.matches('input[type="text"], input[type="email"], input[type="url"], input[type="password"], input[type="number"]')) queueSettingsSave(false);
   });
   document.addEventListener('visibilitychange', () => {
+    if (browserDemo?.invalidated) return;
     if (document.visibilityState !== 'hidden' || settingsSavedRevision >= settingsSaveRevision) return;
     if (settingsSaveInFlight) settingsSaveRequested = true;
     else void persistSettings();
   });
   window.addEventListener('beforeunload', () => {
+    if (browserDemo?.invalidated) return;
     captureCurrentReadingLocation();
     flushSettingsOnExit();
   });
   window.__myScholarFlushBeforeClose = async () => {
+    if (browserDemo?.invalidated) return false;
     captureCurrentReadingLocation();
     await flushPendingArticleNotes();
     await flushPendingSettings();
@@ -14149,6 +14220,7 @@
   }
 
   async function startReflow() {
+    if (browserDemo) { showToast('浏览器本地测试版不运行解析引擎，内置样例可直接阅读。'); return; }
     const job = state.activeJob;
     if (!job || reflowRunIsActive(reflowRunFor(job.job_id)) || reflowPreflightInFlight) return;
     reflowPreflightInFlight = true;
@@ -14418,7 +14490,21 @@
         state.translationRuns.forEach((run) => { if (run?.running) cancelTranslationRun(run); });
         clearRenderedTranslations();
       }
-      document.body.classList.toggle('readonly-mode', Boolean(payload.readonly));
+      document.body.classList.toggle('readonly-mode', payload.readonly === true);
+      if (payload.readonly === true) {
+        document.title = '谷子学术 · 在线预览';
+        if (!$('#readonly-preview-badge')) {
+          const badge = document.createElement('span');
+          badge.id = 'readonly-preview-badge';
+          badge.className = 'readonly-preview-badge';
+          badge.textContent = '在线预览 · 只读';
+          $('.brand-mark')?.insertAdjacentElement('afterend', badge);
+        }
+        $('#library-subtitle').textContent = '公开样例 · 只读体验';
+        $$('#grouping-button, .row-cell-button, .details-stars button, .details-status-select').forEach((control) => { control.disabled = true; });
+        $('#notes-editor')?.setAttribute('contenteditable', 'false');
+        if (!['outline-panel', 'quick-preview-panel'].includes(currentSidebarPanelId())) switchSidebar('outline-panel', { open: false });
+      }
       if (state.activeJob && frameDocument()) ensureTitleTranslation();
     } catch (_) {
       state.health = null;
@@ -14530,6 +14616,97 @@
     });
   }
 
+  function showBrowserDemoInvalidation() {
+    if (!browserDemo?.invalidated || demoResetting) return;
+    document.body.classList.add('browser-demo-invalidated');
+    document.querySelectorAll('.app-header, .app-shell').forEach((element) => { element.inert = true; });
+    if (document.getElementById('browser-demo-invalidated-dialog')) return;
+    const dialog = document.createElement('dialog');
+    dialog.id = 'browser-demo-invalidated-dialog';
+    dialog.className = 'browser-demo-invalidated-dialog';
+    dialog.setAttribute('aria-labelledby', 'browser-demo-invalidated-title');
+    const title = document.createElement('h2');
+    title.id = 'browser-demo-invalidated-title';
+    title.textContent = '测试数据已重置，请刷新后继续。';
+    const message = document.createElement('p');
+    message.textContent = '当前页面已停止保存。刷新后将重新载入浏览器测试数据。';
+    const reload = document.createElement('button');
+    reload.id = 'browser-demo-reload';
+    reload.type = 'button';
+    reload.className = 'primary-button compact-button';
+    reload.textContent = '刷新页面';
+    reload.addEventListener('click', () => location.reload());
+    dialog.addEventListener('cancel', (event) => event.preventDefault());
+    dialog.append(title, message, reload);
+    document.body.append(dialog);
+    dialog.showModal();
+  }
+
+  function initializeBrowserDemoUI() {
+    if (!browserDemo) return;
+    document.body.classList.add('browser-demo-mode');
+    document.title = '谷子学术 · 浏览器本地测试版';
+    const banner = document.createElement('div');
+    banner.id = 'browser-demo-banner';
+    banner.className = 'browser-demo-banner';
+    banner.setAttribute('aria-label', '浏览器本地测试版状态');
+    const label = document.createElement('span');
+    label.textContent = '浏览器本地测试版 · 本机保存 · AI 为示例';
+    const reset = document.createElement('button');
+    reset.id = 'browser-demo-reset';
+    reset.type = 'button';
+    reset.className = 'tiny-button';
+    reset.textContent = '重置测试数据';
+    reset.addEventListener('click', async () => {
+      if (!await requestConfirmation('将清除当前浏览器中本测试版的笔记、批注、文献库编辑、助手会话和界面偏好，并恢复内置样例。此操作不会清除桌面版文献库、其他网站或普通预览的数据。', '重置浏览器测试数据？')) return;
+      reset.disabled = true;
+      demoResetting = true;
+      try { await browserDemo.reset(); location.reload(); }
+      catch (error) { demoResetting = false; reset.disabled = false; showToast(`重置失败：${error.message}`, true); showBrowserDemoInvalidation(); }
+    });
+    banner.append(label, reset);
+    document.body.append(banner);
+    const notice = document.createElement('p');
+    notice.className = 'browser-demo-ai-notice';
+    notice.textContent = 'AI 示例：可试用文章提问、翻译和阅读重点。回答与译文为内置演示内容，不会调用真实模型；笔记和批注仅保存在当前浏览器。';
+    $('#chat-panel')?.prepend(notice);
+    const highlightNotice = notice.cloneNode(false);
+    highlightNotice.textContent = 'AI 示例阅读重点 · 非真实模型分析，可试用采纳、忽略和批注编辑。';
+    $('#highlights-panel')?.prepend(highlightNotice);
+    const reasons = {
+      'settings-ai': 'AI 为内置示例，无需配置账号、服务地址或密钥。请回到文章助手试用提问、翻译与阅读重点。',
+      'settings-parsing': '浏览器本地测试版不上传文献、不运行或安装解析引擎。请阅读内置样例；真实 PDF 导入和重新解析请使用桌面版。',
+      'settings-mcp': '浏览器本地测试版不连接本机 Agent、不生成真实连接凭据，也不安装或开发插件。',
+      'settings-metadata': '浏览器本地测试版使用独立的浏览器存储，不连接 Zotero、真实账号或在线书目服务。文献属性和文件夹仍可在文献库中编辑。',
+      'settings-updates': '当前为浏览器本地测试版；桌面版下载与更新请查看项目发布页。',
+    };
+    Object.entries(reasons).forEach(([id, reason]) => {
+      const section = $(`#${id}`);
+      if (!section) return;
+      section.classList.add('browser-demo-unavailable-section');
+      section.querySelectorAll('input, select, textarea, button').forEach((control) => { control.disabled = true; if (control.type === 'password') control.value = ''; });
+      const message = document.createElement('p');
+      message.className = 'browser-demo-section-message';
+      message.textContent = reason;
+      section.prepend(message);
+    });
+    const unavailable = '#import-pdf-button, [data-open-zotero-import], #reflow-button, #insert-image-button, .annotation-note-insert-image, #metadata-retrieve-button, [data-view="market-view"], [data-plugin-nav]:not([data-plugin-nav="guzi.vocabulary"])';
+    $$(unavailable).forEach((control) => {
+      control.setAttribute('aria-disabled', 'true');
+      control.title = '浏览器本地测试版仅支持内置样例和本地编辑，此功能请使用桌面版。';
+    });
+    document.addEventListener('click', (event) => {
+      if (!event.target.closest?.(unavailable)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      showToast('浏览器本地测试版不支持上传、Zotero、重新解析、在线检索或插件安装；请使用桌面版。');
+    }, true);
+    if (!persistentStateGet('browser-demo-intro-seen')) {
+      persistentStateSet('browser-demo-intro-seen', '1');
+      showToast('浏览器本地测试版：编辑保存在本机，AI 回答和译文为示例，可随时重置。');
+    }
+  }
+
   const requestedSettingsSection = /^#settings-[a-z-]+$/u.test(location.hash) ? $(location.hash) : null;
   window.addEventListener('hashchange', () => {
     const target = /^#settings-[a-z-]+$/u.test(location.hash) ? $(location.hash) : null;
@@ -14540,7 +14717,8 @@
   });
   void pluginHost.refresh().catch((error) => showToast(`插件载入失败：${error.message}`, true));
   window.addEventListener('focus', () => void pluginHost.refresh().catch(() => {}));
-  checkHealth();
+  initializeBrowserDemoUI();
+  await checkHealth();
   loadLibrary();
   if (requestedSettingsSection?.classList.contains('settings-section')) {
     activeSettingsSectionId = requestedSettingsSection.id;
