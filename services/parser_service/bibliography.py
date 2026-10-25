@@ -14,6 +14,19 @@ def plain_content(content):
     return html.unescape(re.sub(r"<[^>]*>", "", str(content or "")))
 
 
+def is_bibliography_heading(content):
+    text = unicodedata.normalize("NFKC", plain_content(content)).strip()
+    text = re.sub(r"^#{1,6}\s+", "", text).strip()
+    text = re.sub(r"^\d+(?:\.\d+)*(?:[.)、:]\s*|\s+)", "", text)
+    english = r"(?:References?|Bibliography)"
+    chinese = r"(?:参考文献|參考文獻)"
+    separator = r"(?:\s*[/|:—–-]\s*|\s+)"
+    bilingual = rf"(?:{chinese}{separator}{english}|{english}{separator}{chinese}|{chinese}\s*\(\s*{english}\s*\)|{english}\s*\(\s*{chinese}\s*\))"
+    continuation = r"(?:continued|cont\.?|cont['’]d\.?|续|續)"
+    suffix = rf"(?:\s*\(\s*{continuation}\s*\)|\s*\[\s*{continuation}\s*\]|\s+{continuation}|\s*[-—–:]\s*{continuation})?"
+    return bool(re.fullmatch(rf"(?:{english}|{chinese}|{bilingual}){suffix}[\s.:。]*", text, re.I))
+
+
 def reference_numbers(content):
     return [int(match[1] or match[2]) for match in ENTRY_RE.finditer(plain_content(content))]
 
@@ -118,14 +131,14 @@ def bibliography_layout(entries, source_pages):
                 # An explicit reference aggregate can contain explanatory
                 # headings that interrupted the generic section walk.
                 entries[pi, index]["references"] = True
-    known_numbers = {number for location, entry in entries.items() if location not in duplicates and (entry["references"] or entry["label"] == "reference") for number in reference_numbers(entry["plain"])}
+    known_numbers = {number for location, entry in entries.items() if location not in duplicates and (entry["references"] or entry["label"] == "reference") and not is_bibliography_heading(entry["plain"]) for number in reference_numbers(entry["plain"])}
     for entry in entries.values():
         # Fine OCR entries can follow explanatory headings inside a bibliography.
         if is_bibliography_entry(entry["plain"]) and set(reference_numbers(entry["plain"])) <= known_numbers:
             entry["references"] = True
     targets = {}
     for location, entry in entries.items():
-        if location in duplicates or not (entry["references"] or entry["label"] == "reference"):
+        if location in duplicates or not (entry["references"] or entry["label"] == "reference") or is_bibliography_heading(entry["plain"]):
             continue
         for number in reference_numbers(entry["plain"]):
             targets.setdefault(number, location)

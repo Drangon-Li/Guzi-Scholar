@@ -429,11 +429,33 @@ class NativePage:
             script = 'sup'
         elif all(c.get('size', 10) < size * .9 and c['baseline'] > baseline + size * .05 for c in selected):
             script = 'sub'
+        if script is None:
+            preceding = [c for c in nearby if c['x1'] <= x0 + size * .1]
+            base = max(preceding, key=lambda c: c['x1'], default=None)
+            relation = self.script_relation(base, selected) if base else None
+            if relation:
+                script = relation['script_kind']
         return {'status': 'confirmed' if reliable else 'unresolved', 'reason': None if reliable else 'inline_multiline_geometry' if multiple_lines else 'inline_foreign_glyph_overlap' if foreign else 'inline_native_geometry_ambiguous', 'source_bbox_normalized': [x0 / self.width, top / self.height, x1 / self.width, bottom / self.height], 'source_glyph_ids': sorted(ids), 'body_baseline_normalized': baseline / self.height, 'body_font_size_points': size, 'height_em': (bottom - top) / size, 'baseline_offset_em': (bottom - baseline) / size, 'script_kind': script, 'foreign_glyph_ids': foreign, 'body_neighbor_glyph_ids': [c['glyph_id'] for c in body], **({'baseline_source': 'selected-base-glyphs-on-isolated-line'} if isolated else {}), **({'ink_geometry_source': 'pdfium-tight-glyph-boxes', 'font_box_foreign_glyph_ids': font_box_foreign, 'crop_foreign_glyph_ids': crop_foreign} if font_box_foreign and font_box_foreign != foreign else {})}
+
+    def script_relation(self, base, selected):
+        if not base or not selected or base['rotated'] or any(c['rotated'] for c in selected):
+            return None
+        size = base.get('size', 10)
+        if not base['canonical'].isalnum() or not all(.5 * size <= c.get('size', 10) <= .85 * size and re.fullmatch(r'[A-Za-z0-9]+', c['canonical']) for c in selected):
+            return None
+        ordered = sorted(selected, key=lambda c: c['x0'])
+        if not -.1 * size <= ordered[0]['x0'] - base['x1'] <= .3 * size or any(right['x0'] - left['x1'] > size * .25 for left, right in zip(ordered, ordered[1:])):
+            return None
+        # Some PDFs encode text rise in the font box while keeping the matrix baseline unchanged.
+        sub = all(c['bottom'] > base['bottom'] + size * .1 and c['top'] > base['top'] + size * .25 and c['top'] < base['bottom'] for c in ordered)
+        sup = all(c['top'] < base['top'] - size * .1 and c['bottom'] < base['bottom'] - size * .25 and c['bottom'] > base['top'] for c in ordered)
+        if not sub and not sup:
+            return None
+        return {'script_kind': 'sub' if sub else 'sup', 'source': 'native_font_bbox_and_size', 'base_glyph_id': base['glyph_id'], 'source_glyph_ids': [c['glyph_id'] for c in ordered]}
 
     def align(self, text, region, math_aliases=False):
         def normalized(value):
-            value = canonical(value)
+            value = unicodedata.normalize('NFD', canonical(value))
             return value.translate(str.maketrans({'*': '∗', '·': '⋅', '°': '∘', '◦': '∘'})) if math_aliases else value
         target, target_map = [], []
         for i, char in enumerate(text):
@@ -448,13 +470,17 @@ class NativePage:
             for value in normalized(char['resolved_text']):
                 native.append(value)
                 native_map.append(char)
-        matches = SequenceMatcher(None, ''.join(target), ''.join(native), autojunk=False).get_matching_blocks()
+        matcher = SequenceMatcher(None, ''.join(target), ''.join(native), autojunk=False)
+        matches = matcher.get_matching_blocks()
         mapped = collections.defaultdict(list)
         for match in matches:
             for j in range(match.size):
                 mapped[target_map[match.a + j]].append(native_map[match.b + j])
         covered = sum(match.size for match in matches)
-        return dict(mapped), {**self.evidence(chars), 'alignment_coverage': covered / max(1, len(target)), 'matched_characters': covered, 'target_characters': len(target)}
+        unmatched = [i for kind, _, _, b0, b1 in matcher.get_opcodes() if kind != 'equal' for i in range(b0, b1)]
+        availability = self.evidence(chars)
+        complete = bool(native) and not unmatched and not availability['unknown_glyphs'] and not availability['rotated_glyphs']
+        return dict(mapped), {**availability, 'alignment_coverage': covered / max(1, len(target)), 'source_coverage': covered / max(1, len(native)), 'source_characters': len(native), 'unmatched_source_text': ''.join(native[i] for i in unmatched), 'unmatched_source_glyph_ids': sorted({native_map[i]['glyph_id'] for i in unmatched}), 'source_content_complete': complete, 'matched_characters': covered, 'target_characters': len(target)}
 
     def styles(self, char):
         styles = set()
@@ -467,7 +493,7 @@ class NativePage:
 
     def style_spans(self, text, region, excluded=()):
         mapped, evidence = self.align(text, region)
-        evidence['status'] = 'confirmed' if evidence['alignment_coverage'] >= .75 else 'unresolved' if evidence['native_available'] else 'unsupported'
+        evidence['status'] = 'confirmed' if evidence['alignment_coverage'] >= .75 and evidence['source_content_complete'] else 'unresolved' if evidence['native_available'] else 'unsupported'
         excluded = {i for start, end in excluded for i in range(start, end)}
         char_styles = {}
         if evidence['alignment_coverage'] >= .75:

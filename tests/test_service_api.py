@@ -209,6 +209,26 @@ class LifecycleTests(unittest.TestCase):
 
 
 class ModelProtocolTests(unittest.TestCase):
+    def test_external_model_changes_invalidate_cached_protocol(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / 'code'
+            model = Path(tmp) / 'models'
+            model.mkdir()
+            weight = model / 'model.safetensors'
+            weight.write_bytes(b'weight-v1')
+            config = {'base': str(base), 'model_directories': [str(model)]}
+            runtime = Runtime(config, start_worker=False)
+            try:
+                before = runtime.protocol
+                self.assertEqual(before['model_files'][0][0], str(weight.resolve()))
+                weight.write_bytes(b'changed-weight-v2')
+                self.assertNotEqual(before['sha256'], runtime.model_protocol()['sha256'])
+                runtime.config['model_directories'] = ['../models']
+                with self.assertRaisesRegex(ValueError, 'explicit absolute path'):
+                    runtime.model_protocol()
+            finally:
+                runtime.close()
+
     def test_running_locks_do_not_invalidate_real_models(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

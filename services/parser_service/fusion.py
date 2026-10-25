@@ -18,6 +18,8 @@ from PIL import Image
 from .bibliography import aggregate_reference_duplicates
 from .native_pdf import NativePDF
 from .currency import normalize_currency_dollars
+from .table_evidence import assess_table_evidence
+from .ocr_prose import reconcile_ocr_prose
 from .math_evidence import TexAtoms, assess_formula, math_candidates, math_canonical, math_spans, readable_candidate, reconcile_equation_number, selectable_script_segments, native_atoms, ordered_atoms
 
 SCHEMA = 'guzi-fusion-auto-v3'
@@ -87,13 +89,17 @@ def restore_styles(content, page, region, table=False):
     return rendered, spans, evidence
 
 
+def atom_visible_text(atom):
+    return unicodedata.normalize('NFC', atom['text'] + '\u0302' * atom.get('accents', []).count('hat'))
+
+
 def visible_math(content, recover=True):
     result, intervals, cursor, size = [], [], 0, 0
     for start, end, latex, syntax in math_candidates(content, recover):
         prefix = content[cursor:start]
         result.append(prefix)
         size += len(prefix)
-        text = ''.join(a['text'] for a in TexAtoms(latex).atoms)
+        text = ''.join(atom_visible_text(a) for a in TexAtoms(latex).atoms)
         intervals.append((size, size + len(text), start, end, latex, syntax))
         result.append(text)
         size += len(text)
@@ -118,8 +124,9 @@ def restore_native_prose(content, page, region):
     for start, end, latex, syntax in math_candidates(content):
         prose(cursor, start)
         for atom in TexAtoms(latex).atoms:
-            visible.append(atom['text'])
-            offsets.append((start, end, True))
+            for char in atom_visible_text(atom):
+                visible.append(char)
+                offsets.append((start, end, True))
         cursor = end
     prose(cursor, len(content))
     chars = [c for c in page.region(region) if c['canonical'] and not c['rotated']]
@@ -134,7 +141,19 @@ def restore_native_prose(content, page, region):
     if sum(m.size for m in matcher.get_matching_blocks()) / max(1, len(target)) < .85:
         return content, []
     edits = []
+    source_positions = {char['glyph_id']: i for i, char in enumerate(page.region(region))}
+    source_chars = page.region(region)
     for oi, (kind, a0, a1, b0, b1) in enumerate(operations):
+        if kind == 'insert' and 1 <= b1 - b0 <= 4 and 0 < a0 < len(offsets) and 0 < oi < len(operations) - 1:
+            before, after = operations[oi - 1], operations[oi + 1]
+            start, end, math = offsets[a0 - 1]
+            selected = list({c['glyph_id']: c for c in native_map[b0:b1]}.values())
+            base = native_map[b0 - 1] if b0 else None
+            relation = page.script_relation(base, selected)
+            isolated = end - start == 1 and content[start:end].isascii() and content[start:end].isalpha() and (not start or not content[start - 1].isalnum())
+            if not math and isolated and relation and before[0] == after[0] == 'equal' and min(before[2] - before[1], after[2] - after[1]) >= 3:
+                marker = '_' if relation['script_kind'] == 'sub' else '^'
+                edits.append({'start': end, 'end': end, 'before': '', 'after': '$' + marker + '{' + source[b0:b1] + '}$', 'reason': 'native_anchored_omitted_script', 'source_glyph_ids': relation['source_glyph_ids'], 'script_evidence': relation})
         if kind == 'replace' and a1 - a0 == b1 - b0 == 1 and native_map[b0].get('glyph_composition') and target[a0:a1] == 'A' and source[b0:b1] == 'Å':
             start, end, math = offsets[a0]
             if not math and content[start:end] == 'A' and 0 < oi < len(operations) - 1 and operations[oi - 1][0] == operations[oi + 1][0] == 'equal':
@@ -157,6 +176,29 @@ def restore_native_prose(content, page, region):
                 if (start and content[start - 1].isalnum()) or (end < len(content) and content[end].isalnum()):
                     continue
                 edits.append({'start': start, 'end': end, 'before': content[start:end], 'after': '$\\' + style + '{' + char['canonical'] + '}$', 'reason': 'native_isolated_math_alphabet', 'source_glyph_ids': [char['glyph_id']]})
+            for i, j in zip(range(a0, a1 - 1), range(b0, b1 - 1)):
+                left, right = offsets[i], offsets[i + 1]
+                first, second = native_map[j], native_map[j + 1]
+                if left[2] or right[2] or left[1] > right[0] or first['glyph_id'] == second['glyph_id']:
+                    continue
+                gap_text = content[left[1]:right[0]]
+                if not re.fullmatch(r'[ \t]*', gap_text) or not (target[i] in '.,;:!?' or target[i + 1] in '.,;:!?'):
+                    continue
+                if content[left[0]:left[1]] != target[i] or content[right[0]:right[1]] != target[i + 1]:
+                    continue
+                size = max(first.get('size', 10), second.get('size', 10))
+                if abs(first['baseline'] - second['baseline']) > size * .2:
+                    continue
+                between = source_chars[source_positions[first['glyph_id']] + 1:source_positions[second['glyph_id']]]
+                if any(c['canonical'] for c in between):
+                    continue
+                explicit_space = any(c['resolved_text'].isspace() for c in between)
+                gap = second['x0'] - first['x1']
+                if gap < -size * .1 or gap > size * 1.5:
+                    continue
+                expected = ' ' if explicit_space or gap > size * .18 else ''
+                if gap_text != expected:
+                    edits.append({'start': left[1], 'end': right[0], 'before': gap_text, 'after': expected, 'reason': 'native_prose_punctuation_spacing', 'source_glyph_ids': [first['glyph_id'], second['glyph_id']]})
         if kind != 'insert' or b1 - b0 != 1 or source[b0:b1] not in ',.;:!?' or not 0 < a0 < len(offsets) or not 0 < oi < len(operations) - 1:
             continue
         before, after = operations[oi - 1], operations[oi + 1]
@@ -187,7 +229,7 @@ def anchored_native_formula(visible, start, end, parsed, page, region):
     left, right = aligned(visible[:start])[-8:], aligned(visible[end:])[:8]
     if min(len(left), len(right)) < 3:
         return []
-    target = ''.join(a['text'] for a in parsed.atoms)
+    target = ''.join(atom_visible_text(a) for a in parsed.atoms)
     for search_region in (region, [0, 0, 1, 1]):
         chars = [c for c in page.region(search_region) if not c['rotated'] and c['canonical']]
         source, mapping, skipped = [], [], []
@@ -266,6 +308,11 @@ def restore_inline_math(content, page, region, recover=True):
         trailing_atoms = parsed.atoms[script_end:] if bare else []
         def unresolved(reason, render_mode='candidate-unresolved'):
             return {'start': start, 'end': end, 'status': 'unresolved', 'render_mode': render_mode, 'semantic_kind': 'prose-boundary' if render_mode == 'literal-text' else 'formula', 'selectable_text': readable_candidate(latex), 'source_crop_required': False, 'fallback_bbox': None, 'reason': reason, 'candidate_content': content[start:end]}
+        if parsed.syntax_errors:
+            audit = unresolved('formula_candidate_syntax_invalid')
+            audit['syntax_errors'] = parsed.syntax_errors
+            audits.append(audit)
+            continue
         if syntax != 'delimited':
             audit = unresolved('math_delimiter_unbalanced' if syntax == 'unbalanced-inline' else 'tex_outside_math_delimiters')
             audit.update(source_syntax=syntax, exact_candidate_range=True)
@@ -326,7 +373,7 @@ def restore_inline_math(content, page, region, recover=True):
             audits.append(unresolved('inline_crop_alignment_unavailable'))
             continue
         geometry = page.inline_geometry([c['glyph_id'] for c in included], region)
-        target = ''.join(atom['text'] for atom in (script_atoms if bare else parsed.atoms))
+        target = ''.join(atom_visible_text(atom) for atom in (script_atoms if bare else parsed.atoms))
         source = ''.join(math_canonical(c['resolved_text']) for c in included)
         script_kinds = {atom['script'][0] for atom in script_atoms}
         if bare and len(script_atoms) == 1 and source in {'∗', '†', '‡'} and target == source and geometry.get('status') == 'confirmed' and geometry.get('script_kind') is None and not content[:start].strip() and re.match(r'\s+[A-Za-z]{3,}', content[end:]):
@@ -671,6 +718,7 @@ def fuse(args):
                 source_blocks = source_blocks['blocks']
             n, mb, pdfpage = pi + 1, mpages[pi], pdf.pages[pi]
             nativepage = nativepdf.page(pi)
+            scan_page_image = None
             blocks, removed, page_flags = copy.deepcopy(source_blocks), set(), []
             for gi, block in enumerate(blocks):
                 block['source_page'] = n
@@ -699,6 +747,18 @@ def fuse(args):
                 label, content = block['label'], block.get('content') or ''
                 region = bbox(block, True)
                 if label in {'text', 'reference', 'footnote'}:
+                    native = nativepage.evidence(nativepage.region(region))
+                    if not native['native_available']:
+                        peers = [(mi, other) for mi, other in enumerate(mb) if other['type'] in {'text', 'reference', 'footnote'} and intersection(region, bbox(other)) / max(1e-12, area(bbox(other))) >= .9]
+                        revised, ocr_evidence = reconcile_ocr_prose(content, [other.get('content') or '' for _, other in peers])
+                        ocr_evidence['mineru_block_indices'] = [mi for mi, _ in peers]
+                        block['ocr_prose_evidence'] = ocr_evidence
+                        flag(gi, 'ocr_only_prose_requires_source_review')
+                        if ocr_evidence['changed']:
+                            block['original_candidate_content'] = content
+                            content = revised
+                            for mi, _ in peers:
+                                annotate(gi, 'reconcile_ocr_prose_punctuation', mi, reason=ocr_evidence['reason'])
                     # Literal currency must not pair with later formula delimiters.
                     normalized, dollar_changes = normalize_currency_dollars(content, nativepage, region)
                     recovered, native_changes = restore_native_prose(normalized, nativepage, region)
@@ -717,6 +777,12 @@ def fuse(args):
                             if audit['status'] != 'confirmed':
                                 flag(gi, audit['reason'])
                     fused, spans, evidence = restore_styles(fixed, nativepage, region)
+                    plain, _ = visible_math(fixed)
+                    _, completeness = nativepage.align(html.unescape(re.sub(r'<[^>]+>', '', plain)), region)
+                    evidence.update({key: completeness[key] for key in ('source_coverage', 'source_characters', 'unmatched_source_text', 'unmatched_source_glyph_ids', 'source_content_complete')})
+                    if completeness['native_available'] and not completeness['source_content_complete']:
+                        evidence['status'] = 'unresolved'
+                        flag(gi, 'native_prose_source_content_incomplete')
                     locate_inline_audits(fused, audits)
                     if audits:
                         block['math_audit'] = inline_block_audit(fused, audits, region)
@@ -743,6 +809,27 @@ def fuse(args):
                         flag(gi, audit['reason'])
                 elif label == 'table':
                     mi, other = match(block, mb, {'table'})
+                    native = nativepage.evidence(nativepage.region(region))
+                    if not native['native_available']:
+                        table_evidence = assess_table_evidence(content, other.get('content') if other else None, native_available=False)
+                        if table_evidence.get('needs_unit_image'):
+                            if scan_page_image is None:
+                                resolution = min(200, 72 * (8_000_000 / (pdfpage.width * pdfpage.height)) ** .5)
+                                scan_page_image = pdfpage.to_image(resolution=resolution, antialias=True).original
+                            table_evidence = assess_table_evidence(content, other.get('content') if other else None, native_available=False, page_image=scan_page_image, table_bbox=region)
+                        block['table_evidence'] = table_evidence
+                        if table_evidence['allow_ocr_candidate']:
+                            block['content'] = table_evidence['candidate_html']
+                            block['native_evidence'] = {**native, 'alignment_coverage': 0, 'status': 'unsupported'}
+                            block['style_spans'] = []
+                            annotate(gi, 'retain_ocr_table_with_source_review', mi, ocr_agreement=table_evidence['ocr_agreement'])
+                            selected_units = [item for item in table_evidence.get('unit_image_audit', []) if item.get('status') == 'selected']
+                            if selected_units:
+                                annotate(gi, 'resolve_scan_unit_by_image', mi, cells=selected_units)
+                            flag(gi, 'ocr_only_table_requires_source_review')
+                            if table_evidence['ocr_agreement'] == 'different':
+                                flag(gi, 'ocr_table_cell_disagreement')
+                            continue
                     fused, changes, issues = normalize_table(content, other.get('content') if other else None)
                     fused, audits = restore_table_math(fused, nativepage, region)
                     fused, spans, evidence = restore_styles(fused, nativepage, region, table=True)
@@ -849,6 +936,8 @@ def fuse(args):
             page_md = '\n\n'.join(markdown) + '\n'
             page['markdown'] = page_md
             (out / 'pages' / f'page-{n:03d}.md').write_text(page_md.replace('](images/', '](../images/'))
+            if scan_page_image is not None:
+                scan_page_image.close()
             pdfpage.close()
     inputs = {name: {'path': str(path), 'sha256': sha(path)} for name, path in [('pdf', args.pdf), ('glm_json', args.glm_json), ('mineru_json', args.mineru_json)]}
     (out / 'document.md').write_text('\n\n'.join(f'<!-- PDF page {p["physical_page"]} -->\n\n' + p.pop('markdown') for p in pages))

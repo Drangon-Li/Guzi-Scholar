@@ -242,12 +242,13 @@ class Runtime:
         model_files = []
         for folder in self.config.get("model_directories", ["models"]):
             root = (self.base / folder).resolve()
-            if not root.is_relative_to(self.base):
-                raise ValueError("Model directory must be inside base")
+            if not Path(folder).is_absolute() and not root.is_relative_to(self.base):
+                raise ValueError("External model directory must be an explicit absolute path")
             for path in sorted(root.rglob("*")):
                 if path.is_file() and model_artifact(path.relative_to(root)):
                     stat = path.stat()
-                    model_files.append([str(path.relative_to(self.base)), stat.st_size, stat.st_mtime_ns])
+                    name = path.relative_to(self.base) if path.is_relative_to(self.base) else path
+                    model_files.append([str(name), stat.st_size, stat.st_mtime_ns])
         protocol = {"revision": self.config.get("model_protocol_revision", "glm-native16384-mineru4-standard-v1"), "packages": versions, "scripts": scripts, "model_files": model_files, "glm": {"rotary_native": 1, "max_model_len": 16384, "gpu_memory_utilization": .15}, "mineru": {"mode": "standard"}}
         protocol["sha256"] = hashlib.sha256(json.dumps(protocol, sort_keys=True).encode()).hexdigest()
         return protocol
