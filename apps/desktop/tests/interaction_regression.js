@@ -3,6 +3,7 @@ const path = require('path');
 const { launchManagedChromium } = require('./playwright.cjs');
 
 const baseURL = process.argv[2] || 'http://127.0.0.1:8768';
+const primaryModifier = process.platform === 'darwin' ? 'Meta' : 'Control';
 const sourceRoot = process.env.MY_SCHOLAR_TEST_DATA || path.resolve(__dirname, '..', 'data');
 let browser = null;
 let browserSession = null;
@@ -128,7 +129,7 @@ let browserSession = null;
   await page.locator('#full-translate-button').click();
   await page.waitForTimeout(300);
   if (errors.some((message) => /reading ['"]?stop|Cannot read properties of null/u.test(message))) throw new Error(`Translation switch emitted a null stop error: ${errors.join(' | ')}`);
-  await page.frameLocator('#html-preview').locator('body').press('Meta+1');
+  await page.frameLocator('#html-preview').locator('body').press(`${primaryModifier}+1`);
   await page.locator('#library-view.active-view').waitFor();
   await page.locator(`#document-tabs .document-tab[data-job-id="${second.job_id}"]`).click();
   await page.locator('#reader-view.active-view').waitFor();

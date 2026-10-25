@@ -1,6 +1,7 @@
 const { launchManagedChromium } = require('./playwright.cjs');
 
 const baseURL = process.argv[2] || 'http://127.0.0.1:8766';
+const primaryModifier = process.platform === 'darwin' ? 'Meta' : 'Control';
 const requestedJobId = process.argv[3] || '';
 let browser;
 let browserSession;
@@ -423,8 +424,8 @@ let browserSession;
   if ((await page.locator('#chat-input').inputValue()).trim()) throw new Error('加入 Chat should not overwrite the user question draft');
   const chatInput = page.locator('#chat-input');
   await chatInput.fill('第一行');
-  await chatInput.press('Meta+Enter');
-  if (await chatInput.inputValue() !== '第一行\n') throw new Error('Command+Enter did not insert a line break');
+  await chatInput.press(`${primaryModifier}+Enter`);
+  if (await chatInput.inputValue() !== '第一行\n') throw new Error(`${primaryModifier}+Enter did not insert a line break`);
   await chatInput.type('第二行');
   await chatInput.press('Enter');
   await page.locator('.chat-bubble.assistant').filter({ hasText: '键盘交互回归回复。' }).waitFor();

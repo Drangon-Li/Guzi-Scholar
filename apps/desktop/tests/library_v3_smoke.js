@@ -1,6 +1,8 @@
 const { launchManagedChromium } = require('./playwright.cjs');
 
 const baseURL = process.argv[2] || 'http://127.0.0.1:8766';
+const primaryModifier = process.platform === 'darwin' ? 'Meta' : 'Control';
+const otherModifier = process.platform === 'darwin' ? 'Control' : 'Meta';
 let browser;
 let browserSession;
 
@@ -444,15 +446,15 @@ let browserSession;
   await page.locator('#library-editor-dialog').waitFor({ state: 'hidden' });
 
   await row.focus();
-  await page.keyboard.press('Meta+i');
+  await page.keyboard.press(`${primaryModifier}+i`);
   await page.locator('#metadata-dialog[open]').waitFor();
   await page.locator('#metadata-dialog .dialog-close').click();
   await page.locator('#metadata-dialog').waitFor({ state: 'hidden' });
   await row.focus();
-  await page.keyboard.press('Control+i');
-  if (await page.locator('#metadata-dialog').evaluate((dialog) => dialog.open)) throw new Error('Control+I incorrectly triggered a Command-only row shortcut');
+  await page.keyboard.press(`${otherModifier}+i`);
+  if (await page.locator('#metadata-dialog').evaluate((dialog) => dialog.open)) throw new Error(`${otherModifier}+I incorrectly triggered a ${primaryModifier}-only row shortcut`);
   await page.locator('#columns-button').focus();
-  await page.keyboard.press('Meta+i');
+  await page.keyboard.press(`${primaryModifier}+i`);
   if (await page.locator('#metadata-dialog').evaluate((dialog) => dialog.open)) throw new Error('Row shortcut triggered while focus was outside the selected row');
 
   const customColumnLabel = `复现阶段 ${Date.now()}`;
