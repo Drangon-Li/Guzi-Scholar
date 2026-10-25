@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from services.parser_service.bibliography import aggregate_reference_duplicates, bibliography_anchors, bibliography_layout, citation_links, is_bibliography_entry, native_reference_duplicates
+from services.parser_service.bibliography import aggregate_reference_duplicates, bibliography_anchors, bibliography_layout, citation_links, is_bibliography_entry, is_bibliography_heading, native_reference_duplicates
 from services.parser_service.exporter import composite_figures, export_document, reference_layout, reexport_document, refresh_cached_layout
 
 
@@ -11,6 +11,72 @@ class BibliographyTests(unittest.TestCase):
     @staticmethod
     def block(label, content, box):
         return {"label": label, "content": content, "source_bbox_normalized": box}
+
+    def test_bibliography_headings_require_a_complete_section_title(self):
+        for heading in [
+            "References", "Reference", "BIBLIOGRAPHY", "参考文献", "參考文獻",
+            "参考文献/References", "References / 参考文献", "参考文献（References）",
+            "References (参考文献)", "参考文献\nReferences", "参考文献：References",
+            "6 References", "6. References", "6) 参考文献", "6、参考文献",
+            "6.2 参考文献 / References：", "６．２． 参考文献／References。",
+            "## <strong>参考文献 / References</strong>:",
+            "References (continued)", "References (Cont.)", "References [cont'd]",
+            "References — continued", "Bibliography continued", "参考文献（续）",
+            "6. References / 参考文献 (continued)",
+        ]:
+            with self.subTest(heading=heading):
+                self.assertTrue(is_bibliography_heading(heading))
+        for heading in [
+            "", "References to previous work", "References are listed below.",
+            "See References", "结论与参考文献", "参考文献编号保持顺序。",
+            "Figure 2. References", "Table 1: 参考文献", "Appendix A. References",
+            "References / Appendix", "6References", "6.2References", "[1] References",
+            "参考文献 (References", "参考文献 / References / Methods",
+            "References (continued discussion)", "References continued below",
+            "References to previous work (continued)", "References (cont.) appendix",
+        ]:
+            with self.subTest(heading=heading):
+                self.assertFalse(is_bibliography_heading(heading))
+
+    def test_bilingual_section_starts_at_heading_and_stops_at_appendix(self):
+        b = self.block
+        blocks = [
+            b("text", "References", [.1, .01, .9, .03]),
+            b("text", "[9] This numbered paragraph mentions earlier work (2026).", [.1, .04, .9, .06]),
+            b("heading", "结论与参考文献", [.1, .07, .9, .09]),
+            b("text", "[8] Another body paragraph mentioning references (2026).", [.1, .1, .9, .12]),
+            b("text", "## Figure 1. References", [.1, .13, .9, .15]),
+            b("text", "[7] A numbered figure description from the body (2026).", [.1, .16, .9, .18]),
+            b("text", "## 6. 参考文献 / References：", [.1, .2, .9, .23]),
+            b("text", "[1] Author. A sufficiently detailed publication (2026).", [.1, .25, .9, .28]),
+            b("text", "## Appendix A", [.1, .3, .9, .33]),
+            b("text", "[2] This numbered appendix paragraph is not a reference (2026).", [.1, .35, .9, .38]),
+            b("text", "## References to previous work", [.1, .4, .9, .43]),
+            b("text", "[3] This numbered discussion paragraph is not a reference (2026).", [.1, .45, .9, .48]),
+        ]
+        pages = [{"blocks": blocks}]
+        entries, _, _ = reference_layout(pages)
+        targets, _ = bibliography_layout(entries, pages)
+        self.assertEqual(targets, {1: (1, 7)})
+        self.assertTrue(entries[1, 6]["references"])
+        self.assertTrue(entries[1, 7]["references"])
+        for index in [0, 1, 2, 3, 4, 5, 8, 9, 10, 11]:
+            with self.subTest(index=index):
+                self.assertFalse(entries[1, index]["references"])
+        self.assertEqual(entries[1, 9]["scope"], "appendix-A")
+
+    def test_table_cell_heading_does_not_start_a_bibliography_section(self):
+        b = self.block
+        pages = [{"blocks": [
+            b("table", "<table><tr><th>References</th></tr></table>", [.1, .1, .9, .3]),
+            b("heading", "References", [.2, .12, .8, .15]),
+            b("text", "[1] A numbered body paragraph outside the table (2026).", [.1, .4, .9, .45]),
+        ]}]
+        entries, _, _ = reference_layout(pages)
+        targets, _ = bibliography_layout(entries, pages)
+        self.assertTrue(entries[1, 1]["table_heading"])
+        self.assertFalse(entries[1, 2]["references"])
+        self.assertEqual(targets, {})
 
     def test_dotted_reference_aggregate_and_small_ocr_edge_drift(self):
         b = self.block
@@ -143,6 +209,91 @@ class MixedFigurePanelTests(unittest.TestCase):
 
 
 class BibliographyExportTests(unittest.TestCase):
+    def test_continued_heading_keeps_both_pages_reference_targets_and_links(self):
+        from reportlab.pdfgen.canvas import Canvas
+        b = BibliographyTests.block
+        references = [
+            "[1] Alpha. First sufficiently detailed publication (2026).",
+            "[2] Beta. Second sufficiently detailed publication (2026).",
+        ]
+        pages = [
+            {"blocks": [
+                b("text", "Prior evidence [1,2].", [.1, .05, .9, .08]),
+                b("heading", "References", [.1, .1, .9, .15]),
+                b("text", references[0], [.1, .3, .9, .35]),
+            ]},
+            {"blocks": [
+                b("heading", "References (continued)", [.1, .1, .9, .15]),
+                b("text", references[1], [.1, .3, .9, .35]),
+            ]},
+        ]
+        entries, _, _ = reference_layout(pages)
+        targets, _ = bibliography_layout(entries, pages)
+        self.assertEqual(targets, {1: (1, 2), 2: (2, 1)})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pdf = root / "source.pdf"
+            canvas = Canvas(str(pdf), pagesize=(400, 400))
+            for page in pages:
+                for block in page["blocks"]:
+                    canvas.drawString(40, 400 * (1 - block["source_bbox_normalized"][1]), block["content"])
+                canvas.showPage()
+            canvas.save()
+            fusion = root / "fusion"
+            fusion.mkdir()
+            (fusion / "document.json").write_text(json.dumps({"schema": "guzi-fusion-auto-v2", "pages": pages}))
+            output = root / "output"
+            validation = export_document(pdf, fusion, output)
+            document = json.loads((output / "document.json").read_text())
+            self.assertEqual(document["summary"]["references"], 2)
+            self.assertEqual(validation["bibliography"]["known_references"], [1, 2])
+            self.assertTrue(document["pages"][1]["elements"][0]["reference_section"])
+            markup = (output / "document.html").read_text()
+            for number in [1, 2]:
+                self.assertEqual(markup.count(f'id="ref-{number}"'), 1)
+                self.assertIn(f'href="#ref-{number}"', markup)
+
+    def test_bilingual_heading_exports_reference_counts_and_anchors(self):
+        from reportlab.pdfgen.canvas import Canvas
+        b = BibliographyTests.block
+        references = [
+            "[1] Lin, A. and Chen, B. Synthetic Document Evaluation. Fixture Notes, 2026.",
+            "[2] 王明，李青。双语文档解析测试规范。合成测试资料，2026：9-16。",
+            "[3] Guzi Test Group. Reproducible OCR Smoke Checks. Report GS-2026-03.",
+        ]
+        pages = [{"blocks": [
+            b("text", "## 结论与参考文献", [.1, .01, .9, .04]),
+            b("text", "The following references support this example [1,2,3].", [.1, .05, .9, .08]),
+            b("text", "## 6. 参考文献/References：", [.1, .1, .9, .13]),
+            *[b("text", text, [.1, .2 + index * .1, .9, .25 + index * .1]) for index, text in enumerate(references)],
+            b("text", "## Appendix A", [.1, .6, .9, .63]),
+            b("text", "[4] A numbered appendix procedure from 2026, not a bibliography entry.", [.1, .7, .9, .75]),
+        ]}]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pdf = root / "source.pdf"
+            canvas = Canvas(str(pdf), pagesize=(400, 400))
+            canvas.drawString(40, 350, "Synthetic bilingual bibliography fixture")
+            canvas.save()
+            fusion = root / "fusion"
+            fusion.mkdir()
+            (fusion / "document.json").write_text(json.dumps({"schema": "guzi-fusion-auto-v2", "pages": pages}))
+            output = root / "output"
+            validation = export_document(pdf, fusion, output)
+            document = json.loads((output / "document.json").read_text())
+            self.assertEqual(document["summary"]["references"], 3)
+            self.assertEqual(validation["bibliography"]["known_references"], [1, 2, 3])
+            records = document["pages"][0]["elements"]
+            self.assertFalse(records[0]["reference_section"])
+            self.assertTrue(all(record["reference_section"] for record in records[2:6]))
+            self.assertFalse(records[7]["reference_section"])
+            markup = (output / "document.html").read_text()
+            for number, reference in enumerate(references, 1):
+                self.assertEqual(markup.count(f'id="ref-{number}"'), 1)
+                self.assertIn(f'href="#ref-{number}"', markup)
+                self.assertIn(reference, markup)
+            self.assertNotIn('id="ref-4"', markup)
+
     def test_native_reference_refresh_preserves_sources_and_relocates_reference_anchors(self):
         import copy
         from reportlab.pdfgen.canvas import Canvas

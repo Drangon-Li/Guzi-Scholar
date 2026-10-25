@@ -16,7 +16,8 @@ import zipfile
 import unicodedata
 from xml.etree import ElementTree
 
-from .bibliography import bibliography_anchors, bibliography_layout, citation_links, is_bibliography_entry, native_reference_duplicates, reference_numbers
+from .bibliography import bibliography_anchors, bibliography_layout, citation_links, is_bibliography_entry, is_bibliography_heading, native_reference_duplicates, reference_numbers
+from .table_evidence import ocr_table_candidate
 
 
 def save_json(path, data):
@@ -245,7 +246,7 @@ def reference_layout(source_pages):
                 subsection = re.match(r"^([A-Z])\.(\d+)(?:\.|\s)", plain)
                 if scope.startswith("appendix-") and subsection:
                     scope = f"appendix-{subsection[1]}.{subsection[2]}"
-                references = bool(re.match(r"^(?:References?|Bibliography)\b", plain, re.I))
+                references = is_bibliography_heading(plain)
             caption = CAPTION_RE.match(plain) if not references else None
             caption_kind = "image" if caption and caption[1].lower().startswith("fig") else "table" if caption else None
             entry = {"page": pi, "index": index, "order": len(entries), "label": str(block.get("label") or "text"), "bbox": box, "plain": plain, "scope": scope, "references": references, "caption": (caption_kind, caption[2].upper() + caption[3].lower()) if caption else None, "table_heading": table_heading, "paper_title": pi == 1 and index <= 3 and is_heading and not table_heading and bool(re.match(r"^#\s", content)) and not re.match(r"^(?:\d|abstract\b|introduction\b|contents?\b|references?\b|fig(?:ure)?\b|table\b|keywords?\b)", plain, re.I)}
@@ -881,6 +882,10 @@ def export_document(pdf, fusion_dir, output, title=None, job_id=None):
                 if isinstance(audit, list):
                     audit = {"inline": audit}
                 candidate_content = content
+                scan_table = ocr_table_candidate(block) if label == 'table' else None
+                if scan_table is not None:
+                    content = candidate_content = scan_table
+                    audit = {'status': 'unresolved', 'reason': 'ocr_only_table_requires_source_review', 'evidence_basis': 'ocr-only'}
                 render_fallback = block.get("render_fallback") or {}
                 source_block_required = label in {"table", "formula"} and (bool(audit.get("source_block_required")) or bool(block.get("needs_source_table")) or render_fallback.get("mode") == "source-crop")
                 if label not in {"table", "formula", "image"} and audit.get("source_block_required"):
@@ -891,8 +896,11 @@ def export_document(pdf, fusion_dir, output, title=None, job_id=None):
                     audit["render_reason"] = render_fallback["reason"]
                 native_table_unsupported = label == "table" and (block.get("native_evidence") or {}).get("status") == "unsupported"
                 if native_table_unsupported:
-                    source_block_required = True
+                    source_block_required = scan_table is None
                     audit.update({"status": "unresolved", "render_reason": "unsupported-native-table-geometry"})
+                if scan_table is not None:
+                    source_block_required = False
+                    audit['render_reason'] = 'ocr-table-with-source-comparison'
                 if label in {"text", "reference", "footnote"}:
                     for item in audit.get("inline", []):
                         if item.get("render_mode") == "source-crop" or item.get("source_crop_required"):
@@ -1100,10 +1108,16 @@ def export_document(pdf, fusion_dir, output, title=None, job_id=None):
                             markdown_content = f"![原 PDF 表格]({asset})"
                             audit.update({"status": "unresolved", "render_status": "source-block-crop", "source_block_required": True, "source_asset": asset})
                         else:
-                            body = f'<div class="table-scroll">{markup}</div><details class="source-crop"><summary>原 PDF 表格</summary><img src="{asset}" alt="" style="width:{width}px"></details>'
+                            notice = '<p class="table-review-notice" role="note">表格文字待核对，请参照下方原图。</p>' if scan_table is not None else ''
+                            disclosure = ' open' if scan_table is not None else ''
+                            body = f'{notice}<div class="table-scroll">{markup}</div><details class="source-crop"{disclosure}><summary>原 PDF 表格</summary><img src="{asset}" alt="" style="width:{width}px"></details>'
                         record["table_html"] = None if source_block_required else markup
                         if source_block_required:
                             record["table_html_status"] = "unsupported-source-primary"
+                        elif scan_table is not None:
+                            record['table_html_status'] = 'ocr-only-unverified'
+                            record['render_mode'] = 'ocr-table-with-source-comparison'
+                            audit['render_status'] = 'ocr-table-with-source-comparison'
                     else:
                         counts["display_formulas"] += 1
                         mathml = "" if source_block_required or audit.get("source_crop_required") else display_math(content, audit)
@@ -1343,7 +1357,7 @@ def reexport_document(exported_dir, output, source_pdf=None):
                 targets[number] = canonical
         for index in proposal["suppressed_indices"]:
             native_members[proposal["page"], index] = proposal
-    reference_headings = [entry["order"] for entry in entries.values() if re.fullmatch(r"References?|Bibliography", entry["plain"], re.I)]
+    reference_headings = [entry["order"] for entry in entries.values() if is_bibliography_heading(entry["plain"])]
     multiple_bibliographies = len(reference_headings) > 1
     first_bibliography = min(reference_headings, default=float("inf"))
     footnotes = {}

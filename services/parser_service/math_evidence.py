@@ -2,6 +2,7 @@
 import collections
 from difflib import SequenceMatcher
 import re
+import unicodedata
 
 from .native_pdf import canonical, unicode_script
 
@@ -15,11 +16,37 @@ SYMBOLS.update({'{': '{', '}': '}', '_': '_', '%': '%', '&': '&', '#': '#', '$':
 FUNCTIONS = {'arg', 'argmax', 'argmin', 'sin', 'cos', 'tan', 'log', 'ln', 'exp', 'max', 'min', 'lim', 'sup', 'inf', 'det', 'Pr', 'gcd'}
 STYLES = {'mathcal', 'mathscr', 'mathbb', 'mathbf', 'boldsymbol', 'mathit', 'mathrm', 'operatorname', 'text', 'textrm', 'textnormal', 'textbf', 'textit', 'bm'}
 LAYOUT = {'left', 'right', 'big', 'Big', 'bigg', 'Bigg', 'bigl', 'bigr', 'Bigl', 'Bigr', 'biggl', 'biggr', 'Biggl', 'Biggr', 'limits', 'nolimits', 'displaystyle', 'textstyle', 'scriptstyle', 'scriptscriptstyle', 'quad', 'qquad', 'enspace', 'thinspace', '!', ',', ';', ':', ' ', '\\'}
+DELIMITERS = {char: char for char in '()[]|/<>'}
+DELIMITERS['.'] = ''
+DELIMITERS.update({'\\' + name: value for name, value in {'{': '{', '}': '}', '|': '‖', 'lbrace': '{', 'rbrace': '}', 'langle': '⟨', 'rangle': '⟩', 'lvert': '|', 'rvert': '|', 'vert': '|', 'lVert': '‖', 'rVert': '‖', 'Vert': '‖', 'lceil': '⌈', 'rceil': '⌉', 'lfloor': '⌊', 'rfloor': '⌋', 'backslash': '\\', 'uparrow': '↑', 'downarrow': '↓', 'updownarrow': '↕', 'Uparrow': '⇑', 'Downarrow': '⇓', 'Updownarrow': '⇕'}.items()})
 MATH_SPAN = re.compile(r'(?<!\\)\$\$(.+?)(?<!\\)\$\$|(?<!\\)\$(?!\$)([^\n]+?)(?<!\\)\$(?!\$)', re.S)
+MATH_ENVIRONMENTS = {'matrix', 'matrix*', 'pmatrix', 'pmatrix*', 'bmatrix', 'bmatrix*', 'Bmatrix', 'Bmatrix*', 'vmatrix', 'vmatrix*', 'Vmatrix', 'Vmatrix*', 'array', 'substack', 'cases', 'displaylines', 'eqalign', 'eqalignno', 'smallmatrix', 'split', 'align', 'align*'}
 
 
 def math_canonical(value):
     return canonical(value).replace('*', '∗').replace('·', '⋅')
+
+
+def math_units(value):
+    for char in math_canonical(value):
+        decomposed = unicodedata.normalize('NFD', char)
+        if len(decomposed) == 2 and decomposed[0].isalpha() and decomposed[1] == '\u0302':
+            yield decomposed[0], ['hat']
+        else:
+            yield char, []
+
+
+def font_box_script(char, body):
+    size = body.get('size', 10)
+    if char.get('fontname') != body.get('fontname') or not .5 * size <= char.get('size', 10) < .9 * size or abs(char['baseline'] - body['baseline']) > .15 * size:
+        return None
+    if max(body['x0'] - char['x1'], char['x0'] - body['x1']) > size * 3:
+        return None
+    if char['bottom'] > body['bottom'] + size * .1 and body['top'] + size * .25 < char['top'] < body['bottom']:
+        return 'sub'
+    if char['top'] < body['top'] - size * .1 and body['top'] < char['bottom'] < body['bottom'] - size * .25:
+        return 'sup'
+    return None
 
 
 def math_spans(text):
@@ -123,7 +150,18 @@ def reconcile_equation_number(content, page, region):
 class TexAtoms:
     def __init__(self, text):
         self.text, self.pos, self.unknown = text, 0, []
+        self.native_required_macros = []
+        self.syntax_errors = []
+        self.delimiter_stack = []
+        self.group_stack = []
+        self.environment_stack = []
         self.atoms = self.read()
+        for opening in self.delimiter_stack:
+            self.syntax_errors.append({'kind': 'unclosed_left_delimiter', 'position': opening['position']})
+        for opening in self.environment_stack:
+            self.syntax_errors.append({'kind': 'unclosed_environment', 'position': opening['position'], 'environment': opening['name']})
+        if self.pos != len(self.text):
+            self.syntax_errors.append({'kind': 'unconsumed_input', 'position': self.pos, 'text': self.text[self.pos:]})
 
     def whitespace(self):
         while self.pos < len(self.text) and self.text[self.pos].isspace():
@@ -131,6 +169,9 @@ class TexAtoms:
 
     def argument(self, script=(), styles=(), role=None):
         self.whitespace()
+        if self.pos >= len(self.text) or self.text[self.pos] == '}':
+            self.syntax_errors.append({'kind': 'missing_argument', 'position': self.pos})
+            return []
         if self.pos < len(self.text) and self.text[self.pos] == '{':
             self.pos += 1
             return self.read(script, styles, role, group=True)
@@ -138,22 +179,37 @@ class TexAtoms:
 
     def read(self, script=(), styles=(), role=None, group=False, single=False):
         result = []
+        scripts_on_base = set()
+        group_start = self.pos - 1 if group else None
+        if group:
+            self.group_stack.append(group_start)
         while self.pos < len(self.text):
             self.whitespace()
             if self.pos >= len(self.text):
                 break
             start = self.pos
+            atoms_before = len(result)
             char = self.text[self.pos]
             self.pos += 1
             if char == '}':
-                break
+                if group:
+                    self.group_stack.pop()
+                    return result
+                self.syntax_errors.append({'kind': 'unexpected_closing_brace', 'position': start})
+                if single:
+                    return result
+                continue
             if char == '{':
                 result.extend(self.read(script, styles, role, group=True))
             elif char in '_^':
+                if char in scripts_on_base:
+                    self.syntax_errors.append({'kind': 'duplicate_script', 'position': start, 'script': 'sub' if char == '_' else 'sup'})
+                scripts_on_base.add(char)
                 result.extend(self.argument(script + (('sub' if char == '_' else 'sup'),), styles, role))
             elif char == '\\':
                 match = re.match(r'[A-Za-z]+|.', self.text[self.pos:])
                 if not match:
+                    self.syntax_errors.append({'kind': 'dangling_escape', 'position': start})
                     break
                 macro = match[0]
                 self.pos += len(macro)
@@ -175,25 +231,78 @@ class TexAtoms:
                     limit = self.argument(script + (('sub' if macro == 'underset' else 'sup'),), styles, role)
                     result.extend(self.argument(script, styles, role))
                     result.extend(limit)
-                elif macro in {'tag', 'label', 'begin', 'end'}:
+                elif macro in {'tag', 'label'}:
                     self.argument(script, styles, role)
+                elif macro in {'begin', 'end'}:
+                    self.whitespace()
+                    environment = re.match(r'\{([A-Za-z]+\*?)\}', self.text[self.pos:])
+                    if not environment:
+                        self.syntax_errors.append({'kind': 'invalid_environment_name', 'position': self.pos})
+                    else:
+                        self.pos += len(environment[0])
+                        name = environment[1]
+                        if name not in MATH_ENVIRONMENTS:
+                            self.syntax_errors.append({'kind': 'unsupported_environment', 'position': start, 'environment': name})
+                        scope = tuple(self.group_stack)
+                        if macro == 'begin':
+                            self.environment_stack.append({'name': name, 'position': start, 'group_scope': scope})
+                        elif not self.environment_stack:
+                            self.syntax_errors.append({'kind': 'orphan_end_environment', 'position': start, 'environment': name})
+                        else:
+                            opening = self.environment_stack.pop()
+                            if opening['name'] != name or opening['group_scope'] != scope:
+                                self.syntax_errors.append({'kind': 'mismatched_environment', 'position': start, 'environment': name, 'opening_environment': opening['name']})
+                elif macro in {'left', 'right'}:
+                    self.whitespace()
+                    delimiter_start = self.pos
+                    delimiter = re.match(r'\\(?:[A-Za-z]+|.)|.', self.text[self.pos:], re.S)
+                    token = delimiter[0] if delimiter else None
+                    if token not in DELIMITERS:
+                        self.syntax_errors.append({'kind': 'missing_math_delimiter' if token is None else 'invalid_math_delimiter', 'command': macro, 'position': delimiter_start})
+                    else:
+                        self.pos += len(token)
+                        if macro == 'left':
+                            self.delimiter_stack.append({'position': start, 'group_scope': tuple(self.group_stack)})
+                        elif not self.delimiter_stack or self.delimiter_stack[-1]['group_scope'] != tuple(self.group_stack):
+                            self.syntax_errors.append({'kind': 'orphan_right_delimiter', 'position': start})
+                        else:
+                            self.delimiter_stack.pop()
+                        if DELIMITERS[token]:
+                            result.extend(self.atom(DELIMITERS[token], delimiter_start, self.pos, script, styles, role))
                 elif macro in LAYOUT:
                     pass
-                elif macro in {'hat', 'bar', 'tilde', 'vec', 'overline', 'underline', 'sqrt'}:
+                elif macro == 'hat':
+                    argument = self.argument(script, styles, role)
+                    self.unknown.append(macro)
+                    if len(argument) == 1 and argument[0]['text'].isalpha():
+                        argument[0]['accents'].append('hat')
+                        self.native_required_macros.append(macro)
+                    result.extend(argument)
+                elif macro in {'bar', 'tilde', 'vec', 'overline', 'underline', 'sqrt'}:
                     self.unknown.append(macro)
                     result.extend(self.argument(script, styles, role))
                 else:
                     self.unknown.append(macro)
+            elif char == '\u0302' and result and result[-1]['text'].isalpha():
+                result[-1]['accents'].append('hat')
+                result[-1]['end'] = self.pos
             elif char not in '$&~':
                 result.extend(self.atom(char, start, self.pos, script, styles, role))
+            if char == '{' or (char not in '_^\u0302' and len(result) > atoms_before):
+                scripts_on_base.clear()
             if single:
                 break
+        if group:
+            self.group_stack.pop()
+            self.syntax_errors.append({'kind': 'unclosed_group', 'position': group_start})
+        if single and not result:
+            self.syntax_errors.append({'kind': 'missing_argument', 'position': self.pos})
         return result
 
     @staticmethod
     def atom(value, start, end, script, styles, role):
         intrinsic = unicode_script(value)
-        return [{'text': c, 'start': start, 'end': end, 'script': list(script or ((intrinsic,) if intrinsic else ())), 'styles': list(styles), 'role': role} for c in math_canonical(value)]
+        return [{'text': c, 'start': start, 'end': end, 'script': list(script or ((intrinsic,) if intrinsic else ())), 'styles': list(styles), 'role': role, 'accents': accents} for c, accents in math_units(value)]
 
 
 def native_atoms(page, region, glyph_ids=None, context_region=None):
@@ -239,10 +348,18 @@ def native_atoms(page, region, glyph_ids=None, context_region=None):
             if len(line_baselines) < 2:
                 line_baselines = []
     result = []
+    bbox_scripts = []
     for char in chars:
         row_baseline = min(line_baselines, key=lambda row: abs(row - char['baseline'])) if line_baselines else baseline
         delta = char['baseline'] - row_baseline
         script = 'sub' if delta > .08 * main_size and char.get('size', 10) < .85 * main_size else 'sup' if delta < -.12 * main_size and char.get('size', 10) < .85 * main_size else None
+        if script is None and char.get('size', 10) < main_size * .9:
+            body = [c for c in chars if c.get('size', 10) >= main_size * .9 and abs(c['baseline'] - row_baseline) <= main_size * .15]
+            candidates = [(c, font_box_script(char, c)) for c in body]
+            supported = [(c, kind) for c, kind in candidates if kind]
+            if supported and len({kind for _, kind in supported}) == 1:
+                reference, script = min(supported, key=lambda item: max(0, item[0]['x0'] - char['x1'], char['x0'] - item[0]['x1']))
+                bbox_scripts.append({'glyph_id': char['glyph_id'], 'script_kind': script, 'body_glyph_id': reference['glyph_id'], 'source': 'native_font_bbox_and_size'})
         if char.get('unicode_script'):
             script = char['unicode_script']
         if char['resolved_text'] == '°':
@@ -252,10 +369,18 @@ def native_atoms(page, region, glyph_ids=None, context_region=None):
         styles = [char['math_style']] if char['math_style'] else []
         if char['font_evidence'].get('bold') or char.get('unicode_bold'):
             styles.append('mathbf')
-        for value in math_canonical(char['resolved_text']):
+        for value, accents in math_units(char['resolved_text']):
             if script == 'sup' and value in '°◦':
                 value = '∘'
-            result.append({'text': value, 'script': script, 'styles': styles, 'glyph_id': char['glyph_id'], 'char': char})
+            if value == '\u0302' and result and result[-1]['text'].isalpha():
+                base = result[-1]['char']
+                size = base.get('size', 10)
+                center = (char['x0'] + char['x1']) / 2
+                if char.get('fontname') == base.get('fontname') and base['x0'] - size * .1 <= center <= base['x1'] + size * .1 and char['top'] <= base['top'] + size * .2 and char['bottom'] <= base['bottom'] + size * .1 and abs(char['baseline'] - base['baseline']) <= size * .75:
+                    result[-1]['accents'].append('hat')
+                    result[-1].setdefault('accent_glyph_ids', []).append(char['glyph_id'])
+                    continue
+            result.append({'text': value, 'script': script, 'styles': styles, 'glyph_id': char['glyph_id'], 'char': char, 'accents': accents})
     for rule in list(getattr(page.page, 'lines', [])) + list(getattr(page.page, 'rects', [])):
         height, width = rule['bottom'] - rule['top'], rule['x1'] - rule['x0']
         if height > 1 or width <= 0 or (height and width < height * 4) or rule.get('linewidth', 0) > 1.5:
@@ -285,6 +410,11 @@ def native_atoms(page, region, glyph_ids=None, context_region=None):
             seen.add(group)
             chunks.append(sorted((a for a in result if a.get('fraction_group') == group), key=lambda a: (a['fraction_role'] == 'denominator', a['char']['x0'])))
     availability = page.evidence(region_chars)
+    if bbox_scripts:
+        availability['script_bbox_evidence'] = bbox_scripts
+    accents = [{'glyph_id': atom['glyph_id'], 'source_glyph_ids': [atom['glyph_id']] + atom.get('accent_glyph_ids', []), 'accents': atom['accents'], 'source_unicode': atom['char']['resolved_text'], 'source': 'unicode_combining_mark_and_geometry' if atom.get('accent_glyph_ids') else 'unicode_canonical_decomposition'} for atom in result if atom['accents']]
+    if accents:
+        availability['accent_evidence'] = accents
     if line_baselines:
         availability.update(per_line_baselines=True, line_baselines_normalized=sorted(row / page.height for row in line_baselines))
     if seen:
@@ -321,7 +451,7 @@ def candidate_score(parsed, native):
     mapping = {match.a + i: match.b + i for match in matches for i in range(match.size)}
     matched = len(mapping)
     lexical_errors = len(target) + len(source) - 2 * matched
-    style_errors, script_errors, structure_errors = [], [], []
+    style_errors, script_errors, structure_errors, accent_errors = [], [], [], []
     for i, j in mapping.items():
         a, b = candidate[i], native[j]
         wanted = set(a['styles']) & {'mathcal', 'mathbb', 'mathbf'}
@@ -331,18 +461,27 @@ def candidate_score(parsed, native):
         script = a['script'][0] if a['script'] else None
         if script != b['script']:
             script_errors.append({'atom': i, 'text': a['text'], 'candidate_script': script, 'source_script': b['script'], 'glyph_id': b['glyph_id']})
+        if a.get('accents', []) != b.get('accents', []):
+            accent_errors.append({'atom': i, 'text': a['text'], 'candidate_accents': a.get('accents', []), 'source_accents': b.get('accents', []), 'glyph_id': b['glyph_id']})
         fraction_role = a['role'] if a['role'] in {'numerator', 'denominator'} else None
+        if len(a['script']) > 1:
+            structure_errors.append({'text': a['text'], 'reason': 'nested_script_relation_not_supported', 'glyph_id': b['glyph_id']})
         if fraction_role != b.get('fraction_role'):
             structure_errors.append({'text': a['text'], 'candidate_fraction_role': fraction_role, 'source_fraction_role': b.get('fraction_role'), 'glyph_id': b['glyph_id']})
-    score = lexical_errors * 3 + len(style_errors) * 2 + len(script_errors) * 2 + len(structure_errors) * 2
+    score = lexical_errors * 3 + len(style_errors) * 2 + len(script_errors) * 2 + len(structure_errors) * 2 + len(accent_errors) * 2 + len(parsed.syntax_errors) * 3
     matched_native = set(mapping.values())
     unmatched_native = ''.join(atom['text'] for j, atom in enumerate(native) if j not in matched_native)
-    return {'score': score, 'lexical_errors': lexical_errors, 'style_errors': style_errors, 'script_errors': script_errors, 'structure_errors': structure_errors, 'alignment_coverage': matched / max(1, len(target)), 'native_coverage': matched / max(1, len(source)), 'unmatched_native_text': unmatched_native, 'unknown_macros': sorted(set(parsed.unknown)), 'mapping': mapping}
+    unknown = set(parsed.unknown)
+    if not accent_errors and parsed.native_required_macros.count('hat') == parsed.unknown.count('hat'):
+        unknown.discard('hat')
+    return {'score': score, 'lexical_errors': lexical_errors, 'style_errors': style_errors, 'script_errors': script_errors, 'structure_errors': structure_errors, 'accent_errors': accent_errors, 'syntax_errors': list(parsed.syntax_errors), 'alignment_coverage': matched / max(1, len(target)), 'native_coverage': matched / max(1, len(source)), 'unmatched_native_text': unmatched_native, 'unknown_macros': sorted(unknown), 'mapping': mapping}
 
 
 def selectable_script_segments(content, page, region, glyph_ids, context_region=None):
     parsed = TexAtoms(content)
-    if parsed.unknown or not 1 <= len(parsed.atoms) <= 32 or not any(atom['script'] for atom in parsed.atoms):
+    if parsed.unknown or parsed.syntax_errors or not 1 <= len(parsed.atoms) <= 32 or not any(atom['script'] for atom in parsed.atoms):
+        return None
+    if any(atom.get('accents') for atom in parsed.atoms):
         return None
     if any(len(atom['script']) > 1 or set(atom['styles']) - {'mathrm'} or atom['role'] not in {None, 'operator'} for atom in parsed.atoms):
         return None
@@ -394,7 +533,7 @@ def repair_candidate(content, page, region, glyph_ids=None, context_region=None)
                 for style in styles:
                     replacement = '\\' + style + '{' + replacement + '}'
                 substitutions.append({'start': atom['start'], 'end': atom['end'], 'before': fragment, 'after': replacement, 'glyph_id': issue['glyph_id'], 'reason': 'native_math_alphabet'})
-    exact = evidence['lexical_errors'] == 0 and not parsed.unknown and not availability['unknown_glyphs'] and not availability['rotated_glyphs'] and not availability.get('fraction_order_ambiguous') and not evidence['structure_errors']
+    exact = evidence['lexical_errors'] == 0 and not parsed.unknown and not parsed.syntax_errors and not availability['unknown_glyphs'] and not availability['rotated_glyphs'] and not availability.get('fraction_order_ambiguous') and not evidence['structure_errors']
     if exact and context_region and glyph_ids is not None:
         geometry = page.inline_geometry(glyph_ids, context_region)
         if geometry.get('status') == 'confirmed':
@@ -439,8 +578,8 @@ def assess_formula(glm_content, mineru_content, page, region, glyph_ids=None, co
     scored.sort(key=lambda item: item[0])
     best = scored[0]
     quality = best[3]
-    confirmed = bool(native) and not availability['unknown_glyphs'] and not availability['rotated_glyphs'] and not availability.get('fraction_order_ambiguous') and quality['alignment_coverage'] >= .9 and quality['native_coverage'] >= .85 and quality['lexical_errors'] == 0 and not quality['style_errors'] and not quality['script_errors'] and not quality['structure_errors'] and not quality['unknown_macros']
-    reason = None if confirmed else 'formula_native_evidence_incomplete' if not native or quality['alignment_coverage'] < .85 else 'formula_structure_or_glyphs_unresolved'
+    confirmed = bool(native) and not availability['unknown_glyphs'] and not availability['rotated_glyphs'] and not availability.get('fraction_order_ambiguous') and quality['alignment_coverage'] >= .9 and quality['native_coverage'] >= .85 and quality['lexical_errors'] == 0 and not quality['style_errors'] and not quality['script_errors'] and not quality['structure_errors'] and not quality['accent_errors'] and not quality['syntax_errors'] and not quality['unknown_macros']
+    reason = None if confirmed else 'formula_candidate_syntax_invalid' if quality['syntax_errors'] else 'formula_native_evidence_incomplete' if not native or quality['alignment_coverage'] < .85 else 'formula_structure_or_glyphs_unresolved'
     # Unresolved differences never replace the base formula with an uncertain candidate.
     chosen = best if confirmed else next(c for c in scored if c[1] == 'glm')
     for _, _, _, evidence in scored:
