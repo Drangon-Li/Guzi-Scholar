@@ -23,6 +23,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from document_ir import odl_to_ir, pdf_page_sizes, render_pages, serializable_ir
 from mineru_discovery import discover_mineru
+from subprocess_runtime import hidden_subprocess_options
 from toolchain_paths import tool_path_candidates
 
 
@@ -124,6 +125,7 @@ def _run(cmd: Sequence[str], *, timeout: int = 900) -> subprocess.CompletedProce
             errors="replace",
             timeout=timeout,
             check=False,
+            **hidden_subprocess_options(),
         )
     except FileNotFoundError as exc:
         raise PipelineError(f"找不到运行依赖：{cmd[0]}") from exc

@@ -32,6 +32,7 @@ from document_ir import _marker_drawing_pages, mineru_to_ir, render_pages, seria
 from mineru_discovery import discover_mineru
 from toolchain_paths import tool_path_candidates
 from pymupdf_runtime import load_fitz
+from subprocess_runtime import hidden_subprocess_options, stop_windows_process_tree
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -111,6 +112,7 @@ def detect_gpu_memory_mb() -> Optional[int]:
             text=True,
             timeout=5,
             check=False,
+            **hidden_subprocess_options(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -494,6 +496,7 @@ def _extract_pdf_evidence_java(source_pdf: Path, workspace: Path) -> List[Dict[s
                 stderr=subprocess.DEVNULL,
                 check=False,
                 timeout=PDF_EVIDENCE_WORKER_TIMEOUT_SECONDS,
+                **hidden_subprocess_options(),
             )
             if result.returncode != 0:
                 return []
@@ -518,6 +521,7 @@ def _extract_pdf_evidence_isolated(
                 stderr=subprocess.DEVNULL,
                 check=False,
                 timeout=PDF_EVIDENCE_WORKER_TIMEOUT_SECONDS,
+                **hidden_subprocess_options(),
             )
             value = _read_pdf_evidence_output(output_json) if result.returncode == 0 else []
             if value:
@@ -1017,6 +1021,7 @@ class MathRenderer:
                     [self.pandoc, "--from=markdown+tex_math_dollars+tex_math_single_backslash",
                      "--to=html5", "--mathml"],
                     input=source, text=True, capture_output=True, check=False, timeout=20,
+                    **hidden_subprocess_options(),
                 )
                 match = re.search(r"<math\b.*?</math>", completed.stdout or "", flags=re.S)
                 if match:
@@ -1171,6 +1176,7 @@ def _mineru_health_failure(executable: Path) -> Optional[str]:
             completed = subprocess.run(
                 [str(executable), "--help"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, encoding="utf-8", errors="replace", check=False, timeout=20,
+                **hidden_subprocess_options(),
             )
             if completed.returncode != 0:
                 detail = (completed.stdout or "").strip().splitlines()
@@ -1205,7 +1211,9 @@ def _stop_mineru_process(process: subprocess.Popen) -> None:
     # terminates the process group and must never call communicate().
     if process.poll() is None:
         try:
-            if os.name == "posix":
+            if sys.platform == "win32":
+                stop_windows_process_tree(process)
+            elif os.name == "posix":
                 os.killpg(process.pid, signal.SIGTERM)
             else:
                 process.terminate()
@@ -1215,7 +1223,9 @@ def _stop_mineru_process(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:
         try:
-            if os.name == "posix":
+            if sys.platform == "win32":
+                stop_windows_process_tree(process)
+            elif os.name == "posix":
                 os.killpg(process.pid, signal.SIGKILL)
             else:
                 process.kill()
@@ -1473,11 +1483,12 @@ def _run_mineru(
         options: Dict[str, Any] = {
             "stdout": subprocess.PIPE,
             "stderr": subprocess.STDOUT,
+            **hidden_subprocess_options(),
         }
-        if os.name == "posix":
+        if sys.platform == "win32":
+            options["creationflags"] |= subprocess.CREATE_NEW_PROCESS_GROUP
+        elif os.name == "posix":
             options["start_new_session"] = True
-        elif os.name == "nt":
-            options["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         if runtime_root is not None:
             managed_root = Path(runtime_root).expanduser().resolve()
             try:
@@ -1673,7 +1684,7 @@ def _render_pages(pdf_path: Path, target: Path, page_count: int, dpi: int = 144)
             str(page_count),
         ]
         try:
-            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=600)
+            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=600, **hidden_subprocess_options())
             rendered = [path.name for path in sorted(target.glob("page-*.png"))]
             if len(rendered) == page_count and len(set(rendered)) == page_count:
                 return rendered
@@ -1691,7 +1702,7 @@ def _render_pages(pdf_path: Path, target: Path, page_count: int, dpi: int = 144)
         prefix = Path(temp) / "page"
         command = [pdftoppm, "-png", "-r", str(dpi), "-f", "1", "-l", str(page_count), str(pdf_path), str(prefix)]
         try:
-            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=600)
+            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=600, **hidden_subprocess_options())
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             return []
         for source in sorted(Path(temp).glob("page-*.png")):
@@ -1877,7 +1888,7 @@ def _render_pdf_visual_crops_java(
             str(manifest),
         ]
         try:
-            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=600)
+            subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=600, **hidden_subprocess_options())
         except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
             for request in requests:
                 request["target"].unlink(missing_ok=True)

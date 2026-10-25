@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import quote as urlquote, urlsplit
 
 from content_store import _active_conversion_root, _sync_content_file
+from annotation_style_sync import _sync_directory
 from pipeline import utc_now
 
 IMPORT_LOCK = threading.RLock()
@@ -36,11 +37,7 @@ def _atomic_write(path: Path, value) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
-        directory = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
 

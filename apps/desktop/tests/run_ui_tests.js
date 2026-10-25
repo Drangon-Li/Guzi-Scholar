@@ -52,7 +52,27 @@ if (only && !tests.some(([name]) => name === only)) throw new Error(`Unknown UI 
 const selected = tests.filter(([name, , meta]) => (!ciOnly || meta.ci) && (!only || name === only));
 
 const desktopRoot = path.join(__dirname, '..');
-const python = process.env.MY_SCHOLAR_PYTHON || 'python3';
+function resolvePython() {
+  const configured = String(process.env.MY_SCHOLAR_PYTHON || '').trim();
+  const candidates = [
+    [configured, []],
+    ...(process.platform === 'win32' ? [
+      [process.env.VIRTUAL_ENV ? path.join(process.env.VIRTUAL_ENV, 'Scripts', 'python.exe') : '', []],
+      [process.env.CONDA_PREFIX ? path.join(process.env.CONDA_PREFIX, 'python.exe') : '', []],
+      ['python', []], ['python3', []], ['py', ['-3']],
+    ] : [['python3', []]]),
+  ];
+  for (const [command, prefix] of candidates) {
+    if (!command || /\.(cmd|bat)$/i.test(command)) continue;
+    if (/[\\/]/.test(command) && !fs.existsSync(command)) continue;
+    const result = spawnSync(command, [...prefix, '-c', 'import hashlib, sqlite3; assert hasattr(hashlib, "scrypt")'], {
+      encoding: 'utf8', timeout: 8000, windowsHide: true,
+    });
+    if (result.status === 0) return { command, prefix };
+  }
+  throw new Error('UI 测试需要具备 hashlib.scrypt 与 sqlite3 的 Python；可通过 MY_SCHOLAR_PYTHON 指定。');
+}
+const python = explicitBaseURL ? null : resolvePython();
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -93,25 +113,29 @@ async function runManaged(script) {
   const logPath = path.join(dataRoot, 'server.log');
   let server = null;
   try {
-    const seed = spawnSync(python, [path.join(__dirname, 'fixtures', 'seed_library.py'), dataRoot], {
+    const seed = spawnSync(python.command, [...python.prefix, path.join(__dirname, 'fixtures', 'seed_library.py'), dataRoot], {
       cwd: desktopRoot,
       encoding: 'utf-8',
+      windowsHide: true,
     });
     if (seed.status !== 0) throw new Error(`fixture seed failed: ${seed.stderr || seed.stdout}`);
 
     const port = await freePort();
     const log = fs.openSync(logPath, 'a');
-    server = spawn(python, [path.join(desktopRoot, 'server.py'), '--port', String(port)], {
+    server = spawn(python.command, [...python.prefix, path.join(desktopRoot, 'server.py'), '--port', String(port)], {
       cwd: desktopRoot,
       env: { ...process.env, MY_SCHOLAR_DATA_DIR: dataRoot, ...(script === 'plugin_market_smoke.js' ? { MY_SCHOLAR_PLUGIN_ADMISSION_TOKEN: 'fixture-admission-token' } : {}) },
       stdio: ['ignore', log, log],
+      windowsHide: true,
     });
+    fs.closeSync(log);
     await waitForHealth(port);
 
     const result = spawnSync(process.execPath, [path.join(__dirname, script), `http://127.0.0.1:${port}`], {
       cwd: desktopRoot,
       env: { ...process.env, MY_SCHOLAR_TEST_DATA: dataRoot },
       stdio: 'inherit',
+      windowsHide: true,
     });
     const passed = result.status === 0 && !result.signal;
     if (!passed) process.stderr.write(fs.readFileSync(logPath, 'utf-8').slice(-4000));
@@ -133,6 +157,7 @@ function runShared(script, baseURL) {
     cwd: desktopRoot,
     env: process.env,
     stdio: 'inherit',
+    windowsHide: true,
   });
   return { passed: result.status === 0 && !result.signal, status: result.status, signal: result.signal || null };
 }

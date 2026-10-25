@@ -32,9 +32,14 @@ const unnamed = { frameTreeNodeId: 5, parent: main, url: 'about:blank', name: ''
 assert.deepStrictEqual(request(unnamed, '/plugins/example.test/index.html', { resourceType: 'subFrame' }), { cancel: false, authorize: true });
 assert.deepStrictEqual(request(unnamed, '/api/settings'), { cancel: true, authorize: false });
 assert.deepStrictEqual(request(plugin, '/plugins/example.test/main.js', { method: 'POST' }), { cancel: true, authorize: false });
-const configuration = mcpClientConfiguration({ executable: '/Applications/Guzi Scholar.app/Contents/MacOS/Guzi Scholar', projectRoot: '/Applications/Guzi Scholar.app/Contents/Resources/app', connectionFile: '/Users/test/Library/Application Support/Guzi/mcp/connection.json' });
+const fixtureRoot = path.resolve(__dirname, 'MCP fixture with spaces');
+const executable = path.join(fixtureRoot, process.platform === 'win32' ? 'Guzi Scholar.exe' : 'Guzi Scholar');
+const projectRoot = path.join(fixtureRoot, 'resources', 'app');
+const connectionFile = path.join(fixtureRoot, 'user data', 'mcp', 'connection.json');
+const configuration = mcpClientConfiguration({ executable, projectRoot, connectionFile });
+assert.strictEqual(configuration.command, executable);
 assert.strictEqual(configuration.env.ELECTRON_RUN_AS_NODE, '1');
-assert(configuration.args[0].endsWith('/mcp/bridge.cjs'));
+assert.deepStrictEqual(configuration.args, [path.join(projectRoot, 'mcp', 'bridge.cjs'), '--connection-file', connectionFile]);
 assert(configuration.toml.includes(JSON.stringify(configuration.args)));
 assert(!configuration.toml.includes('token'));
 

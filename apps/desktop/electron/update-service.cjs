@@ -4,6 +4,15 @@ const https = require('https');
 
 const MAX_MANIFEST_BYTES = 64 * 1024;
 
+function resolveUpdateManifestURL({ env = process.env, platform = process.platform, arch = process.arch } = {}) {
+  const configured = String(env.MY_SCHOLAR_UPDATE_MANIFEST_URL || '').trim();
+  if (configured) return configured;
+  if (platform === 'darwin' && arch === 'arm64') {
+    return 'https://raw.githubusercontent.com/Drangon-Li/Guzi-Scholar/main/release-manifests/macos-arm64.json';
+  }
+  return '';
+}
+
 function parseVersion(value) {
   const match = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/u.exec(String(value || '').trim());
   if (!match) throw new Error('更新服务返回了无效的版本号。');
@@ -99,6 +108,7 @@ function fetchJSON(url, { timeout = 10000, userAgent = 'GuziScholar' } = {}) {
 }
 
 async function checkForUpdate({ manifestURL, currentVersion, platform, arch, channel, allowedOrigins, fetcher = fetchJSON }) {
+  if (!manifestURL) return { status: 'unavailable', currentVersion: parseVersion(currentVersion).raw, platform, arch, channel };
   const origins = new Set(allowedOrigins);
   const endpoint = safeURL(manifestURL, origins, '更新服务地址');
   const payload = await fetcher(endpoint, { userAgent: `GuziScholar/${currentVersion} (${platform}; ${arch})` });
@@ -118,5 +128,6 @@ module.exports = {
   compareVersions,
   fetchJSON,
   parseVersion,
+  resolveUpdateManifestURL,
   validateUpdateManifest,
 };

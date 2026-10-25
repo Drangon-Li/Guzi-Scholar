@@ -17,10 +17,11 @@ const {
   writeLibraryPointer,
 } = require('./library-storage.cjs');
 const { resolvePythonRuntime } = require('./python-runtime.cjs');
+const { packagedToolchainEnvironment: resolvePackagedToolchainEnvironment, resolvePackagedServer } = require('./packaged-runtime.cjs');
 const { RendererStateStore } = require('./renderer-state.cjs');
 const { hasTrustedOrigin, localRequestPolicy } = require('./url-security.cjs');
 const { mcpClientConfiguration } = require('./mcp-config.cjs');
-const { checkForUpdate } = require('./update-service.cjs');
+const { checkForUpdate, resolveUpdateManifestURL } = require('./update-service.cjs');
 const { consumeInstallationMarker, requestMacInstallation } = require('./macos-installation.cjs');
 const { configurePluginIsolation, checkPreviewBoundaries, PluginProcessGuard } = require('./plugin-guard.cjs');
 
@@ -33,7 +34,7 @@ const DEVELOPMENT_BUILD = developmentArguments.includes('--guzi-development') ? 
 const isolatedBuild = Boolean(LOCAL_TEST_BUILD || DEVELOPMENT_BUILD);
 const PRODUCT_NAME = DEVELOPMENT_BUILD ? '谷子学术开发版' : LOCAL_TEST_BUILD ? '谷子学术测试版' : '谷子学术';
 const UPDATE_CHANNEL = 'internal';
-const UPDATE_MANIFEST_URL = process.env.MY_SCHOLAR_UPDATE_MANIFEST_URL || 'https://raw.githubusercontent.com/Drangon-Li/Guzi-Scholar/main/release-manifests/macos-arm64.json';
+const UPDATE_MANIFEST_URL = resolveUpdateManifestURL({ env: process.env, platform: process.platform, arch: process.arch });
 const UPDATE_ALLOWED_ORIGINS = Object.freeze(['https://raw.githubusercontent.com', 'https://github.com']);
 const defaultUserDataPath = app.getPath('userData');
 app.setName(PRODUCT_NAME);
@@ -225,6 +226,7 @@ ipcMain.handle('my-scholar:check-for-updates', async (event) => {
     });
     availableUpdate = result.status === 'available' ? result : null;
     diagnosticLog('update-check', `status=${result.status} current=${result.currentVersion} latest=${result.version}`);
+    if (result.status === 'unavailable') return { ok: false, ...result, error: '当前平台尚未配置更新服务。' };
     return { ok: true, ...result };
   } catch (error) {
     availableUpdate = null;
@@ -609,9 +611,7 @@ function backendExecutable(projectRoot) {
   const configured = String(process.env.MY_SCHOLAR_SERVER_EXECUTABLE || '').trim();
   if (configured) return { command: path.resolve(configured), args: [], source: 'MY_SCHOLAR_SERVER_EXECUTABLE' };
   if (app.isPackaged) {
-    const bundled = path.join(process.resourcesPath, 'python-server', 'my-scholar-server');
-    if (fs.existsSync(bundled)) return { command: bundled, args: [], source: 'bundled-server' };
-    throw new Error('应用包缺少本地文献服务。请重新安装谷子学术。');
+    return resolvePackagedServer({ resourcesPath: process.resourcesPath, platform: process.platform });
   }
   const python = pythonExecutable();
   return {
@@ -623,31 +623,7 @@ function backendExecutable(projectRoot) {
 
 function packagedToolchainEnvironment() {
   if (!app.isPackaged) return {};
-  const jar = path.join(process.resourcesPath, 'toolchain', 'opendataloader-pdf-cli-0.0.0.jar');
-  const pandoc = path.join(process.resourcesPath, 'toolchain', 'pandoc', 'pandoc');
-  const java = path.join(process.resourcesPath, 'java', 'bin', 'java');
-  const renderer = path.join(process.resourcesPath, 'toolchain', 'pdf-renderer');
-  const caBundle = path.join(process.resourcesPath, 'python-server', 'ca-certificates.crt');
-  if (!fs.existsSync(jar) || !fs.existsSync(pandoc) || !fs.existsSync(java) || !fs.existsSync(renderer)) {
-    throw new Error('应用包缺少 PDF 转换组件。请重新安装谷子学术。');
-  }
-  let caBundleReady = false;
-  try {
-    const stats = fs.statSync(caBundle);
-    caBundleReady = stats.isFile() && stats.size > 0;
-  } catch (_) {
-    caBundleReady = false;
-  }
-  if (!caBundleReady) {
-    throw new Error('应用包缺少 HTTPS 信任证书。请重新安装谷子学术。');
-  }
-  return {
-    MY_SCHOLAR_ODL_JAR: jar,
-    MY_SCHOLAR_PANDOC: pandoc,
-    MY_SCHOLAR_JAVA: java,
-    MY_SCHOLAR_PDF_RENDERER_CLASSPATH: `${renderer}${path.delimiter}${jar}`,
-    SSL_CERT_FILE: caBundle,
-  };
+  return resolvePackagedToolchainEnvironment({ resourcesPath: process.resourcesPath, platform: process.platform });
 }
 
 function signalServer(child, signal) {

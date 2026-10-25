@@ -1,0 +1,27 @@
+{
+  "python": "3.11",
+  "java": "21",
+  "pip": [
+    "altgraph==0.17.5",
+    "packaging==26.3",
+    "pyinstaller-hooks-contrib==2026.6",
+    "setuptools==83.0.0",
+    "pyinstaller==6.16.0",
+    "pefile==2023.2.7",
+    "pywin32-ctypes==0.2.3",
+    "PyMuPDF==1.28.2",
+    "certifi==2025.8.3"
+  ],
+  "pandoc": {
+    "version": "3.10.2",
+    "url": "https://github.com/jgm/pandoc/releases/download/3.10.2/pandoc-3.10.2-windows-x86_64.zip",
+    "sha256": "52487faaa63f8cef5363d5a771097da001228d61c6f44f32ed41b27a98c0278c",
+    "checksumSource": "https://api.github.com/repos/jgm/pandoc/releases/assets/511955642"
+  },
+  "opendataloader": {
+    "version": "2.5.1",
+    "url": "https://github.com/opendataloader-project/opendataloader-pdf/releases/download/v2.5.1/opendataloader-pdf-cli-2.5.1.zip",
+    "sha256": "01bd864a20ac92ea9ee44dc97d5520cfd4f6e08760187c8f756b192186dccd73",
+    "jarSha256": "104a5523c812ba3a43a3c7dd6156e33f23d0e32f03ef1ac629009ef96d7a79e1"
+  }
+}

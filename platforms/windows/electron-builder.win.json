@@ -4,24 +4,25 @@
   "copyright": "Guzi Scholar",
   "electronVersion": "43.2.0",
   "directories": {
-    "app": "../../apps/desktop",
-    "output": "dist"
+    "app": ".",
+    "output": "../../platforms/windows/dist"
   },
   "asar": false,
   "files": [
     "electron/**/*",
     "web/**/*",
     "*.py",
-    "scripts/**/*.py",
     "config.example.json",
-    "package.json",
-    "!**/__pycache__/**",
-    "!data/**",
-    "!tests/**",
-    "!docs/**",
-    "!node_modules/**",
+    "!data{,/**/*}",
+    "!tests{,/**/*}",
     "!developer.tokens.json",
     "!config.local.json",
+    "!**/.env*",
+    "!**/*.pem",
+    "!**/*.key",
+    "!**/__pycache__{,/**/*}",
+    "!**/*.py[cod]",
+    "!**/.DS_Store",
     "mcp/bridge.cjs",
     "mcp/bridge.cjs.LEGAL.txt",
     "plugin_templates/**/*"
@@ -31,11 +32,22 @@
     "main": "electron/main.cjs"
   },
   "win": {
-    "icon": "assets/icon.ico",
+    "icon": "electron/assets/icon.ico",
     "target": [
-      { "target": "nsis", "arch": ["x64"] },
-      { "target": "zip", "arch": ["x64"] }
-    ]
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      },
+      {
+        "target": "zip",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "executableName": "Guzi-Scholar"
   },
   "nsis": {
     "oneClick": false,
@@ -43,6 +55,52 @@
     "allowToChangeInstallationDirectory": true,
     "createDesktopShortcut": true,
     "createStartMenuShortcut": true,
-    "shortcutName": "谷子学术"
-  }
+    "shortcutName": "谷子学术",
+    "artifactName": "Guzi-Scholar-${version}-windows-${arch}-setup.${ext}"
+  },
+  "artifactName": "Guzi-Scholar-${version}-windows-${arch}.${ext}",
+  "compression": "maximum",
+  "npmRebuild": false,
+  "extraResources": [
+    {
+      "from": "build/windows-runtime/my-scholar-server",
+      "to": "python-server"
+    },
+    {
+      "from": "build/windows-runtime/java",
+      "to": "java"
+    },
+    {
+      "from": "build/windows-runtime/opendataloader-pdf-cli-0.0.0.jar",
+      "to": "toolchain/opendataloader-pdf-cli-0.0.0.jar"
+    },
+    {
+      "from": "build/windows-runtime/pandoc",
+      "to": "toolchain/pandoc"
+    },
+    {
+      "from": "build/windows-runtime/pdf-renderer",
+      "to": "toolchain/pdf-renderer"
+    },
+    {
+      "from": "../../LICENSE",
+      "to": "licenses/Guzi-Scholar-LICENSE"
+    },
+    {
+      "from": "../../NOTICE.md",
+      "to": "licenses/Guzi-Scholar-NOTICE.md"
+    },
+    {
+      "from": "build/windows-runtime/licenses",
+      "to": "licenses/runtime"
+    },
+    {
+      "from": "build/windows-runtime/licenses/opendataloader-pdf",
+      "to": "licenses/opendataloader-pdf"
+    },
+    {
+      "from": "build/windows-runtime/licenses/pandoc",
+      "to": "licenses/pandoc"
+    }
+  ]
 }

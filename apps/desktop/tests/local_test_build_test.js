@@ -39,7 +39,7 @@ function loadMain(metadata, directory, development = false) {
     require: (name) => {
       if (name === 'electron') return { app, powerMonitor: { on: () => {} }, ipcMain: { handle: (key, handler) => handlers.set(key, handler) } };
       if (name === '../package.json') return metadata;
-      if (name === './update-service.cjs') return { checkForUpdate: () => { counters.updates += 1; } };
+      if (name === './update-service.cjs') return { ...projectRequire(name), checkForUpdate: () => { counters.updates += 1; } };
       if (name === './macos-installation.cjs') return {
         consumeInstallationMarker: () => { counters.installation += 1; return null; },
         requestMacInstallation: () => { counters.installation += 1; return { action: 'continue' }; },

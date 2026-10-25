@@ -1,0 +1,105 @@
+name: Windows packages
+
+on:
+  pull_request:
+    paths:
+      - 'apps/desktop/**'
+      - 'platforms/windows/**'
+      - '.github/workflows/windows.yml'
+      - 'package.json'
+  push:
+    branches: [main, 'codex/windows-*']
+    paths:
+      - 'apps/desktop/**'
+      - 'platforms/windows/**'
+      - '.github/workflows/windows.yml'
+      - 'package.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Build and verify Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 45
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          architecture: x64
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+      - name: Configure native build tools
+        shell: pwsh
+        run: |
+          "MY_SCHOLAR_BUILD_PYTHON=$((Get-Command python).Source)" >> $env:GITHUB_ENV
+          "MY_SCHOLAR_TEST_PYTHON=$((Get-Command python).Source)" >> $env:GITHUB_ENV
+          "MY_SCHOLAR_JAVA_HOME=$env:JAVA_HOME" >> $env:GITHUB_ENV
+      - name: Check JavaScript
+        run: npm --prefix apps/desktop run lint:js
+      - name: Check runtime and package configuration
+        run: npm --prefix apps/desktop run test:runtime
+      - name: Check graph
+        run: npm --prefix apps/desktop run test:graph
+      - name: Check MCP and plugins
+        run: npm --prefix apps/desktop run test:mcp
+      - name: Check Windows Python behavior
+        working-directory: apps/desktop
+        run: python -B -m unittest discover -s tests -p test_windows_runtime.py -v
+      - name: Check runtime preparation validation
+        working-directory: apps/desktop
+        run: python -B -m unittest discover -s tests -p test_windows_runtime_preparation.py -v
+      - name: Check Zotero data writes
+        working-directory: apps/desktop
+        run: python -B -m unittest discover -s tests -p test_zotero_merge.py -v
+      - name: Install Electron test driver
+        shell: pwsh
+        run: |
+          npm install --global playwright@1.58.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "MY_SCHOLAR_PLAYWRIGHT_MODULE=$(npm root -g)/playwright" >> $env:GITHUB_ENV
+      - name: Build self-contained NSIS and ZIP packages
+        run: npm run build:windows
+      - name: Verify packaged runtime, install and uninstall
+        run: npm run verify:windows:artifacts
+      - name: Record artifact checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem platforms/windows/dist -File |
+            Where-Object { $_.Extension -in '.exe', '.zip' } |
+            ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" } |
+            Set-Content platforms/windows/dist/SHA256SUMS.txt -Encoding utf8
+      - name: Upload verified Windows test packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: guzi-scholar-windows-x64
+          path: |
+            platforms/windows/dist/*.exe
+            platforms/windows/dist/*.zip
+            platforms/windows/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

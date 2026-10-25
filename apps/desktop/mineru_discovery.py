@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping, Optional, Sequence
 
 from toolchain_paths import tool_path_candidates
+from subprocess_runtime import hidden_subprocess_options
 
 
 PRUNED_DIRECTORY_NAMES = frozenset({
@@ -137,6 +138,7 @@ def _health_failure(executable: Path, *, timeout: float = 20) -> Optional[str]:
             errors="replace",
             check=False,
             timeout=timeout,
+            **hidden_subprocess_options(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"健康检查失败：{exc}"
@@ -157,6 +159,7 @@ def _version(executable: Path, *, timeout: float = 10) -> str:
             errors="replace",
             check=False,
             timeout=timeout,
+            **hidden_subprocess_options(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""

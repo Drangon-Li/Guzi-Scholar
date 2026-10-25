@@ -7,12 +7,14 @@ import os
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from remote_parser_client import RemoteParserClient, RemoteParserError
+from subprocess_runtime import hidden_subprocess_options, stop_windows_process_tree
 
 
 class RemoteParserConnection:
@@ -43,7 +45,10 @@ class RemoteParserConnection:
     def _stop(self) -> None:
         if self._process is not None:
             if self._process.poll() is None:
-                self._process.terminate()
+                if sys.platform == "win32":
+                    stop_windows_process_tree(self._process)
+                else:
+                    self._process.terminate()
                 try:
                     self._process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
@@ -114,7 +119,7 @@ class RemoteParserConnection:
             with socket.socket() as probe:
                 if probe.connect_ex(("127.0.0.1", local_port)) == 0:
                     raise RemoteParserError("SSH 本机转发端口已被占用。", "tunnel_conflict")
-            self._process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self._process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **hidden_subprocess_options())
             deadline = time.monotonic() + 10
             while time.monotonic() < deadline:
                 if self._process.poll() is not None:
