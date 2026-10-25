@@ -52,7 +52,7 @@ function sanitizedEnvironment(temporary, environment = process.env) {
   assert.ok(systemRoot, 'Windows SystemRoot is required');
   return { ...clean, PATH: path.join(systemRoot, 'System32'),
     APPDATA: path.join(temporary, 'AppData', 'Roaming'), LOCALAPPDATA: path.join(temporary, 'AppData', 'Local'),
-    MY_SCHOLAR_DATA_DIR: path.join(temporary, 'state'), MY_SCHOLAR_LIBRARY_DIR: path.join(temporary, 'library'),
+    MY_SCHOLAR_DATA_DIR: path.join(temporary, '应用 状态'), MY_SCHOLAR_LIBRARY_DIR: path.join(temporary, '文献 库'),
     MY_SCHOLAR_PACKAGED: '1' };
 }
 
@@ -185,6 +185,7 @@ function verifyLayout(packageRoot) {
 }
 
 function verifyTools(paths, temporary) {
+  fs.mkdirSync(temporary, { recursive: true });
   const env = { ...sanitizedEnvironment(temporary), SSL_CERT_FILE: paths.ca };
   const smoke = runChecked(paths.server, ['--dependency-smoke'], { env });
   const status = JSON.parse(smoke.stdout.trim().split(/\r?\n/u).at(-1));
@@ -202,19 +203,19 @@ function verifyTools(paths, temporary) {
   const math = runChecked(paths.pandoc, ['--from=markdown+tex_math_dollars', '--to=html5', '--mathml'],
     { env, input: '$$\\pmb{H}_l^{\\prime}=\\mathrm{MSA}\\tag{1}$$\n' });
   assert.match(math.stdout, /<math\b/u);
-  const pdf = path.join(temporary, 'runtime-smoke.pdf');
+  const pdf = path.join(temporary, '论文 源文档.pdf');
   fs.writeFileSync(pdf, minimalPdf());
-  const odlOutput = path.join(temporary, 'odl');
+  const odlOutput = path.join(temporary, '转换 输出');
   const javaArgs = ['--add-opens=java.base/java.nio=ALL-UNNAMED', '-Djava.awt.headless=true'];
   runChecked(paths.java, [...javaArgs, '-jar', paths.jar, '-q', '-f', 'json,html', '--image-output', 'external', '-o', odlOutput, pdf], { env });
-  for (const extension of ['json', 'html']) assert.ok(fs.statSync(path.join(odlOutput, `runtime-smoke.${extension}`)).size > 0);
-  const pages = path.join(temporary, 'pages'); fs.mkdirSync(pages);
+  for (const extension of ['json', 'html']) assert.ok(fs.statSync(path.join(odlOutput, `论文 源文档.${extension}`)).size > 0);
+  const pages = path.join(temporary, '页面 渲染'); fs.mkdirSync(pages);
   const rendererArgs = [...javaArgs, '-cp', `${paths.renderer};${paths.jar}`, 'MyScholarPdfRenderer'];
   runChecked(paths.java, [...rendererArgs, pdf, pages, '72', '1'], { env });
   const png = fs.readFileSync(path.join(pages, 'page-001.png'));
   assert.strictEqual(png.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
   assert.deepStrictEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [200, 200]);
-  const evidence = path.join(temporary, 'evidence.json');
+  const evidence = path.join(temporary, '文字 证据.json');
   runChecked(paths.java, [...rendererArgs, '--evidence', pdf, evidence], { env });
   const spans = JSON.parse(fs.readFileSync(evidence, 'utf8')).flatMap((page) => page.spans || []);
   assert.ok(spans.some((span) => span.color === 0xFF0000));
@@ -285,7 +286,7 @@ async function closeApp(session) {
 async function verifyElectron(paths, temporary) {
   const modulePath = process.env.MY_SCHOLAR_PLAYWRIGHT_MODULE || 'playwright';
   const { _electron: electron } = require(modulePath);
-  const userData = path.join(temporary, 'userData');
+  const userData = path.join(temporary, '用户 数据');
   const env = sanitizedEnvironment(temporary);
   for (const directory of [userData, env.APPDATA, env.LOCALAPPDATA, env.MY_SCHOLAR_DATA_DIR, env.MY_SCHOLAR_LIBRARY_DIR]) fs.mkdirSync(directory, { recursive: true });
   const app = await electron.launch({ executablePath: paths.executable, args: [`--user-data-dir=${userData}`], env, timeout: 60000 });
@@ -339,9 +340,13 @@ async function verifyElectron(paths, temporary) {
       if (job.status !== 'completed') throw new Error(`PDF import timed out: ${JSON.stringify(job)}`);
       const document = await fetch(job.links.html, { signal: AbortSignal.timeout(15000) });
       if (!document.ok || !(await document.text()).includes('Guzi Scholar')) throw new Error('Imported PDF document is missing fixture text');
-      return { jobId: id, status: job.status, engine: job.engine };
+      return { jobId: id, status: job.status, engine: job.engine, sourceFilename: job.source_filename };
     }, minimalPdf().toString('base64')), 180000, 'Packaged Electron PDF and MathML import smoke timed out');
     assert.strictEqual(imported.status, 'completed');
+    assert.strictEqual(imported.sourceFilename, 'Windows 原生 PDF 测试.pdf');
+    const jobDirectory = path.join(env.MY_SCHOLAR_LIBRARY_DIR, 'jobs', imported.jobId);
+    assert.ok(fs.statSync(path.join(jobDirectory, 'source.pdf')).size > 0, 'Imported source PDF must be written under the selected Unicode library');
+    assert.ok(fs.statSync(path.join(jobDirectory, 'document.html')).size > 0, 'Converted document must be written under the selected Unicode library');
     console.log(`Frozen service PDF import passed: ${imported.jobId}`);
     assert.ok(descendants(session.child.pid).length > 1, 'Electron must launch its bundled service process');
   } finally { await closeApp(session); }
@@ -359,9 +364,10 @@ async function verifyArtifacts(packageRoot, temporary) {
   const quote = (value) => `'${value.replace(/'/gu, "''")}'`;
   powershell(`Expand-Archive -LiteralPath ${quote(zip)} -DestinationPath ${quote(extracted)}`);
   const zipped = verifyLayout(extracted);
-  await verifyElectron(zipped, path.join(temporary, 'zip-user'));
+  verifyTools(zipped, path.join(temporary, 'ZIP 中文工具 验证'));
+  await verifyElectron(zipped, path.join(temporary, 'ZIP 用户 验证'));
   const installed = path.join(temporary, '安装 路径 测试');
-  const installState = path.join(temporary, 'installed-user');
+  const installState = path.join(temporary, '安装 用户 验证');
   let uninstall;
   let uninstalled = false;
   try {
@@ -369,8 +375,9 @@ async function verifyArtifacts(packageRoot, temporary) {
     const installedPaths = verifyLayout(installed);
     uninstall = fs.readdirSync(installed).find((file) => /^Uninstall.*\.exe$/iu.test(file));
     assert.ok(uninstall, 'NSIS uninstaller is missing');
+    verifyTools(installedPaths, path.join(temporary, '安装 中文工具 验证'));
     await verifyElectron(installedPaths, installState);
-    const marker = path.join(installState, 'library', 'preserve-user-library.txt');
+    const marker = path.join(sanitizedEnvironment(installState).MY_SCHOLAR_LIBRARY_DIR, '保留 用户文献.txt');
     fs.writeFileSync(marker, 'User library must survive uninstall.\n');
     runChecked(path.join(installed, uninstall), ['/S', `_?=${installed}`], { windowsVerbatimArguments: true, timeout: 120000 });
     const deadline = Date.now() + 30000;
@@ -392,7 +399,7 @@ async function main() {
     assert.strictEqual(process.platform, 'win32', 'Native packaged runtime verification requires Windows');
     assert.strictEqual(process.arch, 'x64');
     const packageRoot = path.resolve(supplied);
-    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'guzi-windows-runtime-'));
+    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), '谷子 Windows 验证-'));
     try {
       const paths = verifyLayout(packageRoot);
       verifyTools(paths, temporary);

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Assemble the Windows x64 runtime on a Windows x64 build host."""
 
+import argparse
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ import struct
 import subprocess
 import sys
 import urllib.request
+from xml.dom import minidom
 import zipfile
 
 
@@ -22,6 +24,8 @@ RUNTIME = BUILD / "windows-runtime"
 CACHE = BUILD / "windows-downloads"
 ENV = BUILD / "windows-pyinstaller-env"
 JAVA_MODULES = "java.base,java.compiler,java.desktop,java.management,java.sql"
+WINDOWS_SETTINGS_NS = "urn:schemas-microsoft-com:asm.v3"
+CODE_PAGE_NS = "http://schemas.microsoft.com/SMI/2019/WindowsSettings"
 
 
 def run(command, **kwargs):
@@ -40,6 +44,55 @@ def require_x64_pe(filename):
         stream.seek(struct.unpack("<I", offset)[0])
         if stream.read(6) != b"PE\0\0\x64\x86":
             raise RuntimeError(f"Windows x64 executable required: {filename}")
+
+
+def utf8_application_manifest(manifest):
+    document = minidom.parseString(manifest)
+    applications = document.getElementsByTagNameNS(WINDOWS_SETTINGS_NS, "application")
+    if applications:
+        application = applications[0]
+    else:
+        application = document.createElementNS(WINDOWS_SETTINGS_NS, "application")
+        application.setAttribute("xmlns", WINDOWS_SETTINGS_NS)
+        document.documentElement.appendChild(application)
+    settings = application.getElementsByTagNameNS(WINDOWS_SETTINGS_NS, "windowsSettings")
+    if settings:
+        settings = settings[0]
+    else:
+        settings = document.createElementNS(WINDOWS_SETTINGS_NS, "windowsSettings")
+        settings.setAttribute("xmlns", WINDOWS_SETTINGS_NS)
+        application.appendChild(settings)
+    code_pages = settings.getElementsByTagNameNS(CODE_PAGE_NS, "activeCodePage")
+    if code_pages:
+        code_page = code_pages[0]
+        for child in list(code_page.childNodes):
+            code_page.removeChild(child)
+    else:
+        code_page = document.createElementNS(CODE_PAGE_NS, "activeCodePage")
+        code_page.setAttribute("xmlns", CODE_PAGE_NS)
+        settings.appendChild(code_page)
+    code_page.appendChild(document.createTextNode("UTF-8"))
+    return document.toxml(encoding="utf-8")
+
+
+def configure_java_utf8(executable):
+    from PyInstaller.utils.win32 import winmanifest, winresource
+
+    def read_manifest():
+        resources = winresource.get_resources(str(executable), [winmanifest.RT_MANIFEST])
+        languages = resources[winmanifest.RT_MANIFEST][winmanifest.CREATEPROCESS_MANIFEST_RESOURCE_ID]
+        return languages.get(winmanifest.LANG_NEUTRAL) or next(iter(languages.values()))
+
+    # Java's Windows launcher uses ANSI APIs for both argv and its own runtime path.
+    # Use the same per-process fix as bazelbuild/bazel src/minimize_jdk.sh (Windows 10 1903+).
+    original = read_manifest()
+    winmanifest.write_manifest_to_executable(str(executable), utf8_application_manifest(original))
+    embedded = read_manifest()
+    document = minidom.parseString(embedded)
+    code_pages = document.getElementsByTagNameNS(CODE_PAGE_NS, "activeCodePage")
+    if len(code_pages) != 1 or code_pages[0].firstChild.data != "UTF-8":
+        raise RuntimeError(f"Java UTF-8 process code page was not embedded: {executable}")
+    require_x64_pe(executable)
 
 
 def verify_hash(filename, expected):
@@ -155,6 +208,8 @@ def prepare_java(java_home):
         shutil.rmtree(output)
     run([java_home / "bin/jlink.exe", "--add-modules", JAVA_MODULES, "--strip-debug",
          "--no-header-files", "--no-man-pages", "--compress=zip-6", "--output", output])
+    for launcher in ("java.exe", "javaw.exe"):
+        run([ENV / "Scripts/python.exe", Path(__file__), "--configure-java-utf8", output / "bin" / launcher])
 
 
 def main():
@@ -196,4 +251,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--configure-java-utf8", type=Path)
+    options = parser.parse_args()
+    if options.configure_java_utf8:
+        configure_java_utf8(options.configure_java_utf8)
+    else:
+        main()

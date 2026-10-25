@@ -59,7 +59,7 @@
     "artifactName": "Guzi-Scholar-${version}-windows-${arch}-setup.${ext}"
   },
   "artifactName": "Guzi-Scholar-${version}-windows-${arch}.${ext}",
-  "compression": "maximum",
+  "compression": "normal",
   "npmRebuild": false,
   "extraResources": [
     {
