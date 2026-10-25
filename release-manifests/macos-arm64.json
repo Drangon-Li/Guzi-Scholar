@@ -3,10 +3,10 @@
   "platform": "darwin",
   "arch": "arm64",
   "channel": "internal",
-  "version": "0.6.1",
-  "download_url": "https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.6.1/Guzi-Scholar-0.6.1-arm64-internal.dmg",
-  "sha256": "cc6044845c2497b32bdccd0bd1c3c39f9e8825791a829169ab45451654501458",
-  "notes": "Guzi Scholar 0.6.1：减少全文检索重复索引与插件下载期间的管理等待；修复后台翻译回填、状态保存、文件夹修改及本地服务启动和响应中断问题。macOS Apple Silicon，ad-hoc 签名，未公证。",
-  "published_at": "2026-10-23T18:20:06Z",
+  "version": "0.6.2",
+  "download_url": "https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.6.2/Guzi-Scholar-0.6.2-arm64-internal.dmg",
+  "sha256": "eae66fbd7ce6c1e1b19a96ad95721fe135691ce67232d7a1ec922a035b7a1407",
+  "notes": "Guzi Scholar 0.6.2：统一提供 Mac 与 Windows 桌面包；远端高精度解析改进上下标、重音字符、参考文献及扫描表格，保留原图与待核对标记。macOS Apple Silicon，ad-hoc 签名，未公证。",
+  "published_at": "2026-10-25T14:40:57Z",
   "minimum_system_version": "12.0"
 }
