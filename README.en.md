@@ -4,6 +4,14 @@ Guzi Scholar is a local-first academic PDF reader for managing papers, structure
 
 The open-source desktop distribution targets macOS and Windows with one shared desktop codebase. The macOS package is available first; Windows packages will follow after real-machine verification.
 
+## Online demo
+
+**[Try the browser demo → scholar.guzilab.com](https://scholar.guzilab.com/)**
+
+Explore a public sample paper with the full reading sidebar, notes, annotations, and vocabulary tools—no installation required. Edits stay in your current browser, persist after refresh, and can be reset.
+
+AI answers and translations are clearly labeled, preset examples; no live model is called. Loading the site and sample requires an internet connection. Use the desktop app for PDF uploads, reparsing, and Zotero integration.
+
 ## English documentation coming soon
 
 The complete English README, installation guide, privacy notes, and contributor documentation are still being prepared. For now, please read the [Chinese README](README.md) and the platform notes in `apps/desktop/` and `platforms/windows/`.

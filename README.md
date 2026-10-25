@@ -6,6 +6,14 @@
 
 English documentation is coming soon. See [README.en.md](README.en.md) for the current English placeholder.
 
+## 在线演示
+
+**[打开网页体验版 → scholar.guzilab.com](https://scholar.guzilab.com/)**
+
+无需安装即可使用公开论文样例，体验完整阅读侧边栏、笔记、批注和生词本。编辑内容仅保存在当前浏览器，刷新后保留，也可重置测试数据。
+
+AI 回答和译文均为明确标注的预置示例，不调用真实模型。加载网页及样例需要联网；PDF 上传、重新解析和 Zotero 等功能请使用桌面版。
+
 ## 功能
 
 - 导入 PDF，使用本地基础转换或自行配置的远端 GLM-OCR + MinerU 融合解析，生成结构化阅读页面
