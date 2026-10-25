@@ -66,7 +66,7 @@
             <div class="panel-intro"><strong>文章助手</strong><span>选中文本后可加入 Chat，再编辑或发送</span></div>
             <div id="selected-context" class="selected-context" hidden></div>
             <div id="chat-messages" class="chat-messages"><div class="chat-empty">可以问我：这篇文章的贡献是什么？表格中的指标如何比较？</div></div>
-            <form id="chat-form" class="chat-form"><textarea id="chat-input" rows="3" placeholder="针对当前文章提问…（Enter 发送，⌘ Enter 换行）"></textarea><button class="primary-button" type="submit">发送 <span>Enter</span></button></form>
+            <form id="chat-form" class="chat-form"><textarea id="chat-input" rows="3" placeholder="针对当前文章提问…（Enter 发送，组合键换行）"></textarea><button class="primary-button" type="submit">发送 <span>Enter</span></button></form>
             <div id="chat-status" class="panel-status" hidden></div>
           </section>
           <section id="notes-panel" class="sidebar-panel" hidden>
@@ -89,7 +89,7 @@
       <div class="settings-heading"><div class="eyebrow">LOCAL CONFIGURATION</div><h1>设置</h1><p>阅读偏好可以在这里调整；AI 服务由项目开发配置提供，此页面不会显示或修改连接信息。</p></div>
       <form id="settings-form" class="settings-card">
         <div class="settings-group"><h2>AI 服务</h2><p class="settings-help">翻译与文章助手使用独立的固定配置；这里只展示安全的运行状态。</p><div class="classic-ai-services"><div class="classic-ai-service"><strong>翻译服务</strong><span id="setting-translation-status">读取中</span><small id="setting-translation-model">正在读取…</small></div><div class="classic-ai-service"><strong>文章助手</strong><span id="setting-chat-status">读取中</span><small id="setting-chat-model">正在读取…</small></div></div><button id="test-ai-button" class="secondary-button settings-test-button" type="button">测试两项服务</button><small id="setting-ai-results" class="settings-gateway-hint" role="status" aria-live="polite"></small></div>
-        <div class="settings-group"><h2>快捷键</h2><label>打开文献库<input id="shortcut-library" type="text" value="Cmd+1"></label><label>打开设置<input id="shortcut-settings" type="text" value="Cmd+,"></label></div>
+        <div class="settings-group"><h2>快捷键</h2><label>打开文献库<input id="shortcut-library" type="text" value=""></label><label>打开设置<input id="shortcut-settings" type="text" value=""></label></div>
         <div class="settings-actions"><button class="primary-button" type="submit">保存设置</button><span id="settings-status" class="panel-status" hidden></span></div>
       </form>
     </section>

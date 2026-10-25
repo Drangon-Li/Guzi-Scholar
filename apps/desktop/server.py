@@ -880,18 +880,27 @@ _apply_settings(_stored_settings())
 
 def _public_settings() -> Dict[str, Any]:
     data = _stored_settings()
+    primary_modifier = "Cmd" if sys.platform == "darwin" else "Ctrl"
+    alt_modifier = "Option" if sys.platform == "darwin" else "Alt"
     shortcut_defaults = {
-        "open_library": "Cmd+1",
-        "open_settings": "Cmd+,",
-        "highlight": "Cmd+Shift+H",
-        "underline": "Cmd+Shift+U",
-        "highlight_note": "Cmd+Shift+J",
-        "underline_note": "Cmd+Shift+K",
-        "full_translation": f"{'Cmd' if sys.platform == 'darwin' else 'Ctrl'}+Shift+Enter",
-        "reflow": f"{'Cmd' if sys.platform == 'darwin' else 'Ctrl'}+Option+Enter",
+        "open_library": f"{primary_modifier}+1",
+        "open_settings": f"{primary_modifier}+,",
+        "highlight": f"{primary_modifier}+Shift+H",
+        "underline": f"{primary_modifier}+Shift+U",
+        "highlight_note": f"{primary_modifier}+Shift+J",
+        "underline_note": f"{primary_modifier}+Shift+K",
+        "full_translation": f"{primary_modifier}+Shift+Enter",
+        "reflow": f"{primary_modifier}+{alt_modifier}+Enter",
     }
     stored_shortcuts = data.get("shortcuts") if isinstance(data.get("shortcuts"), dict) else {}
     shortcuts = {**shortcut_defaults, **{key: str(value).strip()[:40] for key, value in stored_shortcuts.items() if key in shortcut_defaults and str(value).strip()}}
+    if sys.platform == "win32":
+        # Early Windows builds persisted Mac defaults; migrate only those exact
+        # per-action defaults so custom Command bindings keep their Meta meaning.
+        legacy_defaults = {key: value.replace("Ctrl+", "Cmd+", 1).replace("+Alt+", "+Option+") for key, value in shortcut_defaults.items()}
+        for key, legacy in legacy_defaults.items():
+            if shortcuts[key] == legacy:
+                shortcuts[key] = shortcut_defaults[key]
     return {
         "ai_services": ai_services(),
         "ai": _public_ai_settings(data.get("ai")),

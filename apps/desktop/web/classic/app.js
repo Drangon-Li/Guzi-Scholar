@@ -1,6 +1,16 @@
 (() => {
   const $ = (selector) => document.querySelector(selector);
   const $$ = (selector) => [...document.querySelectorAll(selector)];
+  const desktopPlatform = window.myScholarDesktop?.platform;
+  const browserPlatform = navigator.userAgentData?.platform || navigator.platform || '';
+  const appPlatform = ['darwin', 'win32', 'linux'].includes(desktopPlatform) ? desktopPlatform
+    : /mac/iu.test(browserPlatform) ? 'darwin' : /win/iu.test(browserPlatform) ? 'win32' : 'linux';
+  const isMacPlatform = appPlatform === 'darwin';
+  const shortcutPrimaryModifier = isMacPlatform ? 'Cmd' : 'Ctrl';
+  const shortcutLabel = (value) => String(value).replace(/\b(?:Cmd|Command|Meta|Windows|Win)\b/giu, isMacPlatform ? 'Cmd' : appPlatform === 'win32' ? 'Windows' : 'Meta').replace(/\b(?:Option|Alt)\b/giu, isMacPlatform ? 'Option' : 'Alt');
+  $('#chat-input').placeholder = `针对当前文章提问…（Enter 发送，${isMacPlatform ? '⌘ Enter' : 'Ctrl+Enter'} 换行）`;
+  $('#shortcut-library').value = `${shortcutPrimaryModifier}+1`;
+  $('#shortcut-settings').value = `${shortcutPrimaryModifier}+,`;
   const state = { jobs: [], activeJob: null, selection: null, annotations: [], chat: [] };
   let pickedFile = null;
   let activeJobId = null;
@@ -483,7 +493,7 @@
   $('#chat-input')?.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
     const input = event.currentTarget;
-    if (event.metaKey) {
+    if (isMacPlatform ? event.metaKey : event.ctrlKey) {
       event.preventDefault();
       event.stopPropagation();
       const start = input.selectionStart ?? input.value.length;
@@ -528,7 +538,7 @@
   $('#note-image-input').addEventListener('change', () => { const file = $('#note-image-input').files[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => { const image = new Image(); image.onload = () => { const max = 1200; const scale = Math.min(1, max / Math.max(image.width, image.height)); const canvas = document.createElement('canvas'); canvas.width = Math.round(image.width * scale); canvas.height = Math.round(image.height * scale); canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height); $('#notes-editor').value += `\n\n![${file.name}](${canvas.toDataURL('image/jpeg', .78)})\n`; updateNotesPreview(); saveNotes(); }; image.src = reader.result; }; reader.readAsDataURL(file); });
 
   function renderAIServices(services = {}) { for (const service of ['translation', 'chat']) { const config = services[service] || {}; const status = $(`#setting-${service}-status`); status.textContent = config.enabled === true ? '可用' : '不可用'; status.classList.toggle('is-ready', config.enabled === true); $(`#setting-${service}-model`).textContent = config.model || '未指定'; } }
-  async function loadSettings() { try { const settings = await api('/api/settings'); renderAIServices(settings.ai_services || {}); const shortcuts = settings.shortcuts || {}; $('#shortcut-library').value = shortcuts.open_library || 'Cmd+1'; $('#shortcut-settings').value = shortcuts.open_settings || 'Cmd+,'; } catch (error) { $('#settings-status').textContent = error.message; $('#settings-status').hidden = false; } }
+  async function loadSettings() { try { const settings = await api('/api/settings'); renderAIServices(settings.ai_services || {}); const shortcuts = settings.shortcuts || {}; $('#shortcut-library').value = shortcutLabel(shortcuts.open_library || `${shortcutPrimaryModifier}+1`); $('#shortcut-settings').value = shortcutLabel(shortcuts.open_settings || `${shortcutPrimaryModifier}+,`); } catch (error) { $('#settings-status').textContent = error.message; $('#settings-status').hidden = false; } }
   const settingsPayload = () => ({ shortcuts: { open_library: $('#shortcut-library').value.trim(), open_settings: $('#shortcut-settings').value.trim() } });
   $('#settings-form').addEventListener('submit', async (event) => { event.preventDefault(); const status = $('#settings-status'); status.classList.remove('error'); status.hidden = false; status.textContent = '保存中…'; try { await api('/api/settings', jsonOptions(settingsPayload())); status.textContent = '设置已保存。'; await checkHealth(); await loadSettings(); } catch (error) { status.textContent = error.message; status.classList.add('error'); } });
   $('#test-ai-button').addEventListener('click', async () => { const button = $('#test-ai-button'); const status = $('#settings-status'); const output = $('#setting-ai-results'); button.disabled = true; status.classList.remove('error'); status.hidden = false; status.textContent = '正在测试翻译与文章助手服务…'; output.textContent = ''; try { const payload = await api('/api/ai/test', { method: 'POST' }); const results = payload.results || payload.result?.services || payload.result || {}; const summary = ['translation', 'chat'].map((service) => { const result = results[service] || {}; const ok = result.ok === true || result.success === true || result.status === 'ok'; return `${service === 'translation' ? '翻译' : '文章助手'}：${ok ? '可用' : (result.error || result.message || '不可用')}`; }); output.textContent = summary.join(' · '); status.textContent = '连接测试完成。'; await checkHealth(); await loadSettings(); } catch (error) { status.textContent = error.message; status.classList.add('error'); } finally { button.disabled = false; } });

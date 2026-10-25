@@ -1814,7 +1814,9 @@ class SettingsBoundaryTest(unittest.TestCase):
                     with self.subTest(platform=platform_name), patch("server.sys.platform", platform_name):
                         shortcuts = _public_settings()["shortcuts"]
                         self.assertEqual(shortcuts["full_translation"], f"{modifier}+Shift+Enter")
-                        self.assertEqual(shortcuts["reflow"], f"{modifier}+Option+Enter")
+                        self.assertEqual(shortcuts["reflow"], f"{modifier}+{'Option' if platform_name == 'darwin' else 'Alt'}+Enter")
+                        for key, suffix in (("open_library", "1"), ("open_settings", ","), ("highlight", "Shift+H"), ("underline", "Shift+U"), ("highlight_note", "Shift+J"), ("underline_note", "Shift+K")):
+                            self.assertEqual(shortcuts[key], f"{modifier}+{suffix}")
                 saved = _write_settings({"shortcuts": {
                     "full_translation": "Ctrl+Shift+T", "reflow": "Ctrl+Option+R", "unknown": "Cmd+Q",
                 }})
@@ -1827,6 +1829,21 @@ class SettingsBoundaryTest(unittest.TestCase):
                 partial = _write_settings({"shortcuts": {"open_library": "Ctrl+1"}})["shortcuts"]
                 self.assertEqual(partial["full_translation"], "Ctrl+Shift+T")
                 self.assertEqual(partial["reflow"], "Ctrl+Option+R")
+
+    def test_windows_legacy_shortcut_defaults_migrate_without_remapping_custom_command(self) -> None:
+        legacy = {"open_library": "Cmd+1", "open_settings": "Cmd+,", "highlight": "Cmd+Shift+H", "underline": "Cmd+Shift+U", "highlight_note": "Cmd+Shift+J", "underline_note": "Cmd+Shift+K", "full_translation": "Cmd+Shift+Enter", "reflow": "Cmd+Option+Enter"}
+        with patch("server._stored_settings", return_value={"shortcuts": legacy}), patch("server.ai_services", return_value={}):
+            with patch("server.sys.platform", "win32"):
+                shortcuts = _public_settings()["shortcuts"]
+                for key, value in legacy.items():
+                    self.assertEqual(shortcuts[key], value.replace("Cmd+", "Ctrl+", 1).replace("Option", "Alt"))
+            with patch("server.sys.platform", "darwin"):
+                self.assertEqual(_public_settings()["shortcuts"], legacy)
+            legacy.update(open_library="Cmd+Option+P", open_settings="Ctrl+Option+S", highlight="Cmd+Ctrl+H")
+            with patch("server.sys.platform", "win32"):
+                shortcuts = _public_settings()["shortcuts"]
+                for key in ("open_library", "open_settings", "highlight"):
+                    self.assertEqual(shortcuts[key], legacy[key], "Custom modifier meaning must survive the Windows migration")
 
     def test_ai_status_history_keeps_more_than_the_visible_page_limit(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-settings-history-limit-") as temp:

@@ -61,7 +61,18 @@
     lineHeight: Object.freeze({ min: 100, max: 300 }),
     pageMargin: Object.freeze({ min: 0, max: 250 }),
   });
-  const shortcutPrimaryModifier = /mac/iu.test(navigator.userAgentData?.platform || navigator.platform || '') ? 'Cmd' : 'Ctrl';
+  const desktopPlatform = window.myScholarDesktop?.platform;
+  const browserPlatform = navigator.userAgentData?.platform || navigator.platform || '';
+  const appPlatform = ['darwin', 'win32', 'linux'].includes(desktopPlatform) ? desktopPlatform
+    : /mac/iu.test(browserPlatform) ? 'darwin' : /win/iu.test(browserPlatform) ? 'win32' : 'linux';
+  const isMacPlatform = appPlatform === 'darwin';
+  const shortcutPrimaryModifier = isMacPlatform ? 'Cmd' : 'Ctrl';
+  const shortcutAltModifier = isMacPlatform ? 'Option' : 'Alt';
+  const shortcutMetaModifier = isMacPlatform ? 'Cmd' : appPlatform === 'win32' ? 'Windows' : 'Meta';
+  const shortcutModifierDescription = isMacPlatform ? 'Command 或 Control' : `Control 或 ${shortcutMetaModifier}`;
+  const primaryShortcutLabel = (key) => isMacPlatform ? `⌘${key.replace('Shift+', '⇧').replace('Backspace', '⌫')}` : `Ctrl+${key}`;
+  const primaryModifierPressed = (event) => isMacPlatform ? event.metaKey : event.ctrlKey;
+  const shortcutDefaults = Object.freeze({ open_library: `${shortcutPrimaryModifier}+1`, open_settings: `${shortcutPrimaryModifier}+,`, highlight: `${shortcutPrimaryModifier}+Shift+H`, underline: `${shortcutPrimaryModifier}+Shift+U`, highlight_note: `${shortcutPrimaryModifier}+Shift+J`, underline_note: `${shortcutPrimaryModifier}+Shift+K`, full_translation: `${shortcutPrimaryModifier}+Shift+Enter`, reflow: `${shortcutPrimaryModifier}+${shortcutAltModifier}+Enter` });
   const state = {
     aiProfiles: {}, aiModelCapabilities: {},
     jobs: [], activeJob: null, selection: null, chatSelection: null, annotations: [], aiHighlights: [], chat: [], chatSessions: new Map(),
@@ -74,9 +85,21 @@
     graphController: null, graphData: null, graphConfig: { showSimilarity: false, showAttributes: true, attributeIds: null, topK: 2, viewportScale: 0.85 },
     inlineImportanceSaving: new Set(),
     assistantInitialized: false, quickPreview: null, highlightColor: '#f59e0b', annotationColors: { highlight: '#f59e0b', underline: '#f59e0b' }, appearance: { ...appearanceDefaults }, pendingAppearance: { ...appearanceDefaults },
-    shortcuts: { open_library: 'Cmd+1', open_settings: 'Cmd+,', highlight: 'Cmd+Shift+H', underline: 'Cmd+Shift+U', highlight_note: 'Cmd+Shift+J', underline_note: 'Cmd+Shift+K', full_translation: `${shortcutPrimaryModifier}+Shift+Enter`, reflow: `${shortcutPrimaryModifier}+Option+Enter` },
+    shortcuts: { ...shortcutDefaults },
     highlightFilter: 'all', typography: { ...typographyDefaults }, importQueue: [], importRunning: false, metadataAutoRetrieve: true,
   };
+  function applyPlatformCopy() {
+    const chatInput = $('#chat-input');
+    if (chatInput) chatInput.placeholder = `针对当前文章提问…（Enter 发送，${isMacPlatform ? '⌘ Enter' : 'Ctrl+Enter'} 换行）`;
+    $$('[data-format="bold"], [data-note-format="bold"]').forEach((button) => { button.title = `加粗（${primaryShortcutLabel('B')}）`; });
+    $$('[data-format="italic"], [data-note-format="italic"]').forEach((button) => { button.title = `斜体（${primaryShortcutLabel('I')}）`; });
+    const shortcutDescription = $('#shortcut-description');
+    if (shortcutDescription) shortcutDescription.textContent = `点击字段后按下组合键；为避免误触，快捷键需要包含 ${shortcutModifierDescription}。`;
+    const updateHint = $('#app-update-install-hint');
+    if (updateHint && isMacPlatform) updateHint.textContent = '当前 macOS 发布包使用 ad-hoc 签名且未经过 Apple 公证，只提供主动检查和浏览器下载；首次打开可能需要在 Finder 中右键“打开”，不会在应用内自动替换。';
+    else if (updateHint && appPlatform === 'win32') updateHint.textContent = 'Windows 预览版请从 GitHub 预发布页面下载新版本并手动安装，暂不支持应用内检查更新。';
+  }
+  applyPlatformCopy();
   const openTabsStorageKey = 'my-scholar-open-documents';
   const readingLocationsStorageKey = 'my-scholar-reading-locations-v1';
   const readingLocationsVersion = 1;
@@ -745,7 +768,7 @@
         event.preventDefault();
         tab.click();
         return;
-      } else if (['Backspace', 'Delete'].includes(event.key) || (event.metaKey && event.key.toLowerCase() === 'w')) {
+      } else if (['Backspace', 'Delete'].includes(event.key) || (primaryModifierPressed(event) && event.key.toLowerCase() === 'w')) {
         event.preventDefault();
         closeDocumentTab(tab.dataset.jobId);
         return;
@@ -1977,8 +2000,8 @@
       const actionIds = selectedIds.includes(entry.jobId) && selectedIds.length > 1 ? selectedIds : [entry.jobId];
       const permanentAllowed = actionIds.every((id) => Boolean(libraryEntryById(id)?.item?.deleted_at));
       const menu = entry.item?.deleted_at
-        ? `<button data-row-action="metadata" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>编辑元数据</span>${shortcut('⌘I')}</button><div class="row-menu-separator" role="separator"></div><button data-row-action="restore" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">恢复文献${bulkLabel}</span>${shortcut('⌘⌫')}</button><button class="is-danger" data-row-action="permanent" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${permanentAllowed ? '' : ' disabled'} title="只能彻底清除全部位于回收站的选中文献"><span class="row-action-label">彻底清除${bulkLabel}</span></button>`
-        : `<button data-row-action="open" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${job.status === 'completed' ? '' : ' disabled'}><span>打开文献</span>${shortcut('↩')}</button>${isDesktopApp ? `<button data-row-action="reveal" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>跳转原始文件</span></button>` : ''}<button data-row-action="metadata" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>编辑元数据</span>${shortcut('⌘I')}</button><button data-row-action="folders" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">添加到文件夹${bulkLabel}…</span>${shortcut('⌘⇧F')}</button><div class="row-menu-separator" role="separator"></div><button class="is-danger" data-row-action="trash" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">移入回收站${bulkLabel}</span>${shortcut('⌘⌫')}</button>`;
+        ? `<button data-row-action="metadata" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>编辑元数据</span>${shortcut(primaryShortcutLabel('I'))}</button><div class="row-menu-separator" role="separator"></div><button data-row-action="restore" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">恢复文献${bulkLabel}</span>${shortcut(primaryShortcutLabel('Backspace'))}</button><button class="is-danger" data-row-action="permanent" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${permanentAllowed ? '' : ' disabled'} title="只能彻底清除全部位于回收站的选中文献"><span class="row-action-label">彻底清除${bulkLabel}</span></button>`
+        : `<button data-row-action="open" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${job.status === 'completed' ? '' : ' disabled'}><span>打开文献</span>${shortcut('↩')}</button>${isDesktopApp ? `<button data-row-action="reveal" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>跳转原始文件</span></button>` : ''}<button data-row-action="metadata" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>编辑元数据</span>${shortcut(primaryShortcutLabel('I'))}</button><button data-row-action="folders" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">添加到文件夹${bulkLabel}…</span>${shortcut(primaryShortcutLabel('Shift+F'))}</button><div class="row-menu-separator" role="separator"></div><button class="is-danger" data-row-action="trash" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">移入回收站${bulkLabel}</span>${shortcut(primaryShortcutLabel('Backspace'))}</button>`;
       const selected = selectedLibraryJobIds().includes(entry.jobId);
       return `<article class="library-card library-row${entry.item?.deleted_at ? ' is-trashed' : ''}${selected ? ' is-selected' : ''}" style="--library-grid-template:${libraryGridTemplate(columns)}" data-job-id="${escapeHTML(entry.jobId)}" data-status="${escapeHTML(job.status || '')}" tabindex="0" aria-selected="${selected ? 'true' : 'false'}" aria-grabbed="false" aria-label="文献：${escapeHTML(title)}">${columns.map(cell).join('')}<div class="library-row-actions"><button class="row-more-button" data-row-menu-job-id="${escapeHTML(entry.jobId)}" type="button" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false">⋯</button><div class="row-more-menu" data-row-more-menu data-menu-owner="${escapeHTML(entry.jobId)}" role="menu" aria-label="文献操作">${menu}</div></div></article>`;
     }).join('');
@@ -2900,10 +2923,8 @@
     if ($('dialog[open]') || isEditableAppSurface(event.target) || event.target.closest('select')) return;
     const focusedRow = document.activeElement?.closest?.('.library-row');
     if (!focusedRow || focusedRow.dataset.jobId !== state.selectedLibraryJobId || !focusedRow.closest('.active-view')) return;
-    // Keyboard shortcuts follow the macOS command-key convention. Ctrl/Meta
-    // are still accepted for row multi-selection in the pointer handler, but
-    // Ctrl+I must not unexpectedly open the metadata dialog on macOS.
-    const command = event.metaKey;
+    // Keep Control free for native text editing on macOS.
+    const command = primaryModifierPressed(event);
     const key = String(event.key || '').toLowerCase();
     let action = null;
     if (command && !event.altKey && !event.shiftKey && key === 'i') action = 'metadata';
@@ -6983,7 +7004,7 @@
         const href = String(link.getAttribute('href') || '');
         const targetId = href.startsWith('#') ? href.slice(1) : '';
         const target = targetId && /^[a-z0-9_-]{1,128}$/iu.test(targetId) ? doc.getElementById(targetId) : null;
-        if (event.metaKey) {
+        if (primaryModifierPressed(event)) {
           readerVisibleTarget(target, doc)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         } else if (link.classList.contains('citation')) {
           openReferenceQuickPreview(link);
@@ -8178,8 +8199,8 @@
     toolbar.setAttribute('role', 'toolbar');
     toolbar.setAttribute('aria-label', '笔记格式');
     toolbar.innerHTML = `
-      <button type="button" data-format="bold" title="加粗（⌘B）" aria-label="加粗"><strong>B</strong></button>
-      <button type="button" data-format="italic" title="斜体（⌘I）" aria-label="斜体"><em>I</em></button>
+      <button type="button" data-format="bold" title="加粗（${primaryShortcutLabel('B')}）" aria-label="加粗"><strong>B</strong></button>
+      <button type="button" data-format="italic" title="斜体（${primaryShortcutLabel('I')}）" aria-label="斜体"><em>I</em></button>
       <button type="button" data-format="unordered-list" title="项目列表" aria-label="项目列表">• 列表</button>
       <button type="button" data-format="ordered-list" title="编号列表" aria-label="编号列表">1. 列表</button>
       <button type="button" data-format="blockquote" title="引用" aria-label="引用">引用</button>
@@ -9146,7 +9167,7 @@
     const label = $('#full-translate-label');
     if (label) label.textContent = scope === 'body' ? '正文翻译' : '全文翻译';
     const button = $('#full-translate-button');
-    if (button) setReaderShortcutHint(button, 'full_translation', `${scope === 'body' ? '翻译正文（不含附录）' : '翻译全文（含附录）'}；按住 Alt/Option 点击可重新翻译已有译文的段落`);
+    if (button) setReaderShortcutHint(button, 'full_translation', `${scope === 'body' ? '翻译正文（不含附录）' : '翻译全文（含附录）'}；按住 ${shortcutAltModifier} 点击可重新翻译已有译文的段落`);
     $$('#translation-scope-menu [data-translation-scope]').forEach((item) => item.setAttribute('aria-checked', String(item.dataset.translationScope === scope)));
     syncTranslationVisibilityButton();
   }
@@ -9234,7 +9255,7 @@
       } else if (run.failed) {
         showToast(`${prefix}${scopeLabel}翻译完成，但有 ${run.failed} 段失败；失败段落可稍后单独重试。`, true);
       } else {
-        showToast(total ? (snapshots.length ? `${prefix}${scopeLabel}翻译完成，译文已插入原文下方。` : `${scopeLabel}译文已存在，已直接复用本机缓存。按住 Option 点击可重新翻译${scopeLabel}。`) : '没有找到可翻译的正文段落。');
+        showToast(total ? (snapshots.length ? `${prefix}${scopeLabel}翻译完成，译文已插入原文下方。` : `${scopeLabel}译文已存在，已直接复用本机缓存。按住 ${shortcutAltModifier} 点击可重新翻译${scopeLabel}。`) : '没有找到可翻译的正文段落。');
       }
     } catch (error) {
       showToast(`全文${translationErrorMessage(error)}`, true);
@@ -10764,7 +10785,7 @@
   $('#chat-input')?.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' || event.isComposing || event.keyCode === 229) return;
     const input = event.currentTarget;
-    if (event.metaKey) {
+    if (primaryModifierPressed(event)) {
       event.preventDefault();
       event.stopPropagation();
       const start = input.selectionStart ?? input.value.length;
@@ -12336,7 +12357,10 @@
     const info = context.app || {};
     localTestBuild = Boolean(info.localTestBuild);
     if ($('#app-current-version')) $('#app-current-version').textContent = info.version ? `v${info.version}` : '未知';
-    if ($('#app-platform-arch')) $('#app-platform-arch').textContent = info.arch === 'arm64' ? 'macOS · Apple Silicon' : `macOS · ${info.arch || '未知架构'}`;
+    const platform = info.platform || appPlatform;
+    const platformName = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' }[platform] || platform;
+    const arch = platform === 'darwin' && info.arch === 'arm64' ? 'Apple Silicon' : info.arch || '未知架构';
+    if ($('#app-platform-arch')) $('#app-platform-arch').textContent = `${platformName} · ${arch}`;
     if ($('#app-update-channel')) $('#app-update-channel').textContent = localTestBuild ? '本地测试版' : info.channel === 'beta' ? '测试版' : info.channel === 'internal' ? '开源发布版' : String(info.channel || '稳定版');
     if (localTestBuild) {
       $('#check-updates')?.setAttribute('disabled', '');
@@ -12829,7 +12853,7 @@
     'shortcut-full-translation': 'full_translation',
     'shortcut-reflow': 'reflow',
   });
-  const shortcutModifierTokens = new Set(['cmd', 'command', 'meta', 'ctrl', 'control', 'option', 'alt', 'shift']);
+  const shortcutModifierTokens = new Set(['cmd', 'command', 'meta', 'windows', 'win', 'ctrl', 'control', 'option', 'alt', 'shift']);
   const shortcutKeyAliases = Object.freeze({
     comma: ',', space: 'Space', enter: 'Enter', return: 'Enter', escape: 'Escape', esc: 'Escape',
     backspace: 'Backspace', delete: 'Delete', tab: 'Tab', home: 'Home', end: 'End',
@@ -12855,12 +12879,20 @@
     const keyPart = parts.at(-1);
     const modifiers = new Set(parts.slice(0, -1).map((part) => part.toLowerCase()));
     if ([...modifiers].some((part) => !shortcutModifierTokens.has(part))) return '';
-    const command = modifiers.has('cmd') || modifiers.has('command') || modifiers.has('meta');
+    const command = modifiers.has('cmd') || modifiers.has('command') || modifiers.has('meta') || modifiers.has('windows') || modifiers.has('win');
     const control = modifiers.has('ctrl') || modifiers.has('control');
     if (!command && !control) return '';
     const key = canonicalShortcutKey(keyPart);
     if (!key || shortcutModifierTokens.has(key.toLowerCase())) return '';
-    return [command && 'Cmd', control && 'Ctrl', (modifiers.has('option') || modifiers.has('alt')) && 'Option', modifiers.has('shift') && 'Shift', key].filter(Boolean).join('+');
+    return [command && shortcutMetaModifier, control && 'Ctrl', (modifiers.has('option') || modifiers.has('alt')) && shortcutAltModifier, modifiers.has('shift') && 'Shift', key].filter(Boolean).join('+');
+  }
+
+  function normalizedShortcutSettings(shortcuts = {}) {
+    return Object.fromEntries(Object.entries(shortcutDefaults).map(([key, fallback]) => {
+      const legacyDefault = fallback.replace(/^Ctrl\+/u, 'Cmd+').replace('+Alt+', '+Option+');
+      const value = appPlatform === 'win32' && shortcuts[key] === legacyDefault ? fallback : shortcuts[key];
+      return [key, normalizeShortcut(value) || fallback];
+    }));
   }
 
   function capturedShortcut(event) {
@@ -12868,12 +12900,12 @@
     if (!event.metaKey && !event.ctrlKey) return '';
     const key = canonicalShortcutKey(event.key);
     if (!key || shortcutModifierTokens.has(key.toLowerCase())) return '';
-    return [event.metaKey && 'Cmd', event.ctrlKey && 'Ctrl', event.altKey && 'Option', event.shiftKey && 'Shift', key].filter(Boolean).join('+');
+    return [event.metaKey && shortcutMetaModifier, event.ctrlKey && 'Ctrl', event.altKey && shortcutAltModifier, event.shiftKey && 'Shift', key].filter(Boolean).join('+');
   }
 
   const reservedShortcuts = new Set([
-    'Cmd+A', 'Ctrl+A', 'Cmd+F', 'Ctrl+F', 'Cmd+I', 'Cmd+Shift+F',
-    'Cmd+Backspace', 'Cmd+Delete', 'Cmd+W',
+    'Cmd+A', 'Ctrl+A', 'Cmd+F', 'Ctrl+F',
+    ...['I', 'Shift+F', 'Backspace', 'Delete', 'W'].map((key) => `${shortcutPrimaryModifier}+${key}`),
   ]);
 
   function shortcutInputs() {
@@ -12886,11 +12918,11 @@
     records.forEach(({ value }) => { if (value) counts.set(value, (counts.get(value) || 0) + 1); });
     let firstMessage = '';
     records.forEach((record) => {
-      const reserved = reservedShortcuts.has(record.value);
+      const reserved = [...reservedShortcuts].some((shortcut) => normalizeShortcut(shortcut) === record.value);
       const invalid = !record.value || counts.get(record.value) > 1 || reserved;
       record.input.classList.toggle('is-invalid', invalid);
       record.input.setAttribute('aria-invalid', String(invalid));
-      if (!record.value && !firstMessage) firstMessage = '快捷键需要包含 Command 或 Control，再加一个按键。';
+      if (!record.value && !firstMessage) firstMessage = `快捷键需要包含 ${shortcutModifierDescription}，再加一个按键。`;
       else if (counts.get(record.value) > 1 && !firstMessage) firstMessage = `“${record.value}”已被其他操作使用。`;
       else if (reserved && !firstMessage) firstMessage = `“${record.value}”是搜索、文献库或标签页的保留快捷键。`;
     });
@@ -12905,7 +12937,8 @@
     };
   }
 
-  shortcutInputs().forEach(({ input }) => {
+  shortcutInputs().forEach(({ input, setting }) => {
+    input.value = state.shortcuts[setting];
     input.addEventListener('focus', () => {
       input.dataset.previousShortcut = normalizeShortcut(input.value) || input.value;
       input.classList.add('is-capturing');
@@ -12933,7 +12966,7 @@
       const status = $('#shortcut-status');
       if (!shortcut) {
         if (status && !shortcutModifierTokens.has(String(event.key || '').toLowerCase())) {
-          status.textContent = '请同时按住 Command 或 Control。';
+          status.textContent = `请同时按住 ${shortcutModifierDescription}。`;
           status.classList.add('is-error');
         }
         return;
@@ -13537,7 +13570,7 @@
       if ($('#setting-parsing-server-url')) $('#setting-parsing-server-url').value = settings.parsing?.server_url || '';
       syncParsingServerField();
       const shortcuts = settings.shortcuts || {};
-      const normalizedShortcuts = Object.fromEntries(Object.entries({ ...state.shortcuts, ...shortcuts }).map(([key, value]) => [key, normalizeShortcut(value) || state.shortcuts[key]]));
+      const normalizedShortcuts = normalizedShortcutSettings(shortcuts);
       state.shortcuts = { ...state.shortcuts, ...normalizedShortcuts };
       shortcutInputs().forEach(({ input, setting }) => { input.value = state.shortcuts[setting]; });
       syncReaderShortcutHints();
@@ -14395,10 +14428,10 @@
     const parts = normalizeShortcut(shortcut).split('+').map((part) => part.trim().toLowerCase()).filter(Boolean);
     if (!parts.length) return false;
     const key = parts.at(-1);
-    const wantsCommand = parts.includes('cmd');
+    const wantsCommand = ['cmd', 'meta', 'windows'].some((modifier) => parts.includes(modifier));
     const wantsControl = parts.includes('ctrl');
     const wantsShift = parts.includes('shift');
-    const wantsAlt = parts.includes('option');
+    const wantsAlt = parts.includes('option') || parts.includes('alt');
     if (event.metaKey !== wantsCommand || event.ctrlKey !== wantsControl || event.shiftKey !== wantsShift || event.altKey !== wantsAlt) return false;
     return canonicalShortcutKey(event.key).toLowerCase() === key;
   }
@@ -14411,7 +14444,7 @@
     const hint = `${label}（${shortcut}）`;
     button.title = hint;
     button.setAttribute('aria-label', hint);
-    button.setAttribute('aria-keyshortcuts', shortcut.replace(/Cmd/gu, 'Meta').replace(/Option/gu, 'Alt'));
+    button.setAttribute('aria-keyshortcuts', shortcut.replace(/Cmd|Windows/gu, 'Meta').replace(/Option/gu, 'Alt'));
   }
   function syncReaderShortcutHints() {
     syncTranslationScopeControls();

@@ -173,7 +173,7 @@
           <button id="reader-info-button" class="toolbar-icon-button" type="button" title="文档信息" aria-label="文档信息">ⓘ</button>
         </div>
         <div class="reader-actions" aria-label="阅读动作">
-          <span class="action-split" role="group" aria-label="全文翻译"><button id="full-translate-button" class="action-button" type="button" title="翻译全文（含附录）；按住 Option 点击可重新翻译已有译文的段落"><span class="action-icon">文</span><span id="full-translate-label">全文翻译</span></button><button id="full-translate-scope-button" class="action-button action-split-caret" type="button" title="翻译与阅读显示" aria-label="翻译与阅读显示" aria-haspopup="menu" aria-controls="translation-scope-menu" aria-expanded="false">⌄</button></span>
+          <span class="action-split" role="group" aria-label="全文翻译"><button id="full-translate-button" class="action-button" type="button" title="翻译全文（含附录）；按住辅助键点击可重新翻译已有译文的段落"><span class="action-icon">文</span><span id="full-translate-label">全文翻译</span></button><button id="full-translate-scope-button" class="action-button action-split-caret" type="button" title="翻译与阅读显示" aria-label="翻译与阅读显示" aria-haspopup="menu" aria-controls="translation-scope-menu" aria-expanded="false">⌄</button></span>
           <button id="reflow-button" class="action-button" type="button"><span class="action-icon">✧</span><span id="reflow-button-label">AI 重排</span></button>
           <button id="auto-highlight-button" class="action-button" type="button"><span class="action-icon">✦</span>重点高亮</button>
           <button id="open-source-button" class="action-button" type="button"><span class="action-icon">⇱</span>切换源文件</button>
@@ -225,7 +225,7 @@
               <p id="chat-context-status" class="chat-context-status" role="status" hidden></p>
               <div id="chat-messages" class="chat-messages"><div class="chat-empty">可以问我：这篇文章的贡献是什么？表格中的指标如何比较？</div></div>
               <div id="selected-context" class="selected-context" hidden></div>
-              <form id="chat-form" class="chat-form"><textarea id="chat-input" rows="3" placeholder="针对当前文章提问…（Enter 发送，⌘ Enter 换行）"></textarea><button class="primary-button" type="submit">发送 <span>Enter</span></button></form>
+              <form id="chat-form" class="chat-form"><textarea id="chat-input" rows="3" placeholder="针对当前文章提问…（Enter 发送，组合键换行）"></textarea><button class="primary-button" type="submit">发送 <span>Enter</span></button></form>
               <div id="chat-status" class="panel-status" hidden></div>
             </div>
             <div id="chat-history-view" class="chat-subview" aria-hidden="true" hidden>
@@ -256,8 +256,8 @@
           <section id="notes-panel" class="sidebar-panel" hidden>
             <div class="panel-intro"><strong>文章笔记</strong><span>直接编辑与排版 · 自动保存到本机</span></div>
             <div class="notes-tools" role="toolbar" aria-label="文章笔记格式">
-              <button class="notes-format-button" type="button" data-format="bold" title="加粗（⌘B）" aria-label="加粗"><strong>B</strong></button>
-              <button class="notes-format-button" type="button" data-format="italic" title="斜体（⌘I）" aria-label="斜体"><em>I</em></button>
+              <button class="notes-format-button" type="button" data-format="bold" title="加粗" aria-label="加粗"><strong>B</strong></button>
+              <button class="notes-format-button" type="button" data-format="italic" title="斜体" aria-label="斜体"><em>I</em></button>
               <button class="notes-format-button notes-format-wide" type="button" data-format="unordered-list" title="项目列表" aria-label="项目列表">• 列表</button>
               <button class="notes-format-button notes-format-wide" type="button" data-format="ordered-list" title="编号列表" aria-label="编号列表">1. 列表</button>
               <button class="notes-format-button notes-format-wide" type="button" data-format="blockquote" title="引用" aria-label="引用">引用</button>
@@ -324,7 +324,7 @@
         <form id="settings-form" class="settings-product-form">
           <header class="settings-page-heading"><div><div class="eyebrow">GUZI SCHOLAR</div><h1>设置</h1><p>按分类查看偏好；常规更改即时生效并自动保存。</p></div><span id="settings-save-status" class="settings-save-status" role="status" aria-live="polite" data-state="saved">已保存</span></header>
           <section id="settings-reading" class="settings-section">
-            <div class="settings-section-heading"><div><h2>外观与阅读</h2><p>界面明暗模式跟随 macOS，字体和系统重点色可独立选择。</p></div><span class="settings-badge">跟随系统</span></div>
+            <div class="settings-section-heading"><div><h2>外观与阅读</h2><p>界面明暗模式跟随系统，字体和系统重点色可独立选择。</p></div><span class="settings-badge">跟随系统</span></div>
             <div class="settings-control-grid">
               <label class="settings-select-field" for="setting-app-font"><span><strong>页面字体</strong><small>用于文献库、设置、工具栏和阅读助手界面。</small></span><select id="setting-app-font"><option value="system">系统默认</option><option value="pingfang">苹方</option><option value="songti">宋体</option></select></label>
               <label class="settings-select-field" for="setting-reader-font"><span><strong>阅读器字体</strong><small>用于论文正文、译文、笔记和 AI 回答内容。</small></span><select id="setting-reader-font"><option value="academic">学术衬线</option><option value="songti">宋体</option><option value="georgia">Georgia</option><option value="sans">无衬线</option></select></label>
@@ -334,10 +334,10 @@
               <div class="appearance-preview-chrome"><span class="appearance-preview-mark" aria-hidden="true">✦</span><strong>页面字体预览</strong><span class="appearance-preview-tab">当前页面</span></div>
               <div class="appearance-preview-content"><div class="appearance-preview-controls"><span class="appearance-preview-line"></span><span class="appearance-preview-line short"></span><label><input type="checkbox" checked disabled> 系统重点色</label><button type="button" tabindex="-1">重点按钮</button></div><article class="appearance-preview-paper"><strong>阅读器字体预览</strong><p>清晰的正文排版，让论文阅读更专注。</p><p lang="en">A focused reading surface for scholarly work.</p></article></div>
             </div>
-            <div class="settings-row"><div><strong>本地阅读数据</strong><small>原文、译文、笔记与标注按文献目录保存在当前 Mac。</small></div><span class="settings-value">仅本机</span></div>
+            <div class="settings-row"><div><strong>本地阅读数据</strong><small>原文、译文、笔记与标注按文献目录保存在当前设备。</small></div><span class="settings-value">仅本机</span></div>
             <div id="onboarding-settings-row" class="settings-row" hidden><div><strong>新手引导</strong><small>重新了解文献库、阅读工具、关系图谱与 AI 配置。</small></div><button id="replay-onboarding" class="secondary-button" type="button">重新查看</button></div>
           </section>
-          <section id="settings-shortcuts" class="settings-section" hidden><div class="settings-section-heading"><div><h2>快捷操作</h2><p>点击字段后按下组合键；为避免误触，快捷键需要包含 Command 或 Control。</p></div></div><div class="shortcut-grid"><label>打开文献库<input id="shortcut-library" type="text" value="Cmd+1" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>打开设置<input id="shortcut-settings" type="text" value="Cmd+," inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>快速高亮<input id="shortcut-highlight" type="text" value="Cmd+Shift+H" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>快速划线<input id="shortcut-underline" type="text" value="Cmd+Shift+U" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>快速高亮笔记<input id="shortcut-highlight-note" type="text" value="Cmd+Shift+J" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>快速划线随笔<input id="shortcut-underline-note" type="text" value="Cmd+Shift+K" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>全文翻译<input id="shortcut-full-translation" type="text" value="Cmd+Shift+Enter" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>AI 重排<input id="shortcut-reflow" type="text" value="Cmd+Option+Enter" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label></div><small id="shortcut-status" class="shortcut-status" role="status" aria-live="polite">点击字段后按下新的组合键。</small>
+          <section id="settings-shortcuts" class="settings-section" hidden><div class="settings-section-heading"><div><h2>快捷操作</h2><p id="shortcut-description">点击字段后按下组合键。</p></div></div><div class="shortcut-grid"><label>打开文献库<input id="shortcut-library" type="text" value="" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>打开设置<input id="shortcut-settings" type="text" value="" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>快速高亮<input id="shortcut-highlight" type="text" value="" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>快速划线<input id="shortcut-underline" type="text" value="" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>快速高亮笔记<input id="shortcut-highlight-note" type="text" value="" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>快速划线随笔<input id="shortcut-underline-note" type="text" value="" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>全文翻译<input id="shortcut-full-translation" type="text" value="" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label><label>AI 重排<input id="shortcut-reflow" type="text" value="" inputmode="none" autocomplete="off" spellcheck="false" aria-describedby="shortcut-status"></label></div><small id="shortcut-status" class="shortcut-status" role="status" aria-live="polite">点击字段后按下新的组合键。</small>
             <div class="annotation-action-settings">
               <h3>选区工具栏</h3>
               <p class="settings-field-hint">悬停句子或选择正文后显示工具栏。数字键 1–6 对应内置动作，自定义标记依次使用 7、8、9、0；隐藏内置按钮不会改变编号或停用快捷键。</p>
@@ -510,7 +510,7 @@
             <div class="settings-section-heading"><div><h2>关于与更新</h2><p>查看当前版本、开源来源，并在需要时主动检查新版本。</p></div><span class="settings-badge">开源版本</span></div>
             <div class="update-summary-grid" aria-label="应用版本信息">
               <div><span>当前版本</span><strong id="app-current-version">读取中</strong></div>
-              <div><span>系统架构</span><strong id="app-platform-arch">macOS</strong></div>
+              <div><span>系统架构</span><strong id="app-platform-arch">读取中…</strong></div>
               <div><span>更新通道</span><strong id="app-update-channel">开源版本</strong></div>
             </div>
             <div class="settings-row source-attribution-row">
@@ -527,7 +527,7 @@
               <p id="update-release-notes"></p>
               <code id="update-release-sha" title="安装包 SHA-256"></code>
             </div>
-            <small class="settings-gateway-hint">当前 macOS 发布包使用 ad-hoc 签名且未经过 Apple 公证，只提供主动检查和浏览器下载；首次打开可能需要在 Finder 中右键“打开”，不会在应用内自动替换。</small>
+            <small id="app-update-install-hint" class="settings-gateway-hint">当前发布包只提供主动检查和浏览器下载；下载后请手动安装新版本，不会在应用内自动替换。</small>
           </section>
         </form>
       </div>
@@ -557,7 +557,7 @@
             <span class="onboarding-kicker">WELCOME TO GUZI SCHOLAR</span>
             <h1 id="onboarding-title-1" tabindex="-1">欢迎来到谷子学术</h1>
             <p id="onboarding-description-1">把文献、阅读记录和研究线索留在同一个清晰的工作空间里。</p>
-            <ul class="onboarding-points"><li><span>01</span>围绕论文组织，而不是围绕文件窗口组织</li><li><span>02</span>本地阅读数据保存在当前 Mac</li><li><span>03</span>开源代码支持自由二次开发</li></ul>
+            <ul class="onboarding-points"><li><span>01</span>围绕论文组织，而不是围绕文件窗口组织</li><li><span>02</span>本地阅读数据保存在当前设备</li><li><span>03</span>开源代码支持自由二次开发</li></ul>
           </div>
         </article>
         <article class="onboarding-slide is-after" data-onboarding-step="1" aria-hidden="true">
@@ -623,8 +623,8 @@
     </figure>
   </div>
   <div id="note-format-bar" class="note-format-bar" role="toolbar" aria-label="笔记选区格式" hidden>
-    <button type="button" class="note-format-action" data-note-format="bold" title="加粗（⌘B）" aria-label="加粗"><strong>B</strong></button>
-    <button type="button" class="note-format-action" data-note-format="italic" title="斜体（⌘I）" aria-label="斜体"><em>I</em></button>
+    <button type="button" class="note-format-action" data-note-format="bold" title="加粗" aria-label="加粗"><strong>B</strong></button>
+    <button type="button" class="note-format-action" data-note-format="italic" title="斜体" aria-label="斜体"><em>I</em></button>
     <button type="button" class="note-format-action" data-note-format="strike" title="删除线" aria-label="删除线"><s>S</s></button>
     <button type="button" class="note-format-action" data-note-format="code" title="行内代码" aria-label="行内代码">&lt;/&gt;</button>
     <button type="button" class="note-format-action" data-note-format="math" title="转为公式" aria-label="转为公式">∑</button>
