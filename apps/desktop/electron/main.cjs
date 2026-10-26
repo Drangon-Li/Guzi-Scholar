@@ -24,6 +24,7 @@ const { hasTrustedOrigin, localRequestPolicy } = require('./url-security.cjs');
 const { mcpClientConfiguration } = require('./mcp-config.cjs');
 const { resolveUpdateConfig } = require('./update-config.cjs');
 const { createUpdateController } = require('./update-controller.cjs');
+const { createStartupUpdateCheck } = require('./startup-update.cjs');
 const { consumeInstallationMarker, requestMacInstallation } = require('./macos-installation.cjs');
 const { configurePluginIsolation, checkPreviewBoundaries, PluginProcessGuard } = require('./plugin-guard.cjs');
 const { createExitCoordinator, flushRenderer } = require('./exit-coordinator.cjs');
@@ -68,6 +69,7 @@ let rendererStateStore = null;
 let rendererCrashShutdownPromise = null;
 let startupStorageReport = { state: 'pending', adopted: false, current: null, legacy: [] };
 let updateController = null;
+let checkStartupUpdate = async () => {};
 let pluginGuard = null;
 let cancelPreparedUpdateForExit = async () => {};
 const windowsAllowedToClose = new WeakSet();
@@ -990,6 +992,7 @@ async function createWindow() {
     shuttingDown = false;
     stopServer().catch((error) => diagnosticLog('stop-after-window-close-error', error.message || String(error)));
   });
+  void checkStartupUpdate();
 }
 
 function ensureWindow() {
@@ -1030,6 +1033,12 @@ app.whenReady().then(async () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('my-scholar:update-state', state);
   });
   setCancelPreparedUpdateForExit(() => updateController.cancelPreparedUpdateForExit());
+  checkStartupUpdate = createStartupUpdateCheck({
+    config: updateConfig, currentVersion: app.getVersion(),
+    getWindow: () => !shuttingDown && mainWindow && !mainWindow.isDestroyed() ? mainWindow : null,
+    showMessageBox: (window, options) => dialog.showMessageBox(window, options),
+    openExternal: (url) => shell.openExternal(url),
+  });
   await prepareDesktopStorage();
   if (process.platform === 'darwin' && app.dock) {
     try {

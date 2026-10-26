@@ -120,6 +120,7 @@ function event(key, changes = {}) {
     jsonOptions: (value) => value, annotationColorFor: () => '#f59e0b',
     api: () => new Promise((resolve) => { completeSave = resolve; }),
     renderFrameAnnotations() { if (saveContext.state.selection?.origin === 'sentence-hover') saveContext.state.selection = null; },
+    playAnnotationDrawAnimation() {},
     renderAnnotations() {}, annotationAnchor: () => ({}),
     clearSelectionPopover() { saveContext.state.selection = null; },
     setReaderSentenceHover(pair) { restoredHover = pair.id; },

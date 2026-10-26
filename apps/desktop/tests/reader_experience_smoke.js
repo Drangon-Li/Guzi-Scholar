@@ -12,6 +12,18 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
     const errors = [];
     const requests = [];
     const records = new Map();
+    const routeErrors = [];
+    const hoverOnlyBlockIds = new Set(['block-1-2-paragraph', 'reader-geometry-empty', 'reader-geometry-no-space', 'block-2-1-paragraph']);
+    const safeRoute = (handler) => async (route) => {
+      try { await handler(route); }
+      catch (error) {
+        const request = route.request();
+        const diagnostic = { url: request.url(), body: request.postData(), error: error.message };
+        routeErrors.push(diagnostic);
+        console.error(JSON.stringify({ readerExperienceRouteError: diagnostic }));
+        try { await route.fulfill({ status: 503, json: { error: 'reader fixture route failed' } }); } catch (_) { /* Request may already be closed during browser cleanup. */ }
+      }
+    };
     const geometryResponses = new Map();
     let fullRun = false;
     let translationTests = 0;
@@ -31,7 +43,7 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
       Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => { window.__copiedText = text; } } });
     });
     await page.route('**/api/health', (route) => route.fulfill({ json: { ok: true, ai: { services: { translation: { enabled: true, configured: true, profile_id: 'reader-experience', target_language: 'zh' }, chat: { enabled: true, configured: true, profile_id: 'reader-chat' } } } } }));
-    await page.route('**/api/jobs/*/document.html?reader=1', async (route) => {
+    await page.route('**/api/jobs/*/document.html?reader=1', safeRoute(async (route) => {
       const response = await route.fetch();
       let html = await response.text();
       const replaceParagraph = (blockId, content) => {
@@ -44,15 +56,16 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
         `</p><p data-block-id="reader-geometry-${geometry}">Geometry fixture checks ${geometry} sentence bounds.`).join(''));
       replaceParagraph('block-2-1-paragraph', richSentenceHTML);
       await route.fulfill({ response, body: html });
-    });
-    await page.route('**/api/jobs/*/translations', (route) => {
+    }));
+    await page.route(/\/api\/jobs\/[^/]+\/translations(?:\?.*)?$/u, (route) => {
       const jobId = new URL(route.request().url()).pathname.split('/')[3];
       return route.fulfill({ json: { translations: records.get(jobId) || [] } });
     });
-    await page.route('**/api/jobs/*/translate', async (route) => {
+    await page.route('**/api/jobs/*/translate', safeRoute(async (route) => {
       const body = route.request().postDataJSON();
       const jobId = new URL(route.request().url()).pathname.split('/')[3];
       requests.push(body);
+      const requestedDuringFullRun = fullRun;
       if (!body.block_id && geometryResponses.has(body.text)) await geometryResponses.get(body.text);
       if (!body.block_id && body.text === sentenceFixture[0]) await sentenceResponse;
       if (!body.block_id && body.text === sentenceFixture[1] && transientFailure) {
@@ -60,17 +73,29 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
         await route.fulfill({ status: 503, json: { error: 'temporary fixture failure' } });
         return;
       }
-      if (fullRun) await new Promise((resolve) => setTimeout(resolve, 700));
+      if (requestedDuringFullRun) await new Promise((resolve) => setTimeout(resolve, 700));
+      if (requestedDuringFullRun && hoverOnlyBlockIds.has(body.block_id)) {
+        // These paragraphs exercise uncached hover behavior after the run stops.
+        await route.fulfill({ status: 503, json: { error: 'hover-only fixture remains untranslated' } });
+        return;
+      }
       const richSentence = body.text.startsWith('Inline citation');
-      const text = richSentence ? body.text.replace('Inline citation', '参考文献')
-        : body.block_id ? '用于回归测试的段落译文。' : `${'当前句的长译文，保留全部细节供滚动查看，'.repeat(180)}结束。`;
-      const result = { ...body, text, block_id: body.block_id || '', profile_id: 'reader-experience' };
+      const translateValue = (value) => richSentence ? value.replace('Inline citation', '参考文献')
+        : body.block_id ? `用于回归测试的段落译文。${(value.match(/__MY_SCHOLAR_(?:MATH|SPECIAL_TOKEN|MARKER|BOLD_(?:START|END))_\d+__/g) || []).join(' ')}`
+          : `${'当前句的长译文，保留全部细节供滚动查看，'.repeat(180)}结束。`;
+      const segments = body.segments?.map((segment) => ({ id: segment.id, text: translateValue(segment.text) }));
+      const text = segments?.length ? segments.map((segment) => segment.text).join(' ') : translateValue(body.text);
+      const result = {
+        ...body, text, block_id: body.block_id || '', profile_id: 'reader-experience',
+        provider_snapshot: { provider: 'openai-compatible', model: 'reader-experience-fixture', mode: 'chat' },
+        ...(segments?.length ? { segments, source_segments: body.segments, alignment_version: 'sentence-v1' } : {}),
+      };
       if (body.block_id || richSentence) {
         const previous = records.get(jobId) || [];
         records.set(jobId, [...previous.filter((item) => item.block_id !== result.block_id || item.source_hash !== result.source_hash), result]);
       }
       await route.fulfill({ json: { result } });
-    });
+    }));
     await page.route('**/api/jobs/*/auto-highlights', (route) => route.fulfill({ json: { result: { status: 'mock', highlights: [] } } }));
     await page.route('**/api/translation/test', (route) => {
       translationTests += 1;
@@ -183,7 +208,8 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
     const frame = page.frameLocator('#html-preview');
     const source = frame.locator('p[data-block-id]:has(.paragraph-translate-trigger)').first();
     await source.waitFor();
-    await frame.locator('.title-translation:not(.is-pending):not(.is-error)').waitFor();
+    hoverOnlyBlockIds.add(await source.getAttribute('data-block-id'));
+    await frame.locator('h1.paper-title .reader-sentence-translation, .title-translation:not(.is-pending):not(.is-error)').first().waitFor();
     const hoverText = async (locator, sentence = '') => {
       await locator.scrollIntoViewIfNeeded();
       const position = await locator.evaluate((node, sentence) => {
@@ -283,9 +309,7 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
     await assertFeedbackCleared();
 
     const fixtureParagraph = frame.locator('p[data-block-id="block-1-2-paragraph"]');
-    const fixtureId = await fixtureParagraph.getAttribute('data-block-id');
-    await fixtureParagraph.locator('.paragraph-translate-trigger').click();
-    await frame.locator(`.my-scholar-translation[data-for="${fixtureId}"]:not(.is-pending)`).waitFor();
+    assert.equal(await fixtureParagraph.locator('.reader-sentence-translation').count(), 0, 'Uncached sentence fixture must start untranslated');
     const hoverSentence = (sentence) => hoverText(fixtureParagraph, sentence);
     for (const sentence of sentenceFixture) {
       await hoverSentence(sentence);
@@ -353,8 +377,7 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
       let releaseGeometryResponse;
       geometryResponses.set(sentence, new Promise((resolve) => { releaseGeometryResponse = resolve; }));
       const geometryParagraph = frame.locator(`p[data-block-id="reader-geometry-${geometry}"]`);
-      await geometryParagraph.locator('.paragraph-translate-trigger').click();
-      await frame.locator(`.my-scholar-translation[data-for="reader-geometry-${geometry}"]:not(.is-pending)`).waitFor();
+      assert.equal(await geometryParagraph.locator('.reader-sentence-translation').count(), 0, 'Geometry fixture must remain untranslated until its hover request');
       await hoverText(geometryParagraph, sentence);
       await tooltip.filter({ hasText: '正在翻译当前句' }).waitFor();
       await tooltip.evaluate((_node, geometry) => {
@@ -445,13 +468,49 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
     fullRun = true;
     await page.locator('#full-translate-button').click();
     await page.locator('#translation-progress:not([hidden])').waitFor();
-    const layout = await page.evaluate(() => {
-      const tray = document.querySelector('#background-tasks').getBoundingClientRect();
-      const article = document.querySelector('#html-preview').getBoundingClientRect();
-      const input = document.querySelector('#chat-input').getBoundingClientRect();
-      return { trayBottom: tray.bottom, articleTop: article.top, inputTop: input.top, inputBottom: input.bottom, viewport: innerHeight, position: getComputedStyle(document.querySelector('#background-tasks')).position };
-    });
-    await page.screenshot({ path: '/tmp/guzi-reader-experience-progress.png' });
+    const settledLayout = await page.waitForFunction(() => {
+      const trayNode = document.querySelector('#background-tasks');
+      const articleNode = document.querySelector('#html-preview');
+      const inputNode = document.querySelector('#chat-input');
+      const ancestors = [];
+      for (let node = inputNode; node; node = node.parentElement) ancestors.push(node);
+      const targets = [...new Set([trayNode, articleNode, ...ancestors])];
+      const geometry = targets.map((node) => {
+        const rect = node.getBoundingClientRect();
+        return [rect.top, rect.left, rect.width, rect.height];
+      });
+      const tray = trayNode.getBoundingClientRect();
+      const observedTrayHeight = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--background-tasks-height'));
+      const observerSynced = observedTrayHeight === Math.round(tray.height);
+      const moving = ancestors.some((node) => node.getAnimations().some((animation) => {
+        const timing = animation.effect?.getComputedTiming();
+        return (animation.playState === 'running' || animation.pending) && timing?.iterations !== Infinity;
+      }));
+      const signature = JSON.stringify(geometry);
+      const previous = window.__readerExperienceLayoutProbe;
+      const stableFrames = observerSynced && !moving && previous?.signature === signature ? previous.stableFrames + 1 : 0;
+      window.__readerExperienceLayoutProbe = { signature, stableFrames };
+      if (stableFrames < 3) return false;
+      const article = articleNode.getBoundingClientRect();
+      const input = inputNode.getBoundingClientRect();
+      return {
+        trayBottom: tray.bottom, articleTop: article.top, inputTop: input.top, inputBottom: input.bottom,
+        viewport: innerHeight, position: getComputedStyle(trayNode).position, observedTrayHeight, stableFrames,
+        ancestors: ancestors.map((node) => {
+          const style = getComputedStyle(node);
+          return {
+            node: node.id ? `#${node.id}` : `${node.tagName.toLowerCase()}.${node.className}`,
+            rect: node.getBoundingClientRect().toJSON(), clientHeight: node.clientHeight, scrollHeight: node.scrollHeight,
+            display: style.display, height: style.height, minHeight: style.minHeight, overflow: style.overflow,
+            padding: style.padding, transform: style.transform, gridTemplateRows: style.gridTemplateRows,
+          };
+        }),
+      };
+    }, null, { polling: 'raf', timeout: 5000 });
+    const layout = await settledLayout.jsonValue();
+    await settledLayout.dispose();
+    await page.evaluate(() => { delete window.__readerExperienceLayoutProbe; });
+    await page.screenshot({ path: '/tmp/guzi-reader-experience-layout.png' });
     assert.equal(layout.position, 'relative');
     assert(layout.trayBottom <= layout.articleTop && layout.trayBottom <= layout.inputTop && layout.inputBottom <= layout.viewport, JSON.stringify(layout));
     await page.locator('[data-view="library-view"]').click();
@@ -517,9 +576,8 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
     const richRequests = () => requests.filter((item) => !item.block_id && item.text.startsWith('Inline citation')).length;
     const installRichSentence = async () => {
       const paragraph = frame.locator('p[data-block-id="block-2-1-paragraph"]');
-      await paragraph.locator('.paragraph-translate-trigger').click();
-      const blockId = await paragraph.getAttribute('data-block-id');
-      await frame.locator(`.my-scholar-translation[data-for="${blockId}"]:not(.is-pending)`).waitFor();
+      await paragraph.locator('.paragraph-translate-trigger').waitFor();
+      assert.equal(await paragraph.locator('.reader-sentence-translation').count(), 0, 'Rich hover fixture must not have a paragraph translation');
       return paragraph;
     };
     const hoverRichSentence = async (paragraph) => {
@@ -560,6 +618,7 @@ if (!baseURL || !process.env.MY_SCHOLAR_TEST_DATA) throw new Error('Run with an 
     assert.equal(richRequests(), 1, 'Formatted hover bypassed the persisted cache after reload');
     await page.screenshot({ path: '/tmp/guzi-hover-translation-format-fixed.png' });
     assert.deepEqual(errors, []);
+    assert.deepEqual(routeErrors, [], `Mock routes failed: ${JSON.stringify(routeErrors)}`);
     console.log(JSON.stringify({ passed: true, cases: ['provider-isolation-and-credentials', 'deepl-free-pro', 'independent-translation-test', 'toolbar-customization', 'selection-settings-theme-layout-keyboard-and-persistence', 'semantic-snapshot-persistence', 'hover-cache-and-long-text', 'multiline-hover-does-not-cover-source', 'narrow-hover-and-long-text-scroll', 'hover-above-viewport-bottom-sentence', 'highlight-and-underline-real-mouse-hover', 'annotation-note-click-after-hover', 'source-only-hover-background', 'synchronized-hover-feedback-lifecycle', 'late-translation-does-not-restore-hover', 'exact-first-middle-last-sentence', 'failed-hover-retry', 'overlapping-semantic-actions', 'inline-progress-and-background-stop', 'contextual-scrollbars', 'sidebar-body-typography-matches-chat-at-all-scales', 'hover-citation-math-marker-and-emphasis-rendering', 'hover-formatted-memory-and-persisted-cache', 'hover-translation-text-is-not-html'], annotationId: semantic.id }));
   } finally { await session.close(); }
 })().catch((error) => { console.error(error); process.exitCode = 1; });

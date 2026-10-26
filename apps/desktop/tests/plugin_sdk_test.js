@@ -19,27 +19,34 @@ async function testHostBoundary() {
   const events = [];
   const channels = [];
   const effects = [];
+  const frames = [];
   let stopped;
   let holdInvocations = false;
+  let registry = { plugins: [], previews: [] };
+  let invokeResult = {};
+  let installationEpoch = 0;
   const held = [];
   class Element {
-    constructor(tag) { this.tag = tag; this.dataset = {}; this.children = []; this.contentWindow = {}; this.isConnected = true; }
+    constructor(tag) { this.tag = tag; this.dataset = {}; this.children = []; this.contentWindow = {}; this.isConnected = true; if (tag === 'iframe') frames.push(this); }
+    get classList() { return { contains: () => false }; }
     setAttribute() {}
     addEventListener() {}
     append(...nodes) { this.children.push(...nodes); }
     replaceChildren() { this.children = []; }
     querySelector() { return this.children.find((node) => node.className?.includes('plugin-runtime-status')); }
     remove() { this.isConnected = false; }
+    before() {}
   }
   const hostWindow = {
     addEventListener: (name, handler) => handlers.set(name, handler),
     myScholarDesktop: {
-      pluginRuntimeCheck: async (request) => { assert(events.some((event) => event.payload.pluginId === request.pluginId && event.payload.level === 'ready'), 'Desktop check must follow awaited ready report'); },
+      pluginRuntimeCheck: async (request) => { assert(events.some((event) => event.payload?.pluginId === request.pluginId && event.payload.level === 'ready'), 'Desktop check must follow awaited ready report'); },
       onPluginStopped: (handler) => { stopped = handler; return () => {}; },
     },
   };
   const hostContext = {
-    window: hostWindow, document: { createElement: (tag) => new Element(tag) }, TextEncoder,
+    window: hostWindow, document: { createElement: (tag) => new Element(tag), querySelector: () => new Element('root'), querySelectorAll: () => [], dispatchEvent() {} }, TextEncoder,
+    CustomEvent: class {},
     setTimeout: () => 1, clearTimeout() {}, setInterval: () => 1, clearInterval() {},
     MessageChannel: class {
       constructor() { this.port1 = { sent: [], postMessage(message) { this.sent.push(message); }, start() {}, close() {} }; this.port2 = {}; channels.push(this); }
@@ -48,11 +55,12 @@ async function testHostBoundary() {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../web/plugin-host.js'), 'utf8'), hostContext);
   const host = hostWindow.MyScholarPluginHost.create({
     jsonOptions: (payload) => payload,
-    api: async (url, payload) => { events.push({ url, payload }); if (holdInvocations && url.endsWith('/invoke')) return new Promise((resolve) => held.push(resolve)); return { result: {} }; },
+    api: async (url, payload) => { events.push({ url, payload }); if (url === '/api/plugins') return registry; if (holdInvocations && url.endsWith('/invoke')) return new Promise((resolve) => held.push(resolve)); return { result: invokeResult }; },
+    onContributionsChanged() {}, onRemoved() {},
     toast: () => effects.push('toast'), confirm: () => effects.push('confirm'), openSource: () => effects.push('openSource'), translate: () => effects.push('translate'), navigate: () => effects.push('navigate'),
   });
-  async function preview(id) {
-    const runtime = host.preview({ pluginId: id, previewId: id + '-session', manifest: { name: 'Fixture', permissions: ['storage', 'reader.open', 'ai.translate'] }, grants: ['storage', 'reader.open', 'ai.translate'], url: '/fixture' }, new Element('root'));
+  async function preview(id, extra = {}) {
+    const runtime = host.preview({ ...extra, pluginId: id, previewId: id + '-session', manifest: { name: 'Fixture', permissions: ['storage', 'reader.open', 'ai.translate'] }, grants: ['storage', 'reader.open', 'ai.translate'], url: '/fixture' }, new Element('root'));
     handlers.get('message')({ data: { type: 'guzi-plugin-hello', sdkVersion: '1' }, origin: 'null', source: Object.assign(runtime.frame.contentWindow, { postMessage() {} }) });
     await runtime.checked;
     return { runtime, port: channels.at(-1).port1 };
@@ -83,6 +91,43 @@ async function testHostBoundary() {
   held.forEach((resolve) => resolve({ result: {} })); await Promise.all(calls);
   stopped({ pluginId: concurrent.runtime.id, previewSession: concurrent.runtime.record.previewId, reason: 'unresponsive' });
   assert.equal(concurrent.runtime.frame.isConnected, false, 'Main-process stop notification must remove the iframe');
+  holdInvocations = false;
+  async function installed(id, bundled) {
+    host.destroyAll();
+    registry = { plugins: [{ id, bundled, enabled: true, epoch: String(++installationEpoch), manifest: { name: 'Fixture', contributes: { pages: [{ id: 'main', title: 'Fixture' }] } } }], previews: [] };
+    await host.refresh();
+    assert(host.openView(id === 'guzi.vocabulary' ? 'vocabulary-view' : `plugin-view-${encodeURIComponent(id)}`));
+    const frame = frames.at(-1);
+    handlers.get('message')({ data: { type: 'guzi-plugin-hello', sdkVersion: '1' }, origin: 'null', source: Object.assign(frame.contentWindow, { postMessage() {} }) });
+    await tick();
+    return { port: channels.at(-1).port1, frame };
+  }
+  let resultSequence = 0;
+  async function resultCall(connection, name) {
+    const id = `result-${++resultSequence}`;
+    await connection.port.onmessage({ data: { type: 'call', id, name, arguments: {} } });
+    return connection.port.sent.find((message) => message.id === id);
+  }
+  const vocabulary = await installed('guzi.vocabulary', true);
+  invokeResult = { items: [{ rich_definition: '词'.repeat(28000) }] };
+  const allowed = await resultCall(vocabulary, 'vocabulary_list');
+  assert(new TextEncoder().encode(JSON.stringify(allowed)).byteLength > 80 * 1024);
+  assert.strictEqual(allowed.result, invokeResult, 'Trusted bundled vocabulary lists may exceed 64 KiB');
+  assert.match((await resultCall(vocabulary, 'storage_get')).error.message, /64 KiB/u, 'Other capabilities of the built-in plugin retain the original limit');
+  invokeResult = { items: [{ rich_definition: 'x'.repeat(8 * 1024 * 1024) }] };
+  assert.match((await resultCall(vocabulary, 'vocabulary_list')).error.message, /8 MiB/u, 'Vocabulary results retain an explicit hard limit');
+  invokeResult = { items: [{ rich_definition: 'x'.repeat(80 * 1024) }] };
+  const sameId = await installed('guzi.vocabulary', false);
+  assert.match((await resultCall(sameId, 'vocabulary_list')).error.message, /64 KiB/u, 'A third-party plugin cannot gain the allowance from its ID');
+  const otherBundled = await installed('guzi.other', true);
+  assert.match((await resultCall(otherBundled, 'vocabulary_list')).error.message, /64 KiB/u, 'Other bundled plugins retain the original limit');
+  const spoofedPreview = await preview('guzi.vocabulary', { bundled: true });
+  assert.match((await resultCall(spoofedPreview, 'vocabulary_list')).error.message, /64 KiB/u, 'Preview records cannot claim the bundled allowance');
+  const requestLimited = await installed('guzi.vocabulary', true);
+  const beforeOversized = events.filter((event) => event.url.endsWith('/invoke')).length;
+  await requestLimited.port.onmessage({ data: { type: 'call', id: 'oversized-request', name: 'vocabulary_list', arguments: { search: 'x'.repeat(80 * 1024) } } });
+  assert.equal(requestLimited.frame.isConnected, false, 'Incoming vocabulary requests remain capped at 64 KiB');
+  assert.equal(events.filter((event) => event.url.endsWith('/invoke')).length, beforeOversized, 'Oversized requests are rejected before capability invocation');
 }
 
 (async () => {
@@ -134,5 +179,5 @@ async function testHostBoundary() {
   window.GuziPlugin.reportTest('fatal after logs', false);
   assert(sent.some((message) => message.message === 'fatal after logs' && message.details.passed === false), 'SDK must preserve fatal test beyond ordinary log cap');
   await testHostBoundary();
-  console.log('Plugin SDK and host unit checks passed: handshake, bounded messages, concurrency/rate limits, preview boundaries, privileged self-report rejection and stopped iframe removal.');
+  console.log('Plugin SDK and host unit checks passed: handshake, bounded messages, scoped bundled vocabulary results, concurrency/rate limits, preview boundaries, privileged self-report rejection and stopped iframe removal.');
 })().catch((error) => { console.error(error); process.exitCode = 1; });

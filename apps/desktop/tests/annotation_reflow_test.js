@@ -22,6 +22,7 @@ const context = vm.createContext({
   canonicalBlockText: (block) => block.text,
   rangeAtOffsets: (block, offset, endOffset) => ({ text: block.text.slice(offset, endOffset), offset, endOffset }),
   annotationRange: (block, annotation) => block.text.slice(annotation.start, annotation.end) === annotation.quote ? { text: annotation.quote } : null,
+  translationAnnotationGroup: () => null,
 });
 vm.runInContext(`${app.slice(start, end)}\nthis.resolve = resolveAnnotationAnchor;`, context);
 const block = (id, text, page = '1') => ({ dataset: { blockId: id, page }, text, closest: () => null });

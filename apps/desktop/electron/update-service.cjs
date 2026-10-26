@@ -33,6 +33,9 @@ function assetURL(tag, name) {
   if (typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,180}$/u.test(name)) throw new Error('更新附件名称无效。');
   return `https://github.com/${REPOSITORY}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(name)}`;
 }
+function releasePageURL(version) {
+  return `https://github.com/${REPOSITORY}/releases/tag/v${encodeURIComponent(parseVersion(version).raw)}`;
+}
 function safeNetworkURL(value) {
   const url = new URL(value);
   if (url.protocol !== 'https:' || url.username || url.password || url.port || !DOWNLOAD_HOSTS.has(url.hostname)) throw new Error('更新服务地址不受信任。');
@@ -85,7 +88,7 @@ function validateReleaseManifest(payload, { platform, arch, channel, release }) 
     ...(platform === 'darwin' ? { edSignature: item.ed_signature } : {}), minimumSystemVersion: item.minimum_system_version,
     notes: String(payload.notes || '').slice(0, 8000), publishedAt: payload.published_at, repository: REPOSITORY });
 }
-async function findReleaseUpdate({ currentVersion, channel, platform, arch, fetcher = fetchJSON }) {
+async function readChannelRelease({ currentVersion, channel, fetcher = fetchJSON }) {
   if (!['stable', 'beta'].includes(channel) || versionChannel(currentVersion) !== channel) throw new Error('当前版本与更新通道不匹配。');
   let release;
   try {
@@ -97,13 +100,23 @@ async function findReleaseUpdate({ currentVersion, channel, platform, arch, fetc
       release = beta.sort((a, b) => compareVersions(b.tag_name.slice(1), a.tag_name.slice(1)))[0];
     }
   } catch (error) { if (error.statusCode !== 404) throw error; }
-  if (!release) return { status: 'current', currentVersion, version: currentVersion, checkedAt: new Date().toISOString() };
+  if (!release) return { result: { status: 'current', currentVersion, version: currentVersion, checkedAt: new Date().toISOString() } };
   if (release.draft !== false || release.prerelease !== (channel === 'beta') || !/^v/u.test(release.tag_name || '') || versionChannel(release.tag_name.slice(1)) !== channel) throw new Error('GitHub 发布状态与当前通道不匹配。');
   const latest = release.tag_name.slice(1), comparison = compareVersions(latest, currentVersion);
-  if (comparison <= 0) return { status: comparison < 0 ? 'ahead' : 'current', currentVersion, version: latest, checkedAt: new Date().toISOString() };
+  return { release, result: { status: comparison > 0 ? 'available' : comparison < 0 ? 'ahead' : 'current', currentVersion, version: latest, checkedAt: new Date().toISOString() } };
+}
+async function findReleaseAnnouncement(options) {
+  const { result } = await readChannelRelease(options);
+  return result.status === 'available'
+    ? { ...result, repository: REPOSITORY, channel: options.channel, externalOnly: true, releaseURL: releasePageURL(result.version) }
+    : result;
+}
+async function findReleaseUpdate({ currentVersion, channel, platform, arch, fetcher = fetchJSON }) {
+  const { release, result } = await readChannelRelease({ currentVersion, channel, fetcher });
+  if (result.status !== 'available') return result;
   const manifests = release.assets?.filter((item) => item.name === 'update-manifest.json');
   if (manifests?.length !== 1 || manifests[0].state !== 'uploaded' || manifests[0].size > 64 * 1024 || manifests[0].browser_download_url !== assetURL(release.tag_name, 'update-manifest.json')) throw new Error('该版本尚未完整提供应用内更新，请稍后重试。');
   const payload = await fetcher(manifests[0].browser_download_url, { maxBytes: 64 * 1024 });
-  return { status: 'available', currentVersion, checkedAt: new Date().toISOString(), ...validateReleaseManifest(payload, { channel, platform, arch, release }) };
+  return { ...result, ...validateReleaseManifest(payload, { channel, platform, arch, release }) };
 }
-module.exports = { REPOSITORY, parseVersion, compareVersions, versionChannel, assetURL, safeNetworkURL, fetchJSON, base64Digest, validateReleaseManifest, findReleaseUpdate };
+module.exports = { REPOSITORY, parseVersion, compareVersions, versionChannel, assetURL, releasePageURL, safeNetworkURL, fetchJSON, base64Digest, validateReleaseManifest, findReleaseAnnouncement, findReleaseUpdate };

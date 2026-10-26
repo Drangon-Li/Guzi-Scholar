@@ -20,7 +20,7 @@ function harness() {
     translationScope: () => 'all', aiServiceEnabled: () => true,
     frameDocument: () => ({}),
     translatableBlocks: () => [{ dataset: { blockId: 'body' }, matches: () => false }],
-    hasUsableTranslation: () => false, paragraphSource: () => ({ text: 'A paragraph.' }),
+    hasUsableTranslation: () => false, paragraphTranslationSource: () => ({ text: 'A paragraph.' }),
     documentTitleFor: (id) => id, syncTranslationControls: () => {},
     updateTranslationProgress: () => {}, showToast: () => {}, setPanelStatus: () => {},
     releaseClosedDocumentCaches: () => {},

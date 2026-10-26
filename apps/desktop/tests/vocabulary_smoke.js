@@ -234,8 +234,55 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><style>body{ma
     await firstCard.locator('[data-vocab-action="source"]').first().click();
     await page.locator('#toast').filter({ hasText: '未找到可确认的原文位置' }).waitFor();
     assert(vocabularyPosts.every((post) => post.source.surface === 'source' && post.meaning !== '当前选区已是译文'));
+    const aiCallsBeforePaging = { translations: translationRequests.length, explanations: explanations.length };
+    for (let index = 0; index < 25; index += 1) {
+      const response = await page.request.post(`${baseURL}/api/vocabulary`, { data: { term: `pagination fixture ${index}`, meaning: '完整释义'.repeat(80), tags: ['分页测试'], source: { ...first.sources[0], quote: 'A source sentence. '.repeat(30) } } });
+      assert(response.ok(), await response.text());
+      const saved = (await response.json()).entry;
+      await page.request.post(`${baseURL}/api/vocabulary`, { data: { term: saved.term, source: { ...first.sources[0], quote: 'A second source sentence.' }, tags: ['分页测试'] } });
+    }
+    await page.locator('[data-view="vocabulary-view"]').click();
+    await vocab.locator('#vocabulary-search').fill('pagination fixture');
+    await vocab.locator('#vocabulary-reload').click();
+    await vocab.locator('#vocabulary-range').filter({ hasText: '显示 1–12 / 25' }).waitFor().catch(async (error) => {
+      console.error('Pagination state:', await vocab.locator('#vocabulary-view').evaluate((node) => ({ range: node.querySelector('#vocabulary-range')?.textContent, page: node.querySelector('#vocabulary-page')?.textContent, query: node.querySelector('#vocabulary-search')?.value, status: node.querySelector('#vocabulary-filter')?.value, tag: node.querySelector('#vocabulary-tag')?.value, count: node.querySelector('#vocabulary-count')?.textContent, message: node.querySelector('#vocabulary-status')?.textContent })));
+      const stored = (await (await page.request.get(`${baseURL}/api/vocabulary`)).json()).entries;
+      console.error('Pagination fixtures:', stored.filter((entry) => entry.term.startsWith('pagination fixture')).map((entry) => ({ term: entry.term, tags: entry.tags, status: entry.review.status })));
+      throw error;
+    });
+    assert.equal(await vocab.locator('.vocabulary-card').count(), 12);
+    assert.equal(await vocab.locator('.vocabulary-list').evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(' ').length), 2);
+    await page.screenshot({ path: '/tmp/guzi-vocabulary-pagination.png' });
+    const pagedCard = vocab.locator('.vocabulary-card').first();
+    const longMeaning = pagedCard.locator('.vocabulary-long-content').first();
+    assert.equal(await longMeaning.getAttribute('open'), null);
+    await longMeaning.locator('summary').click();
+    assert.equal((await longMeaning.locator('.vocabulary-meaning').innerText()).length, '完整释义'.repeat(80).length);
+    await pagedCard.locator('.vocabulary-more-sources > summary').click();
+    assert.match(await pagedCard.locator('.vocabulary-more-sources').innerText(), /A second source sentence/u);
+    await vocab.locator('[data-vocab-action="next-page"]').click();
+    await vocab.locator('#vocabulary-range').filter({ hasText: '显示 13–24 / 25' }).waitFor();
+    const draftCard = vocab.locator('.vocabulary-card').first();
+    const draftId = await draftCard.getAttribute('data-vocabulary-id');
+    await draftCard.locator('[data-vocab-action="edit"]').click();
+    await draftCard.locator('[name="note"]').fill('跨刷新保留草稿');
+    await vocab.locator('#vocabulary-reload').click();
+    await vocab.locator('#vocabulary-status').waitFor({ state: 'hidden' });
+    assert.equal(await vocab.locator(`[data-vocabulary-id="${draftId}"] [name="note"]`).inputValue(), '跨刷新保留草稿');
+    await vocab.locator('[data-vocab-action="next-page"]').click();
+    assert.equal(await vocab.locator('.vocabulary-card').count(), 1);
+    assert(await vocab.locator('[data-vocab-action="next-page"]').isDisabled());
+    await vocab.locator('#vocabulary-start-review').click();
+    assert.match(await vocab.locator('.vocabulary-review-heading').innerText(), /复习 1 \/ 25/u);
+    await vocab.locator('[data-vocab-action="end-review"]').click();
+    await vocab.locator('#vocabulary-search').fill('pagination fixture 2');
+    assert.match(await vocab.locator('#vocabulary-page').innerText(), /第 1 \/ 1 页/u);
+    await page.setViewportSize({ width: 620, height: 960 });
+    assert.equal(await vocab.locator('.vocabulary-list').evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(' ').length), 1);
+    assert(await vocab.locator('body').evaluate((node) => node.scrollWidth <= node.ownerDocument.documentElement.clientWidth), 'Narrow layout must not overflow horizontally');
+    assert.deepEqual({ translations: translationRequests.length, explanations: explanations.length }, aiCallsBeforePaging, 'Browsing pages must not generate AI requests');
     assert.deepEqual(errors, []);
-    console.log('Vocabulary UI smoke passed: reuse, deduplication, source snapshots, filters, editing, review, retry, keepalive, and safe jumps');
+    console.log('Vocabulary UI smoke passed: reuse, deduplication, source snapshots, filters, editing, review, retry, keepalive, safe jumps, pagination, draft retention, long content and responsive cards');
   } finally {
     releaseDelayed();
     releaseExplanation();
