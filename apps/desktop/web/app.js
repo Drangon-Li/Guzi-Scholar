@@ -154,6 +154,12 @@
   const readerBlockIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,159}$/u;
   const articleNoteDraftStorageKey = 'my-scholar-article-note-drafts-v1';
   const translationPreferencesStorageKey = 'my-scholar-translation-preferences-v1';
+  const translationDisplayStorageKey = 'my-scholar-translation-display-v1';
+  let translationDisplayChoices = {};
+  try {
+    const saved = JSON.parse(persistentStateGet(translationDisplayStorageKey) || '{}');
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) translationDisplayChoices = saved;
+  } catch (_) { /* Keep existing translations when a preference cannot be read. */ }
   try {
     state.translationPreferences = normalizedTranslationPreferences(JSON.parse(persistentStateGet(translationPreferencesStorageKey) || 'null'));
   } catch (_) { /* Ignore malformed local display preferences. */ }
@@ -420,32 +426,29 @@
 
   function translationsForActiveProfile(records) {
     const values = Array.isArray(records) ? records : [];
-    if (state.health?.readonly === true) {
-      const normalizedLanguage = (value) => ['zh', 'ZH', '中文', 'Chinese'].includes(String(value)) ? 'zh' : String(value).toLowerCase();
-      return values.filter((record) => normalizedLanguage(record?.target_language) === normalizedLanguage(translationTargetLanguage()));
-    }
-    const profileId = translationProfileId();
-    // An empty profile must never render a translation produced by a previous
-    // model. Cache records remain on disk for an explicit switch-back, but
-    // they are not eligible while no active profile is configured.
-    if (!profileId) return [];
-    return values.filter((record) => String(record?.profile_id || '') === profileId);
+    const normalizedLanguage = (value) => ['zh', 'ZH', '中文', 'Chinese'].includes(String(value)) ? 'zh' : String(value).toLowerCase();
+    const choices = translationDisplayChoices[state.activeJob?.job_id] || {};
+    return values.filter((record) => normalizedLanguage(record?.target_language) === normalizedLanguage(translationTargetLanguage()))
+      .slice().sort((left, right) => {
+        const chosen = (record) => choices[record.block_id] === translationRecordIdentity(record) ? 1 : 0;
+        return chosen(right) - chosen(left) || String(right.updated_at || '').localeCompare(String(left.updated_at || ''));
+      });
   }
 
-  function clearRenderedTranslations() {
-    const doc = frameDocument();
-    clearReaderSentenceHover(doc);
-    readerSentenceState.pairs = [];
-    readerMounts.forEach((mount) => {
-      const mountedDoc = mount.frame.contentDocument;
-      mountedDoc?.querySelectorAll('.my-scholar-translation').forEach((node) => node.remove());
-      if (mountedDoc) {
-        delete readerDocumentState(mountedDoc).annotationsKey;
-        applyTranslationVisibility(mountedDoc);
-      }
-    });
-    rebuildReaderSentencePairs(doc);
-    refreshReaderSearch();
+  function translationRecordIdentity(record) {
+    return record.cache_key || [record.profile_id || '', record.source_hash || '', record.alignment_version || ''].join(':');
+  }
+
+  function rememberDisplayedTranslation(jobId, record) {
+    if (!jobId || !record?.block_id) return;
+    translationDisplayChoices[jobId] ||= {};
+    translationDisplayChoices[jobId][record.block_id] = translationRecordIdentity(record);
+    persistentStateSet(translationDisplayStorageKey, JSON.stringify(translationDisplayChoices));
+  }
+
+  function translationProviderLabel(record) {
+    const snapshot = record?.provider_snapshot || {};
+    return snapshot.model || record?.model || snapshot.provider || record?.provider || '先前保存的译文';
   }
 
   function translationCacheFor(jobId = state.activeJob?.job_id) {
@@ -456,8 +459,7 @@
 
   function setTranslationCacheFor(jobId, records) {
     const key = String(jobId || '');
-    // Keep records for previous profiles so switching back can reuse them;
-    // render/lookups still scope reads to the active profile.
+    // Display choices and request-cache identities are independent.
     const value = Array.isArray(records) ? records : [];
     if (key && (state.openDocuments.some((job) => job.job_id === key) || state.translationRuns.get(key)?.running)) state.translationCaches.set(key, value);
     if (!key || key === state.activeJob?.job_id) state.translationCache = value;
@@ -3017,12 +3019,14 @@
     if (dialog?.open) dialog.close();
     if (resolver) resolver(Boolean(value));
   }
-  function requestConfirmation(message, title = '请确认') {
+  function requestConfirmation(message, title = '请确认', { accept = '确定', cancel = '取消' } = {}) {
     const dialog = $('#confirm-dialog');
     if (!dialog) return Promise.resolve(false);
     if (state.confirmResolver) resolveConfirmation(false);
     $('#confirm-title').textContent = title;
     $('#confirm-message').textContent = message;
+    $('#confirm-accept').textContent = accept;
+    $('#confirm-cancel').textContent = cancel;
     dialog.showModal();
     return new Promise((resolve) => { state.confirmResolver = resolve; });
   }
@@ -3800,14 +3804,21 @@
   $('#reader-search-close')?.addEventListener('click', () => closeReaderSearch());
   document.addEventListener('keydown', handleReaderSearchShortcut, true);
 
-  function readerSentenceSegments(value) {
+  function readerSentenceSegments(value, protectedRanges = []) {
     const text = String(value || '');
     const segments = [];
     let start = 0;
     const isBoundary = (index) => {
       const character = text[index];
       if (!character || !/[.!?。！？；;\n]/u.test(character)) return false;
+      if (protectedRanges.some((range) => index >= range.start && index < range.end)) return false;
       if (character === '.' && /\d/u.test(text[index - 1] || '') && /\d/u.test(text[index + 1] || '')) return false;
+      if (character === '.') {
+        const prefix = text.slice(0, index + 1);
+        if (/\b(?:et\s+al|e\.g|i\.e|Fig|Figs|Eq|Eqs|Sec|Secs|Tab|Dr|Prof|Mr|Mrs|vs|etc|No|Vol)\.$/iu.test(prefix)) return false;
+        if (/[A-Za-z]\.[A-Za-z]$/u.test(text.slice(Math.max(0, index - 1), index + 2))) return false;
+        if (/\b[A-Z]\.$/u.test(prefix) && /^\s+[A-Z][a-z]/u.test(text.slice(index + 1))) return false;
+      }
       return true;
     };
     const push = (from, to) => {
@@ -3831,6 +3842,30 @@
     return segments;
   }
 
+  function readerBlockSentenceSegments(block, doc = block?.ownerDocument) {
+    const atoms = new Map();
+    let offset = 0;
+    for (const node of textNodes(block, doc)) {
+      const atom = node.parentElement?.closest('math, .math-source-visual, sup, sub, a');
+      if (atom && block.contains(atom)) {
+        const bounds = atoms.get(atom) || { start: offset, end: offset };
+        bounds.end = offset + node.nodeValue.length;
+        atoms.set(atom, bounds);
+      }
+      offset += node.nodeValue.length;
+    }
+    const text = canonicalBlockText(block, doc);
+    if (block.matches('ul, ol')) {
+      return [...block.querySelectorAll(':scope > li')].flatMap((item) => {
+        const start = textOffset(block, item, 0, doc);
+        const end = textOffset(block, item, item.childNodes.length, doc);
+        const protectedRanges = [...atoms.values()].map((range) => ({ start: range.start - start, end: range.end - start }));
+        return readerSentenceSegments(text.slice(start, end), protectedRanges).map((range) => ({ start: range.start + start, end: range.end + start }));
+      });
+    }
+    return readerSentenceSegments(text, [...atoms.values()]);
+  }
+
   function sentenceRanges(root, segments, doc = frameDocument()) {
     return (segments || []).map((segment) => rangeAtOffsets(root, segment.start, segment.end, doc)).filter((range) => range && !range.collapsed);
   }
@@ -3852,11 +3887,52 @@
     readerSentenceState.revision += 1;
     readerSentenceState.usingCustomHighlight = false;
     readerSentenceState.toolbarPointerInside = false;
+    readerSentenceState.toolbarFocusInside = false;
+    readerSentenceState.hoverOrigin = null;
     if (clearPopover && state.selection?.origin === 'sentence-hover') clearSelectionPopover({ clearState: true, immediate: true });
   }
 
-  function rebuildReaderSentencePairs(doc = frameDocument()) {
-    clearReaderSentenceHover(readerSentenceState.doc || doc);
+  function readerSentenceToolbarLocked() {
+    return Boolean(readerSentenceState.toolbarPointerInside || readerSentenceState.toolbarFocusInside
+      || $('#selection-popover')?.contains(document.activeElement));
+  }
+
+  function readerSentenceHoverProtectedAtPoint(doc, point) {
+    const pair = readerSentenceState.activePair;
+    const popover = $('#selection-popover');
+    if (doc !== readerSentenceState.doc || state.selection?.origin !== 'sentence-hover' || !pair || !popover || popover.hidden) return false;
+    if (readerSentenceToolbarLocked()) return true;
+    const rects = [...pair.sourceRange.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0);
+    if (rects.some((rect) => point.x >= rect.left && point.x <= rect.left + rect.width && point.y >= rect.top && point.y <= rect.bottom)) {
+      readerSentenceState.hoverOrigin = point;
+      return false;
+    }
+    const frame = $('#html-preview');
+    const frameRect = frame.getBoundingClientRect();
+    const scaleX = frame.clientWidth ? frameRect.width / frame.clientWidth : 1;
+    const scaleY = frame.clientHeight ? frameRect.height / frame.clientHeight : 1;
+    const toolbar = popover.getBoundingClientRect();
+    const previousPoint = readerSentenceState.hoverOrigin || readerSentenceState.hoverPoint;
+    const origin = previousPoint && rects.some((rect) => previousPoint.x >= rect.left && previousPoint.x <= rect.left + rect.width && previousPoint.y >= rect.top && previousPoint.y <= rect.bottom)
+      ? previousPoint : { x: rects.at(-1)?.left, y: rects.at(-1)?.bottom };
+    if (!Number.isFinite(origin.x) || !Number.isFinite(origin.y)) return false;
+    const start = { x: frameRect.left + origin.x * scaleX, y: frameRect.top + origin.y * scaleY };
+    const cursor = { x: frameRect.left + point.x * scaleX, y: frameRect.top + point.y * scaleY };
+    const target = { left: toolbar.left - 12, right: toolbar.right + 12, top: toolbar.top - 12, bottom: toolbar.bottom + 12 };
+    if (cursor.x >= target.left && cursor.x <= target.right && cursor.y >= target.top && cursor.y <= target.bottom) return true;
+    let edge;
+    if (start.y < target.top) edge = [{ x: target.left, y: target.top }, { x: target.right, y: target.top }];
+    else if (start.y > target.bottom) edge = [{ x: target.left, y: target.bottom }, { x: target.right, y: target.bottom }];
+    else if (start.x < target.left) edge = [{ x: target.left, y: target.top }, { x: target.left, y: target.bottom }];
+    else edge = [{ x: target.right, y: target.top }, { x: target.right, y: target.bottom }];
+    const cross = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    const sides = [cross(start, edge[0], cursor), cross(edge[0], edge[1], cursor), cross(edge[1], start, cursor)];
+    return sides.every((side) => side >= 0) || sides.every((side) => side <= 0);
+  }
+
+  function rebuildReaderSentencePairs(doc = frameDocument(), { preserveHover = false } = {}) {
+    const activePair = preserveHover && readerSentenceState.doc === doc ? readerSentenceState.activePair : null;
+    if (!activePair) clearReaderSentenceHover(readerSentenceState.doc || doc);
     readerSentenceState.doc = doc || null;
     readerSentenceState.pairs = [];
     if (!doc) return;
@@ -3864,13 +3940,28 @@
       .filter((block) => !block.classList.contains('my-scholar-translation') && !block.closest('.my-scholar-translation,.annotation-note-popover') && translatableParagraph(block));
     sources.forEach((source) => {
       const blockId = String(source.dataset.blockId || source.dataset.translateBlockId || '');
-      const sourceSegments = readerSentenceSegments(canonicalBlockText(source, doc));
+      const sourceSegments = readerBlockSentenceSegments(source, doc);
       const sourceRanges = sentenceRanges(source, sourceSegments, doc);
       sourceRanges.forEach((sourceRange, sourceIndex) => {
-        readerSentenceState.pairs.push({ id: `${blockId}:${sourceIndex}`, blockId, source, sourceRange, sourceIndex, sourceCount: sourceRanges.length });
+        readerSentenceState.pairs.push({ id: `${blockId}:${sourceIndex}`, blockId, source, sourceRange, sourceIndex, sourceCount: sourceRanges.length, sentenceId: `s${sourceSegments[sourceIndex].start}-${sourceSegments[sourceIndex].end}` });
       });
     });
     readerDocumentState(doc).sentences = readerSentenceState.pairs;
+    if (activePair) {
+      const index = readerSentenceState.pairs.findIndex((pair) => pair.id === activePair.id && pair.sentenceId === activePair.sentenceId);
+      if (index < 0) { clearReaderSentenceHover(doc); return; }
+      // Pending hover responses retain this object while translation replaces its DOM range.
+      Object.assign(activePair, readerSentenceState.pairs[index]);
+      readerSentenceState.pairs[index] = activePair;
+      if (state.selection?.origin === 'sentence-hover') {
+        const selection = readerSentenceSelection(activePair, doc);
+        if (!selection || selection.quote !== state.selection.quote) { clearReaderSentenceHover(doc); return; }
+        Object.assign(state.selection, selection);
+        const highlight = readerHighlightForRanges(doc, [activePair.sourceRange]);
+        if (highlight) readerHighlightRegistry(doc)?.set(readerSentenceHighlightName, highlight);
+        positionReaderSentenceTooltip(doc);
+      }
+    }
   }
 
   function activateReaderSentencePairs(doc) {
@@ -3934,7 +4025,7 @@
     return Boolean(annotation && !isAIAnnotation(annotation) && (String(annotation.label || '').trim() || hasAnnotationNote(annotation)));
   }
 
-  function paintReaderSentenceTooltip(pair, text, { status = '', formulas = [], markers = [], emphasis = [] } = {}) {
+  function paintReaderSentenceTooltip(pair, text, { status = '', formulas = [], markers = [], emphasis = [], label = '' } = {}) {
     const doc = readerSentenceState.doc;
     const annotation = readerSentenceState.annotation;
     if (!doc || doc !== frameDocument() || state.health?.readonly || doc.getSelection()?.toString().trim() || doc.querySelector('.annotation-note-popover') || readerSentenceState.activePairId !== pair.id) return;
@@ -3975,6 +4066,12 @@
       if (status && !text) renderSelectionTranslation('loading');
       else if (status) renderSelectionTranslation('error', { message: text || status });
       else renderSelectionTranslation('ready', { text, formulas, markers, emphasis });
+      if (label) {
+        const hint = document.createElement('small');
+        hint.className = 'selection-translation-source';
+        hint.textContent = label;
+        $('#selection-translation-result').prepend(hint);
+      }
     }
     positionReaderSentenceTooltip(doc);
   }
@@ -3997,11 +4094,12 @@
     if (!pair) {
       window.clearTimeout(readerSentenceState.closeTimer);
       readerSentenceState.closeTimer = window.setTimeout(() => {
-        if (!readerSentenceState.toolbarPointerInside && !$('#selection-popover')?.contains(document.activeElement)) clearReaderSentenceHover(doc);
-      }, 260);
+        if (doc === readerSentenceState.doc && !readerSentenceToolbarLocked()) clearReaderSentenceHover(doc);
+      }, 600);
       return;
     }
     window.clearTimeout(readerSentenceState.closeTimer);
+    if (!retry && state.selection?.origin === 'sentence-hover' && readerSentenceToolbarLocked()) return;
     if (!retry && readerSentenceState.activePairId === pair.id && readerSentenceState.annotation?.id === annotation?.id) return;
     clearReaderSentenceHover(doc);
     readerSentenceState.activePairId = pair.id;
@@ -4024,6 +4122,16 @@
       const source = paragraphSource(fragment);
       if (!source.text.trim()) return;
       const cached = cachedTranslationForSource(null, source);
+      const displayed = [...doc.querySelectorAll(`.my-scholar-translation[data-for="${cssEscape(pair.blockId)}"]`)]
+        .find((node) => !node.classList.contains('is-pending') && !node.classList.contains('is-error') && (!node.dataset.sentenceId || node.dataset.sentenceId === pair.sentenceId));
+      if (displayed?.translationResult && (!cached?.text || displayed.dataset.sentenceId)) {
+        paint(displayed.translationResult.text, { ...displayed.translationResult, label: displayed.dataset.sentenceId ? '已保存的句子译文' : '本段译文' });
+        return;
+      }
+      if (!cached?.text && doc.querySelector(`.my-scholar-translation.is-pending[data-for="${cssEscape(pair.blockId)}"]`)) {
+        paint('', { status: '本段正在翻译，请稍候…' });
+        return;
+      }
       if (!cached?.text && !aiServiceEnabled('translation')) {
         paint('请在设置 → AI 服务中配置翻译提供商。', { status: '尚未配置翻译服务' });
         return;
@@ -4065,6 +4173,7 @@
         return;
       }
       if (notePopoverHover.pinned) { clearReaderSentenceHover(doc); return; }
+      const point = { x: event.clientX, y: event.clientY };
       const noteTrigger = event.target?.closest?.('.annotation-note-trigger');
       if (noteTrigger) { scheduleNoteHoverOpen(noteTrigger); return; }
       let noteAnnotation = null;
@@ -4078,6 +4187,14 @@
           }
           mark = mark.parentElement?.closest(':is(mark, mrow)[data-annotation-id]');
         }
+      }
+      const differentNote = noteAnnotation && noteAnnotation.id !== readerSentenceState.annotation?.id;
+      if (!differentNote && readerSentenceHoverProtectedAtPoint(doc, point)) {
+        window.clearTimeout(readerSentenceState.closeTimer);
+        if (readerSentenceState.pointerFrame) doc.defaultView.cancelAnimationFrame(readerSentenceState.pointerFrame);
+        readerSentenceState.pointerFrame = 0;
+        readerSentenceState.pendingPoint = null;
+        return;
       }
       cancelNoteHoverOpen();
       scheduleNoteHoverClose();
@@ -4125,10 +4242,11 @@
     doc.addEventListener('keydown', (event) => {
       if (doc !== frameDocument() || event.key !== 'Escape') return;
       dismissHover();
+      clearSelectionPopover({ clearState: true, immediate: true });
       if (!event.defaultPrevented) closeInlineAnnotation(doc);
     });
     doc.defaultView?.addEventListener('blur', () => {
-      if (doc === frameDocument() && !readerSentenceState.toolbarPointerInside && !$('#selection-popover')?.contains(document.activeElement)) dismissHover();
+      if (doc === frameDocument()) setReaderSentenceHover(null);
     }, { passive: true });
   }
   function readerURLIdentity(value) {
@@ -4155,6 +4273,7 @@
   }
 
   function deactivateReaderMount() {
+    clearAnnotationDrawAnimation(frameDocument());
     clearChatReferenceHighlight();
     closeQuickPreview();
     if (mediaResize.active && mediaResize.doc === frameDocument()) finishMediaResize(null, true);
@@ -4945,10 +5064,30 @@
     if (event.type === 'copy' && event.clipboardData) {
       const selection = doc.getSelection();
       if (!selection?.rangeCount || selection.isCollapsed) return;
-      const selected = selection.getRangeAt(0).cloneContents();
-      if (!selected.querySelector('.math-source-visual, .math-source-text, .paragraph-translate-trigger, .annotation-note-trigger')) return;
-      const text = textNodes(selected, doc).map((node) => node.nodeValue).join('');
-      if (text) { event.clipboardData.setData('text/plain', text); event.preventDefault(); }
+      const range = selection.getRangeAt(0);
+      const selected = range.cloneContents();
+      if (!selected.querySelector('.reader-source-sentence, .my-scholar-translation, .math-source-visual, .math-source-text, math, semantics, annotation, .katex-html, button, input, textarea, select, .annotation-note-popover, .translation-source-label, .translation-retained-status, [hidden], [aria-hidden="true"], [style]')) return;
+      const start = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer;
+      const mode = doc.documentElement.dataset.translationDisplay || state.translationPreferences.displayMode;
+      const copyTranslation = mode === 'translation' || mode !== 'original' && Boolean(start.closest?.('.my-scholar-translation'));
+      selected.querySelectorAll('button, input, textarea, select, .paragraph-translate-trigger, .annotation-note-trigger, .annotation-note-popover, .translation-source-label, .translation-retained-status').forEach((node) => node.remove());
+      selected.querySelectorAll(copyTranslation ? '.reader-source-sentence, .my-scholar-translation-original:not(.reader-sentence-pairs)' : '.my-scholar-translation').forEach((node) => node.remove());
+      selected.querySelectorAll('.math-source-visual').forEach((node) => node.replaceWith(node.querySelector('.math-source-text')?.textContent || node.textContent || ''));
+      selected.querySelectorAll('math, semantics').forEach((node) => {
+        const tex = node.querySelector('annotation[encoding="application/x-tex"], annotation[encoding="application/tex"]')?.textContent;
+        node.querySelectorAll('annotation, annotation-xml').forEach((annotation) => annotation.remove());
+        node.replaceWith(tex || node.textContent || '');
+      });
+      selected.querySelectorAll('annotation, annotation-xml').forEach((node) => node.remove());
+      selected.querySelectorAll('.katex-html, [hidden], [aria-hidden="true"], [style]').forEach((node) => {
+        if (node.matches('.katex-html, [hidden], [aria-hidden="true"]') || node.style.display === 'none' || node.style.visibility === 'hidden') node.remove();
+      });
+      const walker = doc.createTreeWalker(selected, doc.defaultView.NodeFilter.SHOW_TEXT);
+      const parts = [];
+      let node;
+      while ((node = walker.nextNode())) parts.push(node.nodeValue);
+      event.clipboardData.setData('text/plain', parts.join(''));
+      event.preventDefault();
     }
   }
 
@@ -5030,12 +5169,17 @@
     readerSentenceState.toolbarPointerInside = false;
     setReaderSentenceHover(null);
   });
-  $('#selection-popover')?.addEventListener('focusin', () => window.clearTimeout(readerSentenceState.closeTimer));
+  $('#selection-popover')?.addEventListener('focusin', () => {
+    if (state.selection?.origin === 'sentence-hover') readerSentenceState.toolbarFocusInside = true;
+    window.clearTimeout(readerSentenceState.closeTimer);
+  });
   $('#selection-popover')?.addEventListener('focusout', (event) => {
-    if (state.selection?.origin === 'sentence-hover' && !event.currentTarget.contains(event.relatedTarget)) setReaderSentenceHover(null);
+    if (state.selection?.origin !== 'sentence-hover' || event.currentTarget.contains(event.relatedTarget)) return;
+    readerSentenceState.toolbarFocusInside = false;
+    setReaderSentenceHover(null);
   });
   $('#selection-popover')?.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') clearReaderSentenceHover();
+    if (event.key === 'Escape') clearSelectionPopover({ clearState: true, immediate: true });
   });
 
   function positionSelectionPopover() {
@@ -5095,6 +5239,20 @@
     window.requestAnimationFrame(positionSelectionPopover);
   }
 
+  function displayedSentenceTranslation(selection, doc = frameDocument()) {
+    if (selection?.surface !== 'paper' || !selection.block_id || !doc) return null;
+    const block = translationTarget(selection.block_id, doc);
+    if (!block || !Number.isInteger(selection.start) || !Number.isInteger(selection.end)) return null;
+    const selected = canonicalBlockText(block, doc).slice(selection.start, selection.end);
+    if (!selected.trim() || selected !== selection.quote) return null;
+    const start = selection.start + selected.length - selected.trimStart().length;
+    const end = selection.end - selected.length + selected.trimEnd().length;
+    const sentenceId = `s${start}-${end}`;
+    const translated = [...block.querySelectorAll('.reader-sentence-translation:not(.is-pending):not(.is-error)')]
+      .find((node) => node.dataset.for === selection.block_id && node.dataset.sentenceId === sentenceId);
+    return translated?.translationResult?.text ? translated.translationResult : null;
+  }
+
   function beginSelectionTranslation(selection, { immediate = false } = {}) {
     if (selection?.origin === 'sentence-hover') {
       const pair = readerSentenceState.activePair;
@@ -5113,6 +5271,14 @@
     const token = ++selectionTranslationToken;
     if (selection.surface === 'translation') {
       renderSelectionTranslation('ready', { text: '当前选区已是译文，可直接高亮、划线、记录笔记或加入 Chat。' });
+      return;
+    }
+    const displayed = immediate ? null : displayedSentenceTranslation(selection);
+    if (displayed) {
+      selectionTranslationTimer = null;
+      selectionTranslationAbortController = null;
+      selectionTranslationRecord = { key, jobId: state.activeJob?.job_id, text: displayed.text, keepForVocabulary: false, promise: Promise.resolve(displayed.text) };
+      renderSelectionTranslation('ready', displayed);
       return;
     }
     if (!aiServiceEnabled('translation')) {
@@ -5168,6 +5334,9 @@
     let node;
     while ((node = walker.nextNode())) {
       if (node.parentElement?.closest('.annotation-note-trigger, .paragraph-translate-trigger')) continue;
+      const translated = node.parentElement?.closest('.reader-sentence-translation');
+      if (translated && root !== translated && !root.closest?.('.reader-sentence-translation')) continue;
+      if (node.parentElement?.closest('.translation-source-label, .translation-retained-status')) continue;
       if (node.nodeValue) nodes.push(node);
     }
     return nodes;
@@ -5240,6 +5409,94 @@
     return start >= 0 && end > start ? rangeAtOffsets(root, start, end, doc) : null;
   }
 
+  function translationAnnotationGroup(sourceBlockId, doc = frameDocument()) {
+    if (!sourceBlockId || !doc) return null;
+    const roots = [...doc.querySelectorAll(`.my-scholar-translation[data-for="${cssEscape(sourceBlockId)}"]`)]
+      .filter((root) => (root.dataset.translationFor || root.dataset.for) === sourceBlockId && !root.classList.contains('is-pending') && !root.classList.contains('is-error'));
+    if (!roots.length) return null;
+    let text = '';
+    // Match persisted aligned text without inserting separators into the source DOM.
+    const spans = roots.map((root, index) => {
+      if (index) text += ' ';
+      const start = text.length;
+      text += canonicalBlockText(root, doc);
+      return { root, start, end: text.length };
+    });
+    return { sourceBlockId, spans, text };
+  }
+
+  function translationGroupSelectionOffsets(group, range, doc = frameDocument()) {
+    const offsetAt = (node, offset) => {
+      const span = group.spans.find(({ root }) => root === node || root.contains(node));
+      if (!span) return null;
+      const local = textOffset(span.root, node, offset, doc);
+      return Number.isFinite(local) ? span.start + local : null;
+    };
+    let start = offsetAt(range.startContainer, range.startOffset);
+    let end = offsetAt(range.endContainer, range.endOffset);
+    if (Number.isFinite(start) && Number.isFinite(end)) {
+      const quote = group.text.slice(start, end);
+      start += quote.length - quote.trimStart().length;
+      end -= quote.length - quote.trimEnd().length;
+    }
+    return { start, end, text: group.text };
+  }
+
+  function translationGroupAnchor(group, start, end, doc = frameDocument()) {
+    if (!group || !Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || end > group.text.length) return null;
+    const ranges = group.spans.filter((span) => end > span.start && start < span.end).map((span) => ({
+      root: span.root,
+      range: rangeAtOffsets(span.root, Math.max(0, start - span.start), Math.min(span.end - span.start, end - span.start), doc),
+    }));
+    return ranges.length && ranges.every((entry) => entry.range && !entry.range.collapsed) ? { root: ranges[0].root, ranges } : null;
+  }
+
+  function resolveTranslationGroupAnnotation(annotation, sourceBlockId, doc = frameDocument(), { useOffsets = false } = {}) {
+    const group = translationAnnotationGroup(sourceBlockId, doc);
+    if (!group || annotation.page != null && !group.spans.some(({ root }) => String(root.dataset.page || '') === String(annotation.page))) return null;
+    const quote = String(annotation.quote || '');
+    const start = Number(annotation.start);
+    const end = Number(annotation.end);
+    if (useOffsets && Number.isFinite(start) && Number.isFinite(end) && group.text.slice(start, end) === quote) return translationGroupAnchor(group, start, end, doc);
+    const matches = [];
+    let cursor = quote ? group.text.indexOf(quote) : -1;
+    while (cursor >= 0) {
+      const prefix = String(annotation.quote_prefix || '');
+      const suffix = String(annotation.quote_suffix || '');
+      if ((!prefix || group.text.slice(Math.max(0, cursor - prefix.length), cursor) === prefix)
+        && (!suffix || group.text.slice(cursor + quote.length, cursor + quote.length + suffix.length) === suffix)) matches.push(cursor);
+      cursor = group.text.indexOf(quote, cursor + 1);
+    }
+    return matches.length === 1 ? translationGroupAnchor(group, matches[0], matches[0] + quote.length, doc) : null;
+  }
+
+  function selectionTextRange(range, doc = frameDocument()) {
+    const root = range.commonAncestorContainer;
+    const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const normalized = range.cloneRange();
+    let first = null;
+    let last = null;
+    let node = root.nodeType === Node.TEXT_NODE ? root : walker.nextNode();
+    while (node) {
+      if (!node.parentElement?.closest('.annotation-note-trigger, .paragraph-translate-trigger, .translation-source-label, .translation-retained-status') && range.intersectsNode(node)) {
+        const overlap = doc.createRange();
+        overlap.selectNodeContents(node);
+        if (range.compareBoundaryPoints(Range.START_TO_START, overlap) > 0) overlap.setStart(range.startContainer, range.startOffset);
+        if (range.compareBoundaryPoints(Range.END_TO_END, overlap) < 0) overlap.setEnd(range.endContainer, range.endOffset);
+        if (overlap.toString().trim()) {
+          first ||= node;
+          last = node;
+        }
+      }
+      node = walker.nextNode();
+    }
+    if (!first) return null;
+    // Native paragraph selection can end at the next surface's empty start.
+    normalized.setStart(first, first === range.startContainer ? range.startOffset : 0);
+    normalized.setEnd(last, last === range.endContainer ? range.endOffset : last.nodeValue.length);
+    return normalized;
+  }
+
   function showSelection(event = null) {
     // Read-only showcase deployments have no annotation/translation/chat
     // actions, so the selection popover has nothing to offer.
@@ -5252,29 +5509,35 @@
     }
     const selection = doc.getSelection();
     if (!selection?.rangeCount || !selection.toString().trim()) { clearSelectionPopover({ clearState: true }); return; }
-    const range = selection.getRangeAt(0); const block = blockForNode(selection.anchorNode); const focusBlock = blockForNode(selection.focusNode);
-    if (!block || block !== focusBlock) {
+    const range = selectionTextRange(selection.getRangeAt(0), doc);
+    if (!range) { clearSelectionPopover({ clearState: true }); return; }
+    const block = blockForNode(range.startContainer); const focusBlock = blockForNode(range.endContainer);
+    const translation = block?.closest?.('.my-scholar-translation');
+    const focusTranslation = focusBlock?.closest?.('.my-scholar-translation');
+    const sourceBlockId = translation?.dataset.translationFor || translation?.dataset.for;
+    const focusSourceBlockId = focusTranslation?.dataset.translationFor || focusTranslation?.dataset.for;
+    const group = sourceBlockId && sourceBlockId === focusSourceBlockId ? translationAnnotationGroup(sourceBlockId, doc) : null;
+    if (!block || block !== focusBlock && !group) {
       clearSelectionPopover({ clearState: true });
       showToast('首版高亮与划线请在同一段落内完成。', true);
       return;
     }
     const rects = [...range.getClientRects()].filter((item) => item.width || item.height);
     const rect = rects.at(-1) || range.getBoundingClientRect();
-    const { start, end, text: canonicalText } = canonicalSelectionOffsets(block, range, doc);
+    const { start, end, text: canonicalText } = group ? translationGroupSelectionOffsets(group, range, doc) : canonicalSelectionOffsets(block, range, doc);
     const text = Number.isFinite(start) && Number.isFinite(end) ? canonicalText.slice(start, end) : '';
     if (!text) {
       clearSelectionPopover({ clearState: true });
       showToast('无法定位这个选区，请重新选择文字。', true);
       return;
     }
-    const translation = block?.closest?.('.my-scholar-translation') || (block?.classList?.contains('my-scholar-translation') ? block : null);
     const nextSelection = {
       origin: 'selection',
       job_id: state.activeJob?.job_id,
       quote: text.slice(0, 10000),
       sentence: window.MyScholarCore.sentenceContext(canonicalText, start, end),
-      block_id: block?.dataset.blockId || null,
-      source_block_id: translation?.dataset.translationFor || null,
+      block_id: group ? `translation-${sourceBlockId}` : block?.dataset.blockId || null,
+      source_block_id: sourceBlockId || null,
       surface: translation ? 'translation' : 'paper',
       page: block?.dataset.page || translation?.dataset.page || null,
       start,
@@ -6043,9 +6306,11 @@
         formulas,
         markers: source.markers,
         emphasis: source.emphasis,
+        segments: (record.segments || []).map((item) => ({ ...item, text: restoreSpecialTokens(restoreInlineMarkers(restoreInlineMath(item.text, formulas), source.markers), tokenPayload.tokens) })),
+        record,
         batch: true,
       });
-      if (node) inserted += 1;
+      if (node) { inserted += 1; rememberDisplayedTranslation(state.activeJob?.job_id, record); }
     }
     // One rebuild after the whole replay instead of one per inserted node.
     if (inserted) {
@@ -6061,7 +6326,7 @@
   async function loadTranslationCache(jobId, mount = readerMounts.get(jobId)) {
     const before = [...translationCacheFor(jobId)];
     try {
-      const payload = await api(`/api/jobs/${jobId}/translations`);
+      const payload = await api(`/api/jobs/${jobId}/translations?scope=all`);
       if (!readerMountIsCurrent(mount)) return;
       // In-flight translations can finish after this GET started.
       const added = translationCacheFor(jobId).filter((record) => !before.includes(record));
@@ -6278,7 +6543,20 @@
       style.id = translationVisibilityStyleId;
       style.textContent = `
         :root[data-translation-display="original"] .my-scholar-translation { display:none!important; }
-        :root[data-translation-display="translation"] .my-scholar-translation-original { display:none!important; }
+        :root[data-translation-display="translation"] .my-scholar-translation-original:not(.reader-sentence-pairs) { display:none!important; }
+        :root[data-translation-display="translation"] .reader-source-sentence { display:none!important; }
+        :root[data-translation-display="original"] .reader-source-sentence { display:inline!important; }
+        .reader-content .reader-sentence-pairs { line-height:1.45!important; }
+        .reader-content .reader-source-sentence { display:block; line-height:calc(var(--reader-line-height,1.72) * .85); }
+        .reader-content .reader-sentence-pairs .reader-sentence-translation {
+          display:block; margin:.12em 0 .55em!important; padding:0!important; border:0!important;
+          font-size:90%!important; line-height:1.45!important; color:var(--reader-ui-muted,#625c56);
+          background:transparent!important; text-indent:0!important;
+        }
+        .reader-content .reader-sentence-translation .translation-text { font-size:inherit!important; line-height:inherit!important; }
+        .translation-source-label { display:block; font:10px/1.4 system-ui,sans-serif; opacity:.75; margin-top:2px; user-select:none; }
+        .reader-sentence-translation .translation-source-label { display:inline-block; margin:0 0 0 8px; }
+        .translation-retained-status { display:block; color:var(--reader-ui-muted,#756b60); font:12px/1.5 system-ui,sans-serif; margin:4px 0; user-select:none; }
         :root:not([data-translation-display="translation"]) .my-scholar-translation-placeholder { display:none!important; }
         .my-scholar-translation-placeholder { display:flex; align-items:center; gap:12px; margin:.6em 0; padding:8px 0; color:var(--muted,#756b60); font:13px/1.6 system-ui,sans-serif; }
         .translation-status-action { padding:3px 9px; border:1px solid var(--line,#d5d9df); border-radius:5px; background:var(--paper,#fff); color:var(--accent,#b45309); font:12px/1.5 system-ui,sans-serif; cursor:pointer; }
@@ -6443,6 +6721,25 @@
             background:color-mix(in srgb,var(--user-highlight,#f59e0b) 42%,transparent)!important;
             box-shadow:inset 0 -.09em 0 color-mix(in srgb,var(--user-highlight,#f59e0b) 72%,transparent)!important;
           }
+        }
+        body.reader-embedded .reader-content .my-scholar-highlight[data-annotation-drawing="true"] {
+          background:transparent!important;
+          box-shadow:none!important;
+        }
+        body.reader-embedded .reader-content .my-scholar-underline[data-annotation-drawing="true"] {
+          text-decoration-color:transparent!important;
+        }
+        .annotation-draw-layer {
+          position:fixed;
+          inset:0;
+          z-index:3;
+          pointer-events:none!important;
+        }
+        .annotation-draw-stroke {
+          position:absolute;
+          transform-origin:left center;
+          border-radius:2px;
+          pointer-events:none!important;
         }
         :is(p,ul,ol)[data-block-id] { position:relative; }
         .paragraph-translate-trigger {
@@ -7297,6 +7594,18 @@
       const range = annotationRange(root, annotation, doc);
       if (range) return { root, range };
     }
+    if (annotation.surface === 'translation') {
+      const sourceBlockId = annotation.source_block_id || root?.dataset.translationFor || root?.dataset.for
+        || (String(annotation.block_id || '').startsWith('translation-') ? annotation.block_id.slice('translation-'.length) : '');
+      if (translationAnnotationGroup(sourceBlockId, doc)) {
+        return resolveTranslationGroupAnnotation(annotation, sourceBlockId, doc, {
+          useOffsets: generation === activeChatSourceGeneration() && annotation.block_id === `translation-${sourceBlockId}`,
+        });
+      }
+      const sourceIds = new Set([...doc.querySelectorAll('.my-scholar-translation[data-for]')].map((node) => node.dataset.translationFor || node.dataset.for).filter(Boolean));
+      const matches = [...sourceIds].map((id) => resolveTranslationGroupAnnotation(annotation, id, doc)).filter(Boolean);
+      return matches.length === 1 ? matches[0] : null;
+    }
     const continuation = readerContinuations.get(doc)?.get(String(annotation.block_id));
     if (continuation && annotation.surface !== 'translation' && generation === activeChatSourceGeneration() && (!annotation.page || String(annotation.page) === continuation.page)) {
       const start = continuation.start + Number(annotation.start);
@@ -7384,13 +7693,33 @@
     return { range: prepared, math: null };
   }
 
-  function applyMark(annotation) {
+  function applyMark(annotation, suppliedAnchor = null) {
     const doc = frameDocument();
     if (!annotation.quote || !annotation.id) return false;
-    if (doc?.querySelector(`[data-annotation-id="${cssEscape(annotation.id)}"]`)) return true;
-    const anchor = resolveAnnotationAnchor(annotation, doc);
+    if (!suppliedAnchor && doc?.querySelector(`[data-annotation-id="${cssEscape(annotation.id)}"]`)) return true;
+    const anchor = suppliedAnchor || resolveAnnotationAnchor(annotation, doc);
+    if (anchor?.ranges) {
+      if (!anchor.ranges.every(({ range }) => prepareMathAnnotationRange(range, doc))) return false;
+      let applied = true;
+      for (const entry of anchor.ranges) applied = applyMark(annotation, entry) && applied;
+      return applied;
+    }
     const root = anchor?.root;
     if (!root || !anchor.range || anchor.range.collapsed) return false;
+    const sentenceRoots = [...root.querySelectorAll('.reader-source-sentence')];
+    if (sentenceRoots.length && annotation.surface !== 'translation') {
+      const start = textOffset(root, anchor.range.startContainer, anchor.range.startOffset, doc);
+      const end = textOffset(root, anchor.range.endContainer, anchor.range.endOffset, doc);
+      let applied = false;
+      for (const sentence of sentenceRoots) {
+        const offset = textOffset(root, sentence, 0, doc);
+        const length = canonicalBlockText(sentence, doc).length;
+        const from = Math.max(0, start - offset);
+        const to = Math.min(length, end - offset);
+        if (to > from) applied = applyMark(annotation, { root: sentence, range: rangeAtOffsets(sentence, from, to, doc) }) || applied;
+      }
+      return applied;
+    }
     const prepared = prepareMathAnnotationRange(anchor.range, doc);
     if (!prepared) return false;
     const { range, math } = prepared;
@@ -7802,7 +8131,91 @@
     }
   }
 
-  function renderFrameAnnotations() {
+  function annotationDrawRects(marks) {
+    const rects = marks.flatMap((mark) => [...mark.getClientRects()])
+      .filter((rect) => rect.width > 0 && rect.height > 0 && Number.isFinite(rect.left) && Number.isFinite(rect.top))
+      .map((rect) => ({ left: rect.left, top: rect.top, width: rect.width, height: rect.height, bottom: rect.bottom }));
+    rects.sort((a, b) => Math.abs(a.top - b.top) > 2 ? a.top - b.top : a.left - b.left);
+    const lines = [];
+    rects.forEach((rect) => {
+      const previous = lines.at(-1);
+      if (previous && Math.abs(previous.top - rect.top) <= 2 && Math.abs(previous.height - rect.height) <= 2 && rect.left <= previous.left + previous.width + 1) {
+        previous.width = Math.max(previous.left + previous.width, rect.left + rect.width) - previous.left;
+      } else lines.push(rect);
+    });
+    return lines;
+  }
+
+  function clearAnnotationDrawAnimation(doc = frameDocument()) {
+    const drawing = doc && readerDocumentState(doc).annotationDraw;
+    if (!drawing) return;
+    readerDocumentState(doc).annotationDraw = null;
+    window.clearTimeout(drawing.timer);
+    drawing.animations.forEach((animation) => animation.cancel());
+    drawing.marks.forEach((mark) => delete mark.dataset.annotationDrawing);
+    drawing.layer.remove();
+    drawing.observer?.disconnect();
+    drawing.resizeObserver?.disconnect();
+    doc.removeEventListener('scroll', drawing.cleanup, true);
+    doc.defaultView?.removeEventListener('resize', drawing.cleanup);
+    doc.defaultView?.removeEventListener('pagehide', drawing.cleanup);
+    window.removeEventListener('resize', drawing.cleanup);
+    reducedMotionQuery.removeEventListener?.('change', drawing.cleanup);
+  }
+
+  function playAnnotationDrawAnimation(annotation, doc = frameDocument()) {
+    clearAnnotationDrawAnimation(doc);
+    if (!doc || reducedMotionQuery.matches || !annotation?.id || isAIAnnotation(annotation)) return;
+    const marks = [...doc.querySelectorAll(`:is(mark, mrow)[data-annotation-id="${cssEscape(annotation.id)}"]`)];
+    const rects = annotationDrawRects(marks);
+    if (!rects.length || !doc.defaultView?.Element?.prototype.animate) return;
+    const appearance = doc.defaultView.getComputedStyle(marks[0]);
+    const underline = annotation.kind === 'underline';
+    const layer = doc.createElement('div');
+    layer.className = 'annotation-draw-layer';
+    layer.setAttribute('aria-hidden', 'true');
+    const cleanup = () => clearAnnotationDrawAnimation(doc);
+    const drawing = { layer, marks, animations: [], cleanup, timer: null };
+    readerDocumentState(doc).annotationDraw = drawing;
+    const totalWidth = rects.reduce((sum, rect) => sum + rect.width, 0);
+    let elapsed = 0;
+    rects.forEach((rect) => {
+      const stroke = doc.createElement('span');
+      stroke.className = 'annotation-draw-stroke';
+      Object.assign(stroke.style, {
+        left: `${rect.left}px`, top: `${underline ? rect.bottom - 1 : rect.top}px`,
+        width: `${rect.width}px`, height: `${underline ? 2 : rect.height}px`,
+        backgroundColor: underline ? appearance.textDecorationColor : appearance.backgroundColor,
+        boxShadow: underline ? 'none' : appearance.boxShadow,
+      });
+      layer.append(stroke);
+      const duration = 400 * rect.width / totalWidth;
+      drawing.animations.push(stroke.animate([{ transform: 'scaleX(0)' }, { transform: 'scaleX(1)' }], { duration, delay: elapsed, easing: 'ease-out', fill: 'both' }));
+      elapsed += duration;
+    });
+    marks.forEach((mark) => { mark.dataset.annotationDrawing = 'true'; });
+    doc.body.append(layer);
+    doc.addEventListener('scroll', cleanup, { passive: true, capture: true });
+    doc.defaultView.addEventListener('resize', cleanup, { passive: true });
+    doc.defaultView.addEventListener('pagehide', cleanup, { passive: true });
+    window.addEventListener('resize', cleanup, { passive: true });
+    reducedMotionQuery.addEventListener?.('change', cleanup);
+    const content = doc.querySelector('.reader-content');
+    if (doc.defaultView.MutationObserver && content) {
+      drawing.observer = new doc.defaultView.MutationObserver(cleanup);
+      drawing.observer.observe(content, { childList: true, characterData: true, subtree: true });
+    }
+    if (doc.defaultView.ResizeObserver && content) {
+      const initialRects = JSON.stringify(rects);
+      drawing.resizeObserver = new doc.defaultView.ResizeObserver(() => {
+        if (JSON.stringify(annotationDrawRects(marks)) !== initialRects) cleanup();
+      });
+      drawing.resizeObserver.observe(content);
+    }
+    drawing.timer = window.setTimeout(cleanup, 420);
+  }
+
+  function renderFrameAnnotations({ preserveHover = false } = {}) {
     const doc = frameDocument(); if (!doc?.querySelector('.reader-content')) return;
     const documentState = readerDocumentState(doc);
     const annotationsKey = JSON.stringify([state.annotations, state.aiHighlights, state.highlightColor]);
@@ -7811,6 +8224,7 @@
       activateReaderSentencePairs(doc);
       return;
     }
+    clearAnnotationDrawAnimation(doc);
     closeInlineAnnotation(doc, { immediate: true });
     doc.querySelectorAll('.annotation-note-trigger, :is(mark, mrow)[data-annotation-id]').forEach((node) => {
       if (node.classList.contains('annotation-note-trigger')) node.remove();
@@ -7840,7 +8254,7 @@
     documentState.unresolvedAnnotationIds = unresolvedIds;
     documentState.unresolvedAnnotations = unresolvedIds.size;
     updateAnnotationAnchorStatus(unresolvedIds.size);
-    rebuildReaderSentencePairs(doc);
+    rebuildReaderSentencePairs(doc, { preserveHover });
     if (readerSearchState.open && doc === frameDocument()) refreshReaderSearch();
   }
 
@@ -7863,8 +8277,10 @@
     }
     const doc = frameDocument();
     const root = doc?.querySelector(`[data-block-id="${cssEscape(selection.block_id)}"]`);
-    const preflightRange = root ? rangeAtOffsets(root, selection.start, selection.end, doc) : null;
-    if (!preflightRange || canonicalBlockText(root, doc).slice(selection.start, selection.end) !== selection.quote) {
+    const group = selection.surface === 'translation' && selection.block_id === `translation-${selection.source_block_id}` ? translationAnnotationGroup(selection.source_block_id, doc) : null;
+    const preflightRange = group ? translationGroupAnchor(group, selection.start, selection.end, doc) : root ? rangeAtOffsets(root, selection.start, selection.end, doc) : null;
+    const preflightText = group ? group.text : root ? canonicalBlockText(root, doc) : '';
+    if (!preflightRange || preflightText.slice(selection.start, selection.end) !== selection.quote) {
       clearSelectionPopover({ clearState: true });
       showToast('这个选区包含暂时无法稳定定位的内容，请重新选择后再试。', true);
       return;
@@ -7872,6 +8288,7 @@
     const jobId = state.activeJob.job_id;
     const mount = readerMount;
     if (!readerMountMatches(mount)) return;
+    const existingAnnotationIds = new Set(state.annotations.map((annotation) => annotation.id));
     let note = '';
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations`, jsonOptions({ ...selection, kind, note, category: 'method', color: action?.color || annotationColorFor(kind), source: 'manual', ...(action ? { action_id: action.id, label: action.label } : {}) }));
@@ -7893,6 +8310,7 @@
         showToast('标注已保存，但当前页面无法显示它；重新打开文献后可再次定位。', true);
         return;
       }
+      if (saved && !existingAnnotationIds.has(saved.id)) playAnnotationDrawAnimation(saved, doc);
       if (withNote) {
         const annotation = saved;
         const trigger = annotation && frameDocument()?.querySelector(`.annotation-note-trigger[data-annotation-id="${cssEscape(annotation.id)}"]`);
@@ -8528,13 +8946,15 @@
   }
 
   function paragraphSource(block) {
+    const saved = block?.translationSourceSnapshot;
+    if (saved && saved.canonicalText === canonicalBlockText(block, block.ownerDocument)) return saved.source;
     // Extract from an inert document so copying inline images cannot reload their resources.
     const clone = block && document.createElement('template').content.ownerDocument.importNode(block, true);
     if (!clone) return { text: '', formulas: [], markers: [], emphasis: [] };
     const formulas = [];
     const markers = [];
     const emphasis = [];
-    clone.querySelectorAll('.paragraph-translate-trigger, .annotation-note-trigger, .annotation-note-popover').forEach((node) => node.remove());
+    clone.querySelectorAll('.paragraph-translate-trigger, .annotation-note-trigger, .annotation-note-popover, .reader-sentence-translation, .translation-retained-status, .translation-source-label').forEach((node) => node.remove());
     clone.querySelectorAll(':is(mark, mrow)[data-annotation-id]').forEach((mark) => mark.replaceWith(...mark.childNodes));
     clone.querySelectorAll('.inline-legend-marker').forEach((marker) => {
       const spec = inlineLegendMarkerSpec(marker);
@@ -8579,6 +8999,44 @@
       text = text.split(marker.token).join(`[${marker.tone} ${glyph}]`);
     });
     return text.replace(/__MY_SCHOLAR_BOLD_(?:START|END)_\d+__/g, '').replace(/\s+/g, ' ').trim();
+  }
+
+  function paragraphTranslationSource(block) {
+    const source = paragraphSource(block);
+    if (!block || !source.text) return source;
+    const doc = block.ownerDocument;
+    const segments = [];
+    let formulaIndex = 0;
+    let markerIndex = 0;
+    const usedFormulas = new Set();
+    for (const bounds of readerBlockSentenceSegments(block, doc)) {
+      const range = rangeAtOffsets(block, bounds.start, bounds.end, doc);
+      if (!range) return source;
+      const fragment = doc.createElement('span');
+      fragment.append(range.cloneContents());
+      const sentence = paragraphSource(fragment);
+      const formulaMap = sentence.formulas.map((formula) => {
+        const index = source.formulas.findIndex((candidate, position) => !usedFormulas.has(position) && candidate.tex === formula.tex && candidate.markup === formula.markup);
+        if (index >= 0) usedFormulas.add(index);
+        return index;
+      });
+      if (formulaMap.some((index) => index < 0)) return source;
+      const markerStart = markerIndex;
+      const text = sentence.text.replace(/__MY_SCHOLAR_MATH_(\d+)__/g, (_token, index) => `__MY_SCHOLAR_MATH_${formulaMap[Number(index)]}__`)
+        .replace(/__MY_SCHOLAR_MARKER_(\d+)__/g, (_token, index) => `__MY_SCHOLAR_MARKER_${markerStart + Number(index)}__`)
+        .replace(/__MY_SCHOLAR_BOLD_(START|END)_(\d+)__/g, (_token, side, index) => {
+          const spec = sentence.emphasis[Number(index)];
+          const mapped = source.emphasis.findIndex((item) => item.style === spec?.style && item.tone === spec?.tone);
+          return mapped < 0 ? '' : `__MY_SCHOLAR_BOLD_${side}_${mapped}__`;
+        });
+      formulaIndex += sentence.formulas.length;
+      markerIndex += sentence.markers.length;
+      if (!text.trim()) continue;
+      segments.push({ id: `s${bounds.start}-${bounds.end}`, text });
+    }
+    // Never submit a partial formula tree or a truncated source as an aligned paragraph.
+    if (!segments.length || formulaIndex !== source.formulas.length || markerIndex !== source.markers.length || source.text.length >= 12000) return source;
+    return { ...source, segments, alignment_version: 'sentence-v1' };
   }
 
   function isMetadataParagraph(block) {
@@ -8824,7 +9282,7 @@
     return result;
   }
 
-  async function requestTranslation(text, blockId = null, suppliedFormulas = null, { jobId = state.activeJob?.job_id, onDelta = null, markers = [], emphasis = [], signal = null, refresh = false } = {}) {
+  async function requestTranslation(text, blockId = null, suppliedFormulas = null, { jobId = state.activeJob?.job_id, onDelta = null, markers = [], emphasis = [], signal = null, refresh = false, segments = [] } = {}) {
     const originalText = String(text || '').trim();
     const profileId = translationProfileId();
     const mathPayload = Array.isArray(suppliedFormulas) ? { text: originalText, formulas: suppliedFormulas } : protectInlineMath(originalText);
@@ -8833,14 +9291,21 @@
     const tokenPayload = protectSpecialTokens(mathPayload.text);
     const protectedPayload = { text: tokenPayload.text, formulas: mathPayload.formulas, tokens: tokenPayload.tokens };
     const targetLanguage = translationTargetLanguage();
+    let specialIndex = 0;
+    const protectedSegments = segments.map(({ id, text: sentence }) => ({ id, text: sentence.replace(SPECIAL_MATH_TOKEN_RE, () => protectedPayload.tokens[specialIndex++]?.token || '') }));
+    const aligned = protectedSegments.length > 0;
     // A re-translation asks for a new answer, so the stored one is skipped
     // on both sides -- the server holds the same record.
-    const cached = refresh ? null : cachedTranslationForSource(blockId, source, targetLanguage, jobId);
+    const cached = refresh ? null : aligned
+      ? translationCacheFor(jobId).find((item) => item.block_id === (blockId || '') && item.profile_id === profileId && item.source_hash === sourceHash && item.target_language === targetLanguage && item.alignment_version === 'sentence-v1' && JSON.stringify(item.source_segments) === JSON.stringify(protectedSegments))
+      : cachedTranslationForSource(blockId, source, targetLanguage, jobId);
     if (cached?.text) {
       const formulas = protectedPayload.formulas;
       const repaired = repairFormulaTokens(cached.text, formulas);
       return {
+        ...cached,
         text: restoreSpecialTokens(restoreInlineMarkers(restoreInlineMath(repaired, formulas), markers), protectedPayload.tokens),
+        segments: (cached.segments || []).map((item) => ({ ...item, text: restoreSpecialTokens(restoreInlineMarkers(restoreInlineMath(item.text, formulas), markers), protectedPayload.tokens) })),
         formulas,
         markers,
         emphasis,
@@ -8855,37 +9320,64 @@
       block_id: blockId,
       source_hash: sourceHash,
       formulas: protectedPayload.formulas.map(({ token, tex }) => ({ token, tex })),
+      ...(aligned ? { segments: protectedSegments, alignment_version: 'sentence-v1' } : {}),
       ...(refresh ? { refresh: true } : {}),
     };
-    let result;
-    if (typeof onDelta === 'function') {
-      let streamed = '';
-      result = await streamApiRequest(`/api/jobs/${jobId}/translate`, requestBody, (delta) => {
-        streamed += delta;
-        const partial = repairFormulaTokens(streamed, protectedPayload.formulas);
-        onDelta(restoreSpecialTokens(restoreInlineMarkers(restoreInlineMath(partial, protectedPayload.formulas), markers), protectedPayload.tokens));
-      }, signal);
-    } else {
-      result = (await api(`/api/jobs/${jobId}/translate`, { ...jsonOptions(requestBody), ...(signal ? { signal } : {}) })).result || {};
+    requestTranslation.pending ||= new Map();
+    const requestKey = JSON.stringify([jobId, blockId || '', profileId, targetLanguage, translationSourceIdentity(source), protectedSegments, refresh]);
+    let operation = requestTranslation.pending.get(requestKey);
+    if (!operation) {
+      operation = { listeners: new Set(), text: '' };
+      const current = operation;
+      current.promise = (async () => {
+        if (typeof onDelta === 'function') {
+          return streamApiRequest(`/api/jobs/${jobId}/translate`, requestBody, (delta) => {
+            current.text += delta;
+            const partial = repairFormulaTokens(current.text, protectedPayload.formulas);
+            const rendered = restoreSpecialTokens(restoreInlineMarkers(restoreInlineMath(partial, protectedPayload.formulas), markers), protectedPayload.tokens);
+            current.listeners.forEach((listener) => listener(rendered));
+          });
+        }
+        return (await api(`/api/jobs/${jobId}/translate`, jsonOptions(requestBody))).result || {};
+      })().finally(() => requestTranslation.pending.delete(requestKey));
+      requestTranslation.pending.set(requestKey, current);
     }
-    if (signal?.aborted) throw new DOMException('翻译请求已取消。', 'AbortError');
+    if (onDelta) operation.listeners.add(onDelta);
+    let result;
+    try {
+      result = await waitForTranslationConsumer(operation.promise, signal);
+    } finally {
+      if (onDelta) operation.listeners.delete(onDelta);
+    }
     if (profileId && translationProfileId() !== profileId) throw new Error('翻译模型已切换，请重试。');
     if (!result.text) throw new Error('模型返回为空。');
     const formulas = protectedPayload.formulas;
     const repaired = repairFormulaTokens(result.text, formulas);
     const record = { ...result, text: repaired, formulas, profile_id: result.profile_id || profileId, block_id: blockId || '', target_language: targetLanguage, source_hash: sourceHash };
     const cache = translationCacheFor(jobId);
-    const index = cache.findIndex((item) => item.block_id === record.block_id && item.source_hash === sourceHash && item.target_language === targetLanguage && String(item.profile_id || '') === String(record.profile_id || ''));
+    const index = cache.findIndex((item) => item.block_id === record.block_id && item.source_hash === sourceHash && item.target_language === targetLanguage && String(item.profile_id || '') === String(record.profile_id || '') && String(item.alignment_version || '') === String(record.alignment_version || ''));
     if (index >= 0) cache[index] = record; else cache.push(record);
     setTranslationCacheFor(jobId, cache);
     return {
+      ...record,
       text: restoreSpecialTokens(restoreInlineMarkers(restoreInlineMath(repaired, formulas), markers), protectedPayload.tokens),
+      segments: (record.segments || []).map((item) => ({ ...item, text: restoreSpecialTokens(restoreInlineMarkers(restoreInlineMath(item.text, formulas), markers), protectedPayload.tokens) })),
       formulas,
       markers,
       emphasis,
       cached: Boolean(result.cached),
       sourceHash,
     };
+  }
+
+  function waitForTranslationConsumer(promise, signal) {
+    if (!signal) return promise;
+    if (signal.aborted) return Promise.reject(new DOMException('翻译请求已取消。', 'AbortError'));
+    return new Promise((resolve, reject) => {
+      const abort = () => reject(new DOMException('翻译请求已取消。', 'AbortError'));
+      signal.addEventListener('abort', abort, { once: true });
+      promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+    });
   }
 
   function preserveReaderHoverThroughTranslationLayout(doc) {
@@ -8915,9 +9407,85 @@
     updateAnnotationAnchorStatus(unresolvedIds.size);
   }
 
-  function insertTranslation(blockId, text, { pending = false, error = false, cached = false, sourceHash = '', role = '', formulas = [], markers = [], emphasis = [], doc = frameDocument(), batch = false } = {}) {
+  function unwrapSentenceTranslations(block) {
+    block?.querySelectorAll('.reader-sentence-translation').forEach((node) => node.remove());
+    block?.querySelectorAll('.reader-source-sentence').forEach((node) => node.replaceWith(...node.childNodes));
+    block?.classList.remove('reader-sentence-pairs');
+  }
+
+  function insertSentenceTranslations(block, segments, options) {
+    const { doc, blockId, sourceHash, formulas, markers, emphasis, record } = options;
+    const bounds = readerBlockSentenceSegments(block, doc);
+    if (bounds.length !== segments.length || !bounds.every((item, index) => segments[index].id === `s${item.start}-${item.end}`)) return null;
+    const containers = block.matches('ul, ol') ? [...block.querySelectorAll(':scope > li')] : [block];
+    const groups = containers.map((container) => {
+      const start = container === block ? 0 : textOffset(block, container, 0, doc);
+      const end = container === block ? canonicalBlockText(block, doc).length : textOffset(block, container, container.childNodes.length, doc);
+      return { container, start, items: bounds.map((item, index) => ({ item, index })).filter(({ item }) => item.start >= start && item.end <= end) };
+    });
+    const trigger = block.querySelector(':scope > .paragraph-translate-trigger');
+    trigger?.remove();
+    block.querySelectorAll('.annotation-note-trigger').forEach((node) => node.remove());
+    let first = null;
+    for (const { container, start, items } of groups) {
+      if (!items.length) continue;
+      const pairs = doc.createDocumentFragment();
+      let consumed = start;
+      items.forEach(({ item, index }) => {
+        const range = rangeAtOffsets(container, 0, item.end - consumed, doc);
+        range.setStart(container, 0);
+        const original = doc.createElement('span');
+        original.className = 'reader-source-sentence';
+        original.append(range.extractContents());
+        const translated = doc.createElement('span');
+        translated.className = 'my-scholar-translation reader-sentence-translation';
+        translated.dataset.for = blockId;
+        translated.dataset.blockId = `translation-${blockId}--${segments[index].id}`;
+        translated.dataset.translationFor = blockId;
+        translated.dataset.sentenceId = segments[index].id;
+        translated.dataset.surface = 'translation';
+        translated.dataset.sourceHash = sourceHash;
+        translated.dataset.profileId = record?.profile_id || '';
+        translated.dataset.page = block.dataset.page || block.closest('.pdf-page')?.dataset.page || '';
+        translated.translationResult = { text: segments[index].text, formulas, markers, emphasis };
+        translated.title = `译文来源：${translationProviderLabel(record)}`;
+        const body = doc.createElement('span');
+        body.className = 'translation-text';
+        body.append(renderTranslationText(segments[index].text, formulas, doc, markers, emphasis));
+        translated.append(body);
+        if (index === 0) {
+          const label = doc.createElement('small');
+          label.className = 'translation-source-label';
+          label.textContent = translationProviderLabel(record);
+          translated.append(label);
+        }
+        pairs.append(original, translated);
+        first ||= translated;
+        consumed = item.end;
+      });
+      const lastSource = [...pairs.querySelectorAll('.reader-source-sentence')].at(-1);
+      if (lastSource && container.firstChild) lastSource.append(...container.childNodes);
+      container.replaceChildren(pairs);
+    }
+    if (trigger) block.append(trigger);
+    block.classList.add('reader-sentence-pairs');
+    return first;
+  }
+
+  function insertTranslation(blockId, text, { pending = false, error = false, cached = false, sourceHash = '', role = '', formulas = [], markers = [], emphasis = [], doc = frameDocument(), batch = false, segments = [], record = null } = {}) {
     const block = translationTarget(blockId, doc);
     if (!block) return null;
+    if (segments.length) block.translationSourceSnapshot = { canonicalText: canonicalBlockText(block, doc), source: paragraphSource(block) };
+    const existing = doc.querySelector(`.my-scholar-translation[data-for="${cssEscape(blockId || '')}"]:not(.is-pending):not(.is-error)`);
+    block.querySelectorAll('.translation-retained-status').forEach((node) => node.remove());
+    if ((pending || error) && existing) {
+      const status = doc.createElement('span');
+      status.className = 'translation-retained-status';
+      status.textContent = pending ? '正在重新翻译，原译文已保留…' : `${text} · 原译文已保留`;
+      status.setAttribute('role', 'status');
+      block.append(status);
+      return existing;
+    }
     preserveReaderHoverThroughTranslationLayout(doc);
     const documentState = readerDocumentState(doc);
     documentState.translationAnnotationIds ||= new Map();
@@ -8927,12 +9495,27 @@
       node.remove();
     });
     documentState.translationAnnotationIds.set(blockId, previousIds);
+    unwrapSentenceTranslations(block);
+    if (!pending && !error && segments.length) {
+      const aligned = insertSentenceTranslations(block, segments, { doc, blockId, sourceHash, formulas, markers, emphasis, record });
+      if (aligned) {
+        syncTranslationBlockVisibility(block, aligned);
+        delete documentState.annotationsKey;
+        if (!batch && doc === frameDocument()) {
+          renderFrameAnnotations({ preserveHover: true });
+          refreshReaderSearch();
+        }
+        return aligned;
+      }
+    }
     const node = doc.createElement('div');
     node.className = `my-scholar-translation${role ? ` ${role}-translation` : ''}${pending ? ' is-pending' : ''}${error ? ' is-error' : ''}${cached ? ' is-cached' : ''}`;
     node.dataset.for = blockId;
     node.dataset.blockId = `translation-${blockId}`;
     node.dataset.translationFor = blockId;
     node.dataset.surface = 'translation';
+    if (!pending && !error) node.translationResult = { text, formulas, markers, emphasis };
+    node.dataset.profileId = record?.profile_id || '';
     node.dataset.page = block.dataset.page || block.closest('.pdf-page')?.dataset.page || '';
     if (sourceHash) node.dataset.sourceHash = sourceHash;
     const body = doc.createElement('div');
@@ -8947,6 +9530,12 @@
       node.append(label);
     }
     node.append(body);
+    if (!pending && !error && record) {
+      const label = doc.createElement('small');
+      label.className = 'translation-source-label';
+      label.textContent = `本段译文 · ${translationProviderLabel(record)}`;
+      node.append(label);
+    }
     if (block.classList.contains('paper-abstract-body')) {
       node.classList.add('paper-abstract-translation');
       decorateInlineSectionLabel(body, inlineAbstractLabelPattern, 'paper-section-label paper-abstract-label');
@@ -8968,7 +9557,7 @@
   async function translateBlock(blockId, trigger = null, { silent = false, jobId = state.activeJob?.job_id, doc = frameDocument(), signal = null, refresh = false } = {}) {
     if (!jobId || !blockId || !doc) return false;
     const block = translationTarget(blockId, doc);
-    const source = paragraphSource(block);
+    const source = paragraphTranslationSource(block);
     const text = source.text;
     if (!text) return false;
     const profileId = translationProfileId();
@@ -8978,13 +9567,14 @@
     const isTitle = block?.matches('h1.paper-title, h1[data-translate-block-id]');
     insertTranslation(blockId, '正在翻译…', { pending: true, role: isTitle ? 'title' : '', doc });
     const removePendingTranslation = () => {
+      block.querySelectorAll('.translation-retained-status').forEach((node) => node.remove());
       doc.querySelectorAll(`.my-scholar-translation[data-for="${cssEscape(blockId || '')}"]`).forEach((node) => {
         if (node.classList.contains('is-pending')) node.remove();
       });
       syncTranslationBlockVisibility(block, doc.querySelector(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`));
     };
     try {
-      const translated = await requestTranslation(text, blockId, source.formulas, { jobId, markers: source.markers, emphasis: source.emphasis, signal, refresh });
+      const translated = await requestTranslation(text, blockId, source.formulas, { jobId, markers: source.markers, emphasis: source.emphasis, segments: source.segments, signal, refresh });
       // A user can switch tabs while the gateway request is in flight. Never
       // insert an old document's response into the newly active iframe.
       if (!ownsDocument() || (profileId && translationProfileId() !== profileId)) {
@@ -8998,9 +9588,12 @@
         formulas: translated.formulas,
         markers: translated.markers,
         emphasis: translated.emphasis,
+        segments: translated.segments,
+        record: translated,
         doc,
       });
-      if (!silent && readerMountMatches(mount, doc)) setPanelStatus(translated.cached ? '已使用本地翻译缓存。' : '本段翻译已插入原文下方。');
+      rememberDisplayedTranslation(jobId, translated);
+      if (!silent && readerMountMatches(mount, doc)) setPanelStatus(translated.cached ? '已使用本地翻译缓存。' : translated.segments?.length ? '已按句显示对应译文。' : '本段翻译已插入原文下方。');
       return true;
     } catch (error) {
       if (error?.name === 'AbortError' || signal?.aborted) {
@@ -9189,19 +9782,21 @@
     const removePendingTranslation = () => {
       const current = mountedDoc();
       if (!current) return;
+      translationTarget(blockId, current)?.querySelectorAll('.translation-retained-status').forEach((node) => node.remove());
       current.querySelectorAll(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`).forEach((node) => {
         if (node.classList.contains('is-pending')) node.remove();
       });
       syncTranslationBlockVisibility(translationTarget(blockId, current), current.querySelector(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`));
     };
     try {
-      const translated = await requestTranslation(source.text, blockId, source.formulas, { jobId: run.jobId, markers: source.markers, emphasis: source.emphasis, signal: run.abortController.signal, refresh });
+      const translated = await requestTranslation(source.text, blockId, source.formulas, { jobId: run.jobId, markers: source.markers, emphasis: source.emphasis, segments: source.segments, signal: run.abortController.signal, refresh });
       if (profileId && translationProfileId() !== profileId) {
         removePendingTranslation();
         return false;
       }
       const doc = mountedDoc();
-      if (doc) insertTranslation(blockId, translated.text, { cached: translated.cached, sourceHash: translated.sourceHash, role, formulas: translated.formulas, markers: translated.markers, emphasis: translated.emphasis, doc });
+      if (doc) insertTranslation(blockId, translated.text, { cached: translated.cached, sourceHash: translated.sourceHash, role, formulas: translated.formulas, markers: translated.markers, emphasis: translated.emphasis, segments: translated.segments, record: translated, doc });
+      rememberDisplayedTranslation(run.jobId, translated);
       return true;
     } catch (error) {
       if (error?.name === 'AbortError' || run.abortController.signal.aborted) {
@@ -9279,7 +9874,7 @@
       snapshots: pendingBlocks.map((block) => ({
         blockId: block.dataset.blockId || block.dataset.translateBlockId,
         isTitle: block.matches('h1.paper-title, h1[data-translate-block-id]'),
-        source: paragraphSource(block),
+        source: paragraphTranslationSource(block),
       })),
     };
   }
@@ -10394,6 +10989,7 @@
   const chatMathCache = new Map();
   const chatMathPending = new Set();
   let chatMathTimer = null;
+  let chatMathRevision = 0;
 
   function chatMathNode(tex, display, doc) {
     const key = `${display ? 'D' : 'I'}:${tex}`;
@@ -10427,14 +11023,28 @@
         while (chatMathCache.size > 256) chatMathCache.delete(chatMathCache.keys().next().value);
         if (markup) upgraded = true;
       });
-      if (upgraded) renderChat();
+      if (upgraded) {
+        chatMathRevision += 1;
+        renderChat();
+      }
     }, 200);
+  }
+
+  function chatCodeMath(text) {
+    const value = text.trim();
+    const wrapped = value.match(/^\$\$(.+)\$\$$|^\$(.+)\$$|^\\\((.+)\\\)$|^\\\[(.+)\\\]$/);
+    if (wrapped) return { tex: (wrapped[1] || wrapped[2] || wrapped[3] || wrapped[4]).trim(), display: !!(wrapped[1] || wrapped[4]) };
+    // Accept mathematical subscripts without reinterpreting ordinary snake_case identifiers.
+    if (/^\\[a-zA-Z]/.test(value) || /^[A-Za-z\u0391-\u03c9](?:[_^](?:[A-Za-z0-9]|\{[^{}\n]+\})){1,2}$/.test(value)) {
+      return { tex: value, display: false };
+    }
+    return null;
   }
 
   function chatMarkdownInline(text, doc = document, depth = 0) {
     // Everything is built with createElement/textContent — model output never
     // reaches innerHTML, so malformed or hostile markup stays inert text.
-    const pattern = /`([^`\n]+)`|\*\*([^*\n]+)\*\*|\*([^\s*][^*\n]*?)\*|~~([^~\n]+)~~|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|\$([^\s$][^$\n]*?)\$|\\\((.+?)\\\)|\\\[(.+?)\\\]|\[p([1-9][0-9]{0,4})\/((?:block-[A-Za-z0-9][A-Za-z0-9._-]{0,143}|b-[a-f0-9]{24}))\]/g;
+    const pattern = /`([^`\n]+)`|\*\*([^*\n]+)\*\*|\*([^\s*][^*\n]*?)\*|~~([^~\n]+)~~|\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|\$\$([^$\n]+?)\$\$|\$([^\s$][^$\n]*?)\$|\\\((.+?)\\\)|\\\[(.+?)\\\]|\[p([1-9][0-9]{0,4})\/((?:block-[A-Za-z0-9][A-Za-z0-9._-]{0,143}|b-[a-f0-9]{24}))\]/g;
     const fragment = doc.createDocumentFragment();
     const value = String(text || '').slice(0, chatMaxMessageChars);
     if (depth >= chatMarkdownMaxDepth) {
@@ -10445,12 +11055,11 @@
     let match;
     while ((match = pattern.exec(value))) {
       if (match.index > cursor) fragment.append(doc.createTextNode(value.slice(cursor, match.index)));
-      const [, codeText, boldText, emText, strikeText, linkText, linkHref, dollarTex, parenTex, bracketTex, blockPage, blockId] = match;
+      const [, codeText, boldText, emText, strikeText, linkText, linkHref, displayTex, dollarTex, parenTex, bracketTex, blockPage, blockId] = match;
       if (codeText !== undefined) {
-        const trimmed = codeText.trim();
-        // Models often wrap TeX in backticks; a leading command is math.
-        if (/^\\[a-zA-Z]/.test(trimmed)) {
-          fragment.append(chatMathNode(trimmed, false, doc));
+        const formula = chatCodeMath(codeText);
+        if (formula) {
+          fragment.append(chatMathNode(formula.tex, formula.display, doc));
         } else {
           const code = doc.createElement('code');
           code.textContent = codeText;
@@ -10485,7 +11094,7 @@
         reference.setAttribute('aria-label', `跳转到原文第 ${blockPage} 页`);
         fragment.append(reference);
       } else {
-        fragment.append(chatMathNode((dollarTex || parenTex || bracketTex || '').trim(), false, doc));
+        fragment.append(chatMathNode((displayTex || dollarTex || parenTex || bracketTex || '').trim(), displayTex !== undefined || bracketTex !== undefined, doc));
       }
       cursor = pattern.lastIndex;
     }
@@ -10532,16 +11141,16 @@
         continue;
       }
       if (!line.trim()) { flushParagraph(); index += 1; continue; }
-      const mathOpen = line.match(/^\s*(?:\\\[|\$\$)\s*(.*)$/);
+      const mathOpen = line.match(/^\s*(\\\[|\$\$)\s*(.*)$/);
       if (mathOpen) {
         flushParagraph();
-        const closeRe = /(?:\\\]|\$\$)\s*$/;
+        const closeRe = mathOpen[1] === '$$' ? /\$\$\s*$/ : /\\\]\s*$/;
         let tex;
-        if (mathOpen[1] && closeRe.test(mathOpen[1])) {
-          tex = mathOpen[1].replace(closeRe, '').trim();
+        if (mathOpen[2] && closeRe.test(mathOpen[2])) {
+          tex = mathOpen[2].replace(closeRe, '').trim();
           index += 1;
         } else {
-          const parts = mathOpen[1] ? [mathOpen[1]] : [];
+          const parts = mathOpen[2] ? [mathOpen[2]] : [];
           index += 1;
           while (index < lines.length && !closeRe.test(lines[index])) { parts.push(lines[index]); index += 1; }
           if (index < lines.length) { parts.push(lines[index].replace(closeRe, '')); index += 1; }
@@ -10747,7 +11356,7 @@
   function updateChatBubble(bubble, message, { force = false } = {}) {
     const isUser = message.role === 'user';
     const sourceGeneration = isUser ? '' : normalizeChatSourceGeneration(message.sourceGeneration);
-    const revision = `${message.streaming ? '1' : '0'}:${sourceGeneration}:${message.quote || ''}:${message.content}`;
+    const revision = `${message.streaming ? '1' : '0'}:${isUser ? '' : chatMathRevision}:${sourceGeneration}:${message.quote || ''}:${message.content}`;
     if (!force && bubble.dataset.chatRevision === revision) return;
     if (!force && (bubble === chatPointerLockedBubble || chatSelectionTouches(bubble))) {
       chatRenderPending = true;
@@ -12494,7 +13103,7 @@
       saving: '正在确认改动已保存', installing: '正在安装更新', disabled: '应用内更新未启用', error: '暂时无法更新',
     };
     const details = {
-      idle: '仅在你点击时检查更新。', checking: '正在连接 GitHub 更新服务。', current: '可以继续使用当前版本。',
+      idle: '正式版启动时检查新版本并提醒查看发布页，也可以在这里手动检查。', checking: '正在连接 GitHub 更新服务。', current: '可以继续使用当前版本。',
       ahead: '当前更新通道没有更高的版本。', available: '下载完成后可确认保存、安装并重新启动。',
       downloading: '你可以继续阅读；下载完成后由你决定何时安装。', ready: '安装前会保存笔记、设置和阅读记录。普通退出不会安装。',
       saving: '保存失败或取消时会停止安装。', installing: '应用即将退出，完成后会自动重新启动。',
@@ -14572,7 +15181,13 @@
       const nextProfileId = translationProfileId();
       if (previousProfileId !== nextProfileId) {
         state.translationRuns.forEach((run) => { if (run?.running) cancelTranslationRun(run); });
-        clearRenderedTranslations();
+        clearReaderSentenceHover();
+        if (previousProfileId && state.activeJob && frameDocument()?.querySelector('.my-scholar-translation:not(.is-pending):not(.is-error)')) {
+          const jobId = state.activeJob.job_id;
+          void requestConfirmation('已有译文会保留。是否使用新引擎重新翻译当前论文？新结果成功后才会替换对应译文，其他论文不会自动重译。', '翻译引擎已切换', { accept: '重新翻译当前论文', cancel: '保留现有译文' }).then((retranslate) => {
+            if (retranslate && state.activeJob?.job_id === jobId) void runFullTranslation({ refresh: true });
+          });
+        }
       }
       document.body.classList.toggle('readonly-mode', payload.readonly === true);
       if (payload.readonly === true) {

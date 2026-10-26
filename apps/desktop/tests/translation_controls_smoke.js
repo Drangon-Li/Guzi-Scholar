@@ -104,7 +104,10 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
           failMissing = false; await delayedFailure;
           await route.fulfill({ status: 503, json: { error: 'synthetic temporary failure' } }); return;
         }
-        const result = { ...body, text: jobId === continuationId ? `连贯译文：${body.text}` : `新译文：${body.block_id}`, profile_id: profile };
+        const translated = (text) => jobId === continuationId ? `连贯译文：${text}` : `新译文：${body.block_id}`;
+        const segments = (body.segments || []).map((segment) => ({ id: segment.id, text: translated(segment.text) }));
+        const result = { ...body, text: segments.length ? segments.map((segment) => segment.text).join(' ') : translated(body.text),
+          ...(segments.length ? { segments, source_segments: body.segments } : {}), profile_id: profile };
         records.set(jobId, [...records.get(jobId).filter((record) => record.block_id !== result.block_id), result]);
         payload = { result };
       } else if (pathname.endsWith('/translations')) payload = { translations: records.get(jobId) || [] };
@@ -121,8 +124,8 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
     async function toggleHover() {
       await menu(); await page.locator('#translation-hover-toggle').click(); await page.keyboard.press('Escape');
     }
-    async function hoverSource() {
-      const paragraph = frame.locator('p[data-block-id="ready"]');
+    async function hoverSource(blockId = 'full') {
+      const paragraph = frame.locator(`p[data-block-id="${blockId}"]`);
       await paragraph.scrollIntoViewIfNeeded();
       const box = await paragraph.evaluate((node) => {
         const walker = node.ownerDocument.createTreeWalker(node, NodeFilter.SHOW_TEXT);
@@ -153,8 +156,13 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
     const ready = () => frame.locator('.my-scholar-translation[data-for="ready"]');
     await source().waitFor({ state: 'visible' }); await ready().waitFor({ state: 'visible' });
     assert.equal(requests.length, 0, 'Cache replay must not send requests');
-    await hoverSource();
     const tooltip = () => page.locator('#selection-popover:not([hidden]):not(.is-closing)');
+    await hoverSource('ready');
+    await tooltip().filter({ hasText: '缓存译文：ready' }).waitFor({ state: 'visible' });
+    assert.equal(sentenceRequests().length, 0, 'Hovering a cached paragraph must reuse its displayed translation');
+    await page.mouse.move(0, 0);
+    await tooltip().waitFor({ state: 'detached' });
+    await hoverSource();
     await tooltip().filter({ hasText: '正在翻译当前句' }).waitFor({ state: 'visible' });
     assert.equal(sentenceRequests().length, 1);
     await toggleHover();
@@ -265,15 +273,15 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
     assert.deepEqual(await frame.locator('figure.pdf-figure figcaption').allTextContents(), ['same-figure-1', 'same-figure-2', 'leading-figure', 'trailing-figure', 'separate-figure', 'heading-figure', 'reference-figure'].map((id) => `Figure ${id}. Synthetic diagram.`));
     await mode('translation');
     await frame.locator('.my-scholar-translation[data-for="same-start"]').waitFor({ state: 'visible' });
-    assert.equal(await frame.locator('p[data-block-id="same-start"]').isVisible(), false);
-    assert.equal(await frame.locator('.my-scholar-translation[data-for="same-start"]').textContent(), `连贯译文：${joined}`);
+    assert.equal(await frame.locator('p[data-block-id="same-start"] .reader-source-sentence').isVisible(), false);
+    assert.equal(await frame.locator('.my-scholar-translation[data-for="same-start"] .translation-text').textContent(), `连贯译文：${joined}`);
     await mode('original');
     assert.equal(await frame.locator('p[data-block-id="same-start"]').isVisible(), true);
     assert.equal(await frame.locator('.my-scholar-translation[data-for="same-start"]').isVisible(), false);
     const requestsBeforeReload = requests.length;
     await page.reload({ waitUntil: 'networkidle' });
     frame = await open(continuationId);
-    assert.equal(await frame.locator('.my-scholar-translation[data-for="same-start"]').textContent(), `连贯译文：${joined}`);
+    assert.equal(await frame.locator('.my-scholar-translation[data-for="same-start"] .translation-text').textContent(), `连贯译文：${joined}`);
     assert.equal(await frame.locator('[data-annotation-id="saved-continuation"]').first().textContent(), 'translated paragraph');
     assert.equal(requests.length, requestsBeforeReload, 'Reopening the reader must reuse the complete cached translation');
     assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);

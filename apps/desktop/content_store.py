@@ -36,12 +36,17 @@ def _translation_key(
     target_language: str,
     source_hash: str = "",
     profile_id: str = "",
+    alignment_version: str = "",
+    segments: Optional[List[dict]] = None,
 ) -> str:
     digest = source_hash.strip() or hashlib.sha256(text.encode("utf-8")).hexdigest()
     target = target_language.strip() or "中文"
     if target.lower().replace("_", "-") in {"zh", "zh-cn", "zh-hans", "chinese", "简体中文", "中文（简体）"}:
         target = "中文"
     material = "\n".join((profile_id.strip(), target, block_id.strip(), digest))
+    if alignment_version or segments is not None:
+        segment_digest = hashlib.sha256(json.dumps(segments, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        material += "\n" + alignment_version + "\n" + segment_digest
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 def _translation_records(job_dir: Path) -> List[Dict[str, Any]]:

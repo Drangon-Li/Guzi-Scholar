@@ -13,6 +13,7 @@ import argparse
 import base64
 from contextlib import contextmanager
 from functools import wraps
+from concurrent.futures import Future
 import email.parser
 import errno
 import hashlib
@@ -51,7 +52,7 @@ except ImportError:  # pragma: no cover - present only on Windows
 
 import runtime
 from annotation_style_sync import AnnotationStyleRecoveryRequiredError, AnnotationStyleSyncError, changed_action_fields, commit_style_sync, recover_pending_transactions
-from ai import TranslationQualityError, auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, chat_context_info, is_metadata_block, reference_quick_read, review_tables, services as ai_services, status as ai_status, test_connections as ai_test_connections, translate_text, translate_text_stream, translation_profile_id
+from ai import TranslationQualityError, auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, chat_context_info, is_metadata_block, reference_quick_read, review_tables, services as ai_services, status as ai_status, test_connections as ai_test_connections, translate_text, translate_text_stream, translation_profile_id, validate_translation_segments
 from ai_capabilities import discover_models, get_model_capabilities, normalize_ai_options
 from bibliography import is_fragmented_metadata_text, retrieve_bibliographic_metadata, retrieve_reference_evidence
 from config import AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE, TRANSLATION_PROVIDERS, resolve_ai_profile
@@ -95,6 +96,7 @@ SETTINGS_PATH = DATA_ROOT / "settings.json"
 AI_STATUS_HISTORY_PATH = DATA_ROOT / "ai-status-history.json"
 AI_STATUS_HISTORY_LIMIT = 100
 TRANSLATION_LOCK = threading.RLock()
+TRANSLATION_FLIGHTS: Dict[tuple, Future] = {}
 MATH_RENDERER = MathRenderer()
 MATH_RENDERER_LOCK = threading.Lock()
 ANNOTATION_LOCK = threading.RLock()
@@ -2671,7 +2673,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 records = _translation_records(job_dir)
                 if not runtime.READONLY_MODE and _translation_records_need_persist(job_dir):
                     _write_translation_records(job_dir, records)
-            if runtime.READONLY_MODE:
+            if runtime.READONLY_MODE or parse_qs(parsed.query).get("scope", [""])[0] == "all":
                 # The showcase has no translation credentials of its own; the
                 # archived translations ARE the exhibit, so skip the profile
                 # scoping that keeps live clients on their current gateway.
@@ -3749,21 +3751,17 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._send_error_json(str(exc), getattr(exc, "status", HTTPStatus.BAD_REQUEST))
 
     def _translate(self, job_id: str) -> None:
+        flight = None
+        flight_key = None
+        leader = False
         try:
-            # Keep only document validation and cache lookup in the mutation
-            # section. The model call itself must be outside it so the three
-            # full-translation workers can run concurrently for one document.
             with _job_mutation(job_id):
                 job_dir = self._completed_job_dir(job_id)
                 if not job_dir:
                     return
                 document = _read_json_file(_active_conversion_root(job_dir) / "document.json", {})
                 semantic_validation = document.get("semantic_validation", {}) if isinstance(document, dict) else {}
-                if (
-                    isinstance(document, dict) and document.get("translation_enabled") is False
-                ) or (
-                    isinstance(semantic_validation, dict) and semantic_validation.get("status") == "FAIL"
-                ):
+                if (isinstance(document, dict) and document.get("translation_enabled") is False) or (isinstance(semantic_validation, dict) and semantic_validation.get("status") == "FAIL"):
                     raise PipelineError("当前文档未通过语义结构校验，不能对视觉整页结果执行段落翻译。")
                 payload = self._read_json_body()
                 text = str(payload.get("text", "")).strip()
@@ -3779,66 +3777,108 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     for item in formulas
                     if isinstance(item, dict) and re.fullmatch(r"__MY_SCHOLAR_MATH_\d+__", str(item.get("token", "")))
                 ]
+                segments = payload.get("segments")
+                alignment_version = str(payload.get("alignment_version") or "")
+                if "segments" in payload or alignment_version:
+                    segments = validate_translation_segments(text, segments, alignment_version, formulas)
+                if not text:
+                    raise ValueError("没有可翻译的文本。")
                 profile_id = translation_profile_id(profile)
-                cache_key = _translation_key(text, block_id, target_language, source_hash, profile_id)
-                # An explicit re-translation has to reach the model: the reader
-                # asks for one when the stored translation is the thing that
-                # looks wrong, so answering it from the same record is useless.
+                cache_key = _translation_key(text, block_id, target_language, source_hash, profile_id, alignment_version, segments)
                 refresh = bool(payload.get("refresh"))
                 with TRANSLATION_LOCK:
-                    cached = None if refresh else next(
-                        (item for item in _translation_records(job_dir) if item.get("cache_key") == cache_key), None
-                    )
+                    cached = None if refresh else next((item for item in _translation_records(job_dir) if item.get("cache_key") == cache_key), None)
+                    if not cached:
+                        # Refresh shares only with another refresh, so an
+                        # explicit retranslation cannot inherit a stale miss.
+                        flight_key = (str(job_dir.resolve()), cache_key, refresh)
+                        flight = TRANSLATION_FLIGHTS.get(flight_key)
+                        if flight is None:
+                            leader = True
+                            flight = Future()
+                            TRANSLATION_FLIGHTS[flight_key] = flight
+
+            def result_for_request(on_delta=None):
+                nonlocal job_dir
+                if cached:
+                    return {**cached, "cached": True}
+                if not leader:
+                    return {**flight.result(), "cached": False}
+                try:
+                    options = {"target_language": target_language, "context": _job_context(job_dir, 5000), "formulas": formulas, "profile": profile}
+                    if segments is not None:
+                        options.update(segments=segments, alignment_version=alignment_version)
+                        result = translate_text(text, **options)
+                        if on_delta:
+                            on_delta({"delta": result["text"]})
+                    elif on_delta:
+                        parts = []
+                        try:
+                            for delta in translate_text_stream(text, **options):
+                                parts.append(delta)
+                                on_delta({"delta": delta})
+                            translated = "".join(parts).strip()
+                            if not translated:
+                                raise RuntimeError("模型返回为空。")
+                            result = {"text": translated}
+                        except Exception as exc:
+                            if parts and not isinstance(exc, TranslationQualityError):
+                                raise
+                            result = translate_text(text, **options)
+                    else:
+                        result = translate_text(text, **options)
+                    provider = profile.get("provider", "openai-compatible")
+                    model = (profile.get("model") or None) if provider == "openai-compatible" else None
+                    record = {
+                        **result, "cache_key": cache_key, "profile_id": profile_id,
+                        "provider": provider, "model": model,
+                        "provider_snapshot": {"provider": provider, "model": model, "mode": profile.get("mode") if provider == "openai-compatible" else None},
+                        "block_id": block_id, "target_language": target_language,
+                        "source_hash": source_hash or hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                        "source_text": text, "formulas": formulas, "updated_at": utc_now(),
+                    }
+                    if segments is not None:
+                        record.update(source_segments=segments, alignment_version=alignment_version)
+                    with _job_mutation(job_id):
+                        if STORE is not None:
+                            current_dir = STORE.path(job_id)
+                            if not current_dir:
+                                raise PipelineError("任务不存在。")
+                            job_dir = current_dir
+                        with TRANSLATION_LOCK:
+                            records = _translation_records(job_dir)
+                            existing = next((item for item in records if item.get("cache_key") == cache_key), None)
+                            # A refresh can finish while an earlier ordinary
+                            # miss is still running. Keep its successful result.
+                            if existing is not None and not refresh:
+                                record = existing
+                            else:
+                                records = [item for item in records if item.get("cache_key") != cache_key]
+                                records.append(record)
+                                _write_translation_records(job_dir, records)
+                    flight.set_result(record)
+                    return {**record, "cached": False}
+                except BaseException as exc:
+                    flight.set_exception(exc)
+                    raise
+                finally:
+                    with TRANSLATION_LOCK:
+                        if TRANSLATION_FLIGHTS.get(flight_key) is flight:
+                            del TRANSLATION_FLIGHTS[flight_key]
+
             if payload.get("stream"):
-                self._translate_stream_response(
-                    job_dir,
-                    cached,
-                    job_id=job_id,
-                    text=text,
-                    block_id=block_id,
-                    target_language=target_language,
-                    source_hash=source_hash,
-                    formulas=formulas,
-                    profile_id=profile_id,
-                    cache_key=cache_key,
-                    profile=profile,
-                )
-                return
-            if cached:
-                self._send_json({"result": {**cached, "cached": True}})
-                return
-            result = translate_text(
-                text,
-                target_language=target_language,
-                context=_job_context(job_dir, 5000),
-                formulas=formulas,
-                profile=profile,
-            )
-            record = {
-                **result,
-                "cache_key": cache_key,
-                "profile_id": profile_id,
-                "block_id": block_id,
-                "target_language": target_language,
-                "source_hash": source_hash or hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                "source_text": text,
-                "formulas": formulas,
-                "updated_at": utc_now(),
-            }
-            with _job_mutation(job_id):
-                if STORE is not None:
-                    current_dir = STORE.path(job_id)
-                    if not current_dir:
-                        self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
-                        return
-                    job_dir = current_dir
-                with TRANSLATION_LOCK:
-                    records = [item for item in _translation_records(job_dir) if item.get("cache_key") != cache_key]
-                    records.append(record)
-                    _write_translation_records(job_dir, records)
-            self._send_json({"result": {**record, "cached": False}})
+                self._translate_stream_response(result_for_request)
+            else:
+                self._send_json({"result": result_for_request()})
         except Exception as exc:
             self._send_error_json(f"翻译失败：{exc}", HTTPStatus.BAD_GATEWAY)
+        finally:
+            # A disconnected SSE client may fail before its producer starts.
+            if leader and flight is not None and not flight.done():
+                flight.set_exception(RuntimeError("翻译请求已关闭。"))
+                with TRANSLATION_LOCK:
+                    if TRANSLATION_FLIGHTS.get(flight_key) is flight:
+                        del TRANSLATION_FLIGHTS[flight_key]
 
     def _account_status(self) -> None:
         if runtime.READONLY_MODE:
@@ -4007,89 +4047,19 @@ class ScholarHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return False
 
-    def _translate_stream_response(
-        self,
-        job_dir: Path,
-        cached: Optional[Dict[str, Any]],
-        *,
-        job_id: str,
-        text: str,
-        block_id: str,
-        target_language: str,
-        source_hash: str,
-        formulas: List[Dict[str, str]],
-        profile_id: str,
-        cache_key: str,
-        profile: Dict[str, str],
-    ) -> None:
+    def _translate_stream_response(self, result_for_request) -> None:
         try:
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
-            # SSE has no Content-Length; under HTTP/1.1 keep-alive the end of
-            # the stream must be signalled by closing the connection.
             self.send_header("Connection", "close")
             self.close_connection = True
             self.end_headers()
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return
-        if cached:
-            self._send_sse_event({"result": {**cached, "cached": True}})
-            return
-        context = _job_context(job_dir, 5000)
-        parts: List[str] = []
         try:
-            try:
-                for delta in translate_text_stream(text, target_language=target_language, context=context, formulas=formulas, profile=profile):
-                    parts.append(delta)
-                    if not self._send_sse_event({"delta": delta}):
-                        return
-                translated = "".join(parts).strip()
-                if not translated:
-                    raise RuntimeError("模型返回为空。")
-                result = {
-                    "text": translated,
-                    "model": (profile.get("model") or None) if profile.get("provider", "openai-compatible") == "openai-compatible" else None,
-                    "profile_id": profile_id,
-                    "formulas": formulas,
-                }
-            except Exception as exc:
-                # A stream that already emitted deltas cannot retry in place.
-                # When the model answered but the answer failed the quality
-                # check, the plain request retries it and the client replaces
-                # the streamed preview with the final result. A transport
-                # failure mid-stream is not retried.
-                recoverable = isinstance(exc, TranslationQualityError) or not parts
-                if not recoverable:
-                    self._send_sse_event({"error": f"翻译失败：{exc}"})
-                    return
-                try:
-                    result = translate_text(text, target_language=target_language, context=context, formulas=formulas, profile=profile)
-                except Exception:
-                    self._send_sse_event({"error": f"翻译失败：{exc}"})
-                    return
-            record = {
-                **result,
-                "cache_key": cache_key,
-                "profile_id": profile_id,
-                "block_id": block_id,
-                "target_language": target_language,
-                "source_hash": source_hash or hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                "source_text": text,
-                "formulas": formulas,
-                "updated_at": utc_now(),
-            }
-            with _job_mutation(job_id):
-                if STORE is not None:
-                    current_dir = STORE.path(job_id)
-                    if not current_dir:
-                        raise PipelineError("任务不存在。")
-                    job_dir = current_dir
-                with TRANSLATION_LOCK:
-                    records = [item for item in _translation_records(job_dir) if item.get("cache_key") != cache_key]
-                    records.append(record)
-                    _write_translation_records(job_dir, records)
-            self._send_sse_event({"result": {**record, "cached": False}})
+            result = result_for_request(self._send_sse_event)
+            self._send_sse_event({"result": result})
         except Exception as exc:
             self._send_sse_event({"error": f"翻译失败：{exc}"})
 

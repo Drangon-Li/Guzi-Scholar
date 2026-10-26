@@ -13,6 +13,7 @@ function functionSource(name) {
 class Element {
   constructor() {
     this.hidden = false; this.children = []; this.dataset = {}; this.attributes = {}; this.styles = {};
+    this.events = new Map();
     this.classes = new Set(); this.classList = { contains: (name) => this.classes.has(name) };
     this.style = { setProperty: (name, value) => { this.styles[name] = value; } };
     this.offsetWidth = 520; this.offsetHeight = 120;
@@ -29,7 +30,8 @@ class Element {
   setAttribute(key, value) { this.attributes[key] = value; }
   removeAttribute(key) { delete this.attributes[key]; }
   contains(node) { return node === this || this.children.includes(node); }
-  addEventListener() {}
+  addEventListener(type, callback) { this.events.set(type, callback); }
+  getBoundingClientRect() { return this.rect || { left: 100, top: 200, right: 620, bottom: 320, width: 520, height: 120 }; }
 }
 const popover = new Element(); popover.hidden = true;
 const result = new Element(); popover.append(result);
@@ -37,7 +39,7 @@ const readerView = new Element(); readerView.classes.add('active-view');
 const frame = { clientWidth: 1000, clientHeight: 800, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 800 }) };
 const wrap = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 800 }) };
 const host = { activeElement: null, createElement: () => new Element() };
-const timers = new Map(); let timerId = 0;
+const timers = new Map(); const timerDelays = new Map(); let timerId = 0;
 const rendered = []; const translations = []; let actionsRendered = 0; let nativeText = ''; let enabled = true;
 const doc = {
   defaultView: { cancelAnimationFrame() {} },
@@ -54,11 +56,12 @@ const context = vm.createContext({
   document: host, frameDocument: () => currentDoc,
   window: {
     clearTimeout: (id) => timers.delete(id),
-    setTimeout: (callback) => { timers.set(++timerId, callback); return timerId; },
+    setTimeout: (callback, delay) => { timers.set(++timerId, callback); timerDelays.set(timerId, delay); return timerId; },
     requestAnimationFrame: (callback) => callback(),
   },
   $: (selector) => ({ '#selection-popover': popover, '#selection-translation-result': result, '#reader-view': readerView, '#html-preview': frame, '.reader-frame-wrap': wrap })[selector],
   activeChatSourceGeneration: () => 'base',
+  cssEscape: (value) => value,
   blockForNode: (node) => node.annotationBlock || node,
   textOffset: (_root, _node, offset) => offset,
   canonicalBlockText: (root) => root.text,
@@ -82,10 +85,10 @@ const context = vm.createContext({
   NOTE_HOVER_OPEN_DELAY: 120,
 });
 vm.runInContext('let selectionTranslationTimer = null; let selectionTranslationToken = 0; let selectionTranslationKey = ""; let selectionTranslationAbortController = null; let selectionTranslationRecord = null;\n' + [
-  'clearReaderSentenceHover', 'readerSentenceSelection', 'paintReaderSentenceTooltip', 'positionReaderSentenceTooltip', 'setReaderSentenceHover',
+  'clearReaderSentenceHover', 'readerSentenceToolbarLocked', 'readerSentenceHoverProtectedAtPoint', 'readerSentenceSelection', 'paintReaderSentenceTooltip', 'positionReaderSentenceTooltip', 'setReaderSentenceHover',
   'isAIAnnotation', 'hasAnnotationNote', 'hasAnnotationHoverDetails', 'applyAnnotationTheme',
   'canonicalSelectionOffsets', 'clearSelectionPopover', 'selectionRequestKey', 'activeSelectionActionTarget', 'positionSelectionPopover', 'renderSelectionTranslation',
-].map(functionSource).join('\n') + '\nthis.test = { readerSentenceSelection, setReaderSentenceHover, clearReaderSentenceHover, clearSelectionPopover, activeSelectionActionTarget, positionReaderSentenceTooltip };', context);
+].map(functionSource).join('\n') + '\nthis.test = { readerSentenceSelection, setReaderSentenceHover, clearReaderSentenceHover, clearSelectionPopover, activeSelectionActionTarget, positionReaderSentenceTooltip, readerSentenceHoverProtectedAtPoint };', context);
 const t = context.test;
 function pair(id, text, start = 0, end = text.length) {
   const root = { isConnected: true, text, dataset: { page: '2', blockId: `block-${id}` } };
@@ -161,6 +164,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   popover.style.top = '123px'; t.positionReaderSentenceTooltip(doc);
   assert.equal(popover.style.top, '123px', 'Background layout changes keep the hovered toolbar stationary');
   t.setReaderSentenceHover(null);
+  assert.equal(timerDelays.get(context.readerSentenceState.closeTimer), 600, 'Leaving the sentence gives the pointer 600 ms to reach the toolbar');
   const close = timers.get(context.readerSentenceState.closeTimer); timers.delete(context.readerSentenceState.closeTimer); close();
   assert.equal(popover.hidden, false, 'The pointer can enter and operate the toolbar');
   context.readerSentenceState.toolbarPointerInside = false;
@@ -201,6 +205,8 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   vm.runInContext(functionSource('installReaderSentenceHover') + '\nthis.installHover = installReaderSentenceHover;', context);
   t.clearSelectionPopover({ clearState: true, immediate: true });
   context.installHover(doc);
+  const popoverEventsStart = source.indexOf("  $('#selection-popover')?.addEventListener('pointerenter'");
+  vm.runInContext(source.slice(popoverEventsStart, source.indexOf('\n  function positionSelectionPopover(', popoverEventsStart)), context);
   assert.equal(listeners.get('pointerup'), listeners.get('pointermove'), 'Pointer release reuses the same hover scheduling and selection guards');
   const pointerEvent = { target: { closest: () => null }, pointerType: 'mouse', buttons: 0, clientX: 90, clientY: 80 };
   listeners.get('pointerdown')({ ...pointerEvent, buttons: 1 });
@@ -210,6 +216,29 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   const [frameId, pointerFrame] = pointerFrames.entries().next().value; pointerFrames.delete(frameId); pointerFrame();
   assert.equal(context.readerSentenceState.activePairId, second.id);
   assert(timers.has(context.readerSentenceState.hoverTimer), 'The sentence toolbar is scheduled to reopen after a click');
+  enabled = false;
+  await (await runOpenTimer()).pending;
+  context.readerSentenceState.hoverOrigin = { x: 90, y: 80 };
+  assert.equal(t.readerSentenceHoverProtectedAtPoint(doc, { x: 130, y: 140 }), true, 'The geometric path to the toolbar spans intervening sentences');
+  assert.equal(t.readerSentenceHoverProtectedAtPoint(doc, { x: 800, y: 140 }), false, 'Moving sideways outside the path can choose another sentence');
+  const originalPair = context.readerSentenceState.activePair;
+  context.readerSentencePairAtPoint = () => first;
+  listeners.get('pointermove')({ ...pointerEvent, clientX: 130, clientY: 140 });
+  assert.equal(pointerFrames.size, 0, 'Crossing another sentence on the way to the toolbar does not schedule a replacement');
+  assert.equal(context.readerSentenceState.activePair, originalPair);
+  popover.events.get('pointerenter')();
+  t.setReaderSentenceHover(first);
+  assert.equal(context.readerSentenceState.activePair, originalPair, 'Pointer entry locks the original toolbar action snapshot');
+  popover.events.get('pointerleave')();
+  host.activeElement = popover;
+  popover.events.get('focusin')();
+  t.setReaderSentenceHover(null);
+  timers.get(context.readerSentenceState.closeTimer)();
+  assert.equal(popover.hidden, false, 'Keyboard focus keeps the toolbar open after the pointer leaves');
+  host.activeElement = null;
+  popover.events.get('focusout')({ currentTarget: popover, relatedTarget: null });
+  assert.equal(timerDelays.get(context.readerSentenceState.closeTimer), 600);
+  context.readerSentencePairAtPoint = () => second;
   listeners.get('pointerdown')({ ...pointerEvent, buttons: 1 });
   listeners.get('pointerup')({ ...pointerEvent, buttons: 1 });
   assert.equal(pointerFrames.size, 0, 'An ongoing pointer drag cannot schedule sentence hover');
@@ -221,6 +250,7 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
   assert.equal(timers.has(context.readerSentenceState.hoverTimer), false);
 
   nativeText = '';
+  enabled = true;
   let notePreviewOpen = true;
   const notePreview = { dataset: { annotationId: 'note' }, classList: { add() {} }, remove: () => { notePreviewOpen = false; } };
   doc.querySelector = (selector) => selector === '.annotation-note-popover' && notePreviewOpen ? notePreview : null;
@@ -288,6 +318,15 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
         assert.equal(body.html, annotation.note.trim() ? `<p>${annotation.note}</p>` : '', 'Label-only annotations do not render an empty note body');
       }
     }
+  }
+
+  for (const escape of [listeners.get('keydown'), popover.events.get('keydown')]) {
+    t.clearReaderSentenceHover(doc);
+    context.state.selection = { origin: 'selection', quote: 'Dragged text' };
+    popover.hidden = false;
+    escape({ key: 'Escape', defaultPrevented: false });
+    assert.equal(popover.hidden, true, 'Escape closes the native selection toolbar in both the reader and toolbar');
+    assert.equal(context.state.selection, null, 'Dismissed selection actions cannot remain active');
   }
 
   assert.doesNotMatch(functionSource('paintReaderSentenceTooltip'), /className = 'reader-sentence-tooltip'/u, 'The pure translation hover card has been removed');

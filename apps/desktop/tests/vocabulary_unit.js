@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const path = require('node:path');
 const context = { window: {} };
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../web/plugins/vocabulary/vocabulary.js'), 'utf8'), context);
-const { validTerm, matches, normalizeDetails, hasDetails } = context.window.MyScholarVocabulary;
+const { validTerm, matches, normalizeDetails, hasDetails, paginate } = context.window.MyScholarVocabulary;
 const { sentenceContext, validSelectionTerm } = require('../web/core.js');
 assert(validSelectionTerm('variational inference'));
 assert(!validSelectionTerm('two\nlines'));
@@ -31,12 +31,20 @@ assert(!hasDetails({ meanings: '  ' }));
 assert(hasDetails({ examples: 'An example.' }));
 assert(matches({ ...entry, details: { synonyms: 'deduction' } }, { query: 'deduction' }));
 
+const paginationEntries = Array.from({ length: 25 }, (_, id) => ({ id }));
+assert.equal(paginate(paginationEntries, 1).entries.length, 12);
+assert.equal(paginate(paginationEntries, 2).entries[0].id, 12);
+assert.equal(paginate(paginationEntries, 3).entries.length, 1);
+assert.equal(paginate(paginationEntries.slice(0, 24), 3).page, 2, 'Deletion clamps the last page');
+assert.equal(paginate([], 5).page, 1);
+assert.equal(paginate([], 5).entries.length, 0);
+
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function harness(initialEntries) {
   const listeners = new Map();
   const elements = new Map();
   const element = (id) => {
-    if (!elements.has(id)) elements.set(id, { value: id === '#vocabulary-filter' ? 'all' : '', innerHTML: '', textContent: '', hidden: false, classList: { toggle() {} }, replaceChildren() { this.innerHTML = ''; }, addEventListener() {} });
+    if (!elements.has(id)) elements.set(id, { value: id === '#vocabulary-filter' ? 'all' : '', innerHTML: '', textContent: '', hidden: false, classList: { toggle() {} }, replaceChildren() { this.innerHTML = ''; }, addEventListener(type, listener) { listeners.set(`${id}:${type}`, listener); } });
     return elements.get(id);
   };
   const root = { querySelector: element, addEventListener: (type, listener) => listeners.set(type, listener) };
@@ -95,10 +103,15 @@ function harness(initialEntries) {
     holdDetailsPatch() { heldDetailsPatch = {}; return heldDetailsPatch; },
     holdMeaningPatch() { heldMeaningPatch = {}; return heldMeaningPatch; },
     confirm(value) { confirmed = value; },
-    click(action, id) {
-      const button = { disabled: false, dataset: { vocabAction: action }, closest: () => ({ dataset: { vocabularyId: id } }) };
+    click(action, id, data = {}) {
+      const button = { disabled: false, dataset: { vocabAction: action, ...data }, closest: () => ({ dataset: { vocabularyId: id } }) };
       return listeners.get('click')({ target: { closest: () => button } });
     },
+    changeFilter(id, value) {
+      element(`#${id}`).value = value;
+      return listeners.get(`#${id}:${id === 'vocabulary-search' ? 'input' : 'change'}`)();
+    },
+    startReview() { return listeners.get('#vocabulary-start-review:click')(); },
     input(name, value) { listeners.get('input')({ target: { name, value, closest: () => ({}) } }); },
     submit() { return listeners.get('submit')({ preventDefault() {}, target: { matches: () => true } }); },
   };
@@ -108,6 +121,40 @@ const emptyEntry = { id: 'empty', term: 'empty term', meaning: '', note: '', tag
 const snapshot = (term = emptyEntry.term) => ({ term, source: { surface: 'source', job_id: 'job', quote: 'An example sentence.' } });
 
 async function asyncChecks() {
+  const manyEntries = Array.from({ length: 25 }, (_, index) => ({ ...emptyEntry, id: `word-${index}`, term: `term ${index}`, meaning: index === 12 ? '' : '释义', tags: index % 2 ? ['奇数'] : [] }));
+  const paging = harness(manyEntries);
+  await paging.controller.load();
+  const listHTML = () => paging.elements.get('#vocabulary-list').innerHTML;
+  const cardCount = () => (listHTML().match(/class="vocabulary-card"/gu) || []).length;
+  assert.equal(cardCount(), 12);
+  await paging.click('next-page');
+  assert(listHTML().includes('term 12'));
+  await paging.click('edit', 'word-12');
+  paging.input('note', '第 2 页的未保存草稿');
+  await paging.controller.load();
+  assert(listHTML().includes('第 2 页的未保存草稿'), 'Refresh retains the current page and draft');
+  assert.equal(paging.elements.get('#vocabulary-page').textContent, '第 2 / 3 页');
+  await paging.controller.saveSelection(snapshot('term 12'), { meaning: '第 2 页后台补全' });
+  assert(listHTML().includes('第 2 页的未保存草稿') && listHTML().includes('第 2 页后台补全'));
+  assert.equal(paging.elements.get('#vocabulary-page').textContent, '第 2 / 3 页');
+  await paging.click('next-page');
+  await paging.click('delete', 'word-24');
+  assert.equal(paging.elements.get('#vocabulary-page').textContent, '第 2 / 2 页');
+  paging.changeFilter('vocabulary-tag', '奇数');
+  assert.equal(paging.elements.get('#vocabulary-page').textContent, '第 1 / 1 页');
+  assert.equal(cardCount(), 12);
+  paging.changeFilter('vocabulary-tag', '');
+  await paging.click('next-page');
+  paging.startReview();
+  assert(paging.elements.get('#vocabulary-review').innerHTML.includes('复习 1 / 24'), 'Review includes the full filtered collection');
+  await paging.click('end-review');
+  paging.changeFilter('vocabulary-search', 'term 2');
+  assert.equal(paging.elements.get('#vocabulary-page').textContent, '第 1 / 1 页');
+  assert.equal(cardCount(), 5);
+  paging.changeFilter('vocabulary-search', 'missing');
+  assert.equal(cardCount(), 0);
+  assert.equal(paging.elements.get('#vocabulary-range').textContent, '显示 0 / 0 个词条');
+
   const ready = harness([emptyEntry]);
   await ready.controller.load();
   const filled = await ready.controller.saveSelection(snapshot(), { meaning: '已有成功译文' });

@@ -12,20 +12,28 @@ const sentence = `We compute ${token}.`;
 const math = (tex) => [{ token, tex, markup: `<math><mi>${tex}</mi></math>` }];
 const requests = [];
 let cache = [];
+let profileId = 'profile';
+let targetLanguage = 'zh';
+let requestGate = null;
+let requestFailure = false;
 const context = vm.createContext({
+  AbortController, DOMException,
   state: { activeJob: { job_id: 'fixture' }, translationCache: [], annotations: [] },
   readerMount: {},
   readerMountMatches: () => true,
   readerHoverTranslationEnabled: () => true,
-  translationProfileId: () => 'profile',
-  translationTargetLanguage: () => 'zh',
+  translationProfileId: () => profileId,
+  translationTargetLanguage: () => targetLanguage,
+  rememberDisplayedTranslation: () => {},
   translationCacheFor: () => cache,
   setTranslationCacheFor: (_job, records) => { cache = records; },
   jsonOptions: (body) => ({ body }),
   api: async (_url, { body }) => {
     requests.push(JSON.parse(JSON.stringify(body)));
-    await Promise.resolve();
-    return { result: { text: body.text, profile_id: 'profile' } };
+    const requestedProfile = profileId;
+    await (requestGate || Promise.resolve());
+    if (requestFailure) throw new Error('fixture translation unavailable');
+    return { result: { text: body.text, profile_id: requestedProfile, ...(body.segments ? { alignment_version: 'sentence-v1', source_segments: body.segments, segments: body.segments } : {}) } };
   },
 });
 vm.runInContext([
@@ -43,23 +51,26 @@ vm.runInContext([
   'this.hover = setReaderSentenceHover; this.replay = renderCachedTranslations; this.preview = previewCaptionTranslation; this.usable = hasUsableTranslation;',
 ].join('\n'), context);
 
-const archived = { block_id: 'archived-block', source_hash: 'archived-source', target_language: '中文', profile_id: 'archived-profile', text: '已有译文' };
-const current = { ...archived, profile_id: 'current-profile', text: '当前译文' };
+const archived = { block_id: 'archived-block', source_hash: 'archived-source', target_language: '中文', profile_id: 'archived-profile', text: '已有译文', updated_at: '2026-10-25T00:00:00Z' };
+const current = { ...archived, profile_id: 'current-profile', text: '当前译文', updated_at: '2026-10-26T00:00:00Z' };
 const french = { ...archived, target_language: 'fr', text: 'Traduction' };
+const displayWrites = [];
 const profileContext = vm.createContext({
-  state: { health: { ai: { services: { translation: { target_language: 'zh' } } } } },
+  state: { activeJob: { job_id: 'fixture' }, health: { ai: { services: { translation: { target_language: 'zh' } } } } },
+  translationDisplayChoices: {}, translationDisplayStorageKey: 'display-choices',
+  persistentStateSet: (...values) => displayWrites.push(values),
   translationCacheFor: () => [archived, current, french],
 });
 vm.runInContext([
-  section('function healthAIService(', 'function clearRenderedTranslations('),
+  section('function healthAIService(', 'function translationCacheFor('),
   section('function translationTargetLanguage(', 'async function streamApiRequest('),
-  'this.filter = translationsForActiveProfile; this.cached = cachedTranslation;',
+  'this.filter = translationsForActiveProfile; this.cached = cachedTranslation; this.remember = rememberDisplayedTranslation;',
 ].join('\n'), profileContext);
 const filteredProfiles = () => Array.from(profileContext.filter([archived, current, french]), (record) => record.profile_id);
-assert.deepEqual(filteredProfiles(), [], 'Desktop mode without an active profile cannot replay archived translations.');
+assert.deepEqual(filteredProfiles(), ['current-profile', 'archived-profile'], 'Saved translations remain visible without an active profile, newest first.');
 assert.equal(profileContext.cached('archived-block', 'archived-source', 'zh', 'fixture'), null);
 profileContext.state.health.readonly = true;
-assert.deepEqual(filteredProfiles(), ['archived-profile', 'current-profile'], 'Read-only replay ignores profiles while retaining the target language.');
+assert.deepEqual(filteredProfiles(), ['current-profile', 'archived-profile'], 'Read-only replay retains all profiles for the target language.');
 assert.strictEqual(profileContext.cached('archived-block', 'archived-source', 'zh', 'fixture'), archived);
 assert.equal(profileContext.cached('other-block', 'archived-source', 'zh', 'fixture'), undefined, 'Read-only cache lookup still requires the source block.');
 assert.equal(profileContext.cached('archived-block', 'other-source', 'zh', 'fixture'), undefined, 'Read-only cache lookup still requires the source hash.');
@@ -68,9 +79,17 @@ profileContext.state.health.ai.services.translation.profile_id = 'current-profil
 assert.strictEqual(profileContext.cached('archived-block', 'archived-source', 'zh', 'fixture'), archived, 'An active profile does not hide archived showcase translations.');
 for (const readonly of [false, undefined, 'true']) {
   profileContext.state.health.readonly = readonly;
-  assert.deepEqual(filteredProfiles(), ['current-profile'], 'Only a boolean read-only flag bypasses desktop profile isolation.');
+  assert.deepEqual(filteredProfiles(), ['current-profile', 'archived-profile'], 'Changing profiles preserves existing displayed translations.');
   assert.strictEqual(profileContext.cached('archived-block', 'archived-source', 'zh', 'fixture'), current);
 }
+profileContext.remember('fixture', archived);
+assert.deepEqual(filteredProfiles(), ['archived-profile', 'current-profile'], 'A chosen archived translation outranks a newer record.');
+assert.equal(JSON.parse(displayWrites.at(-1)[1]).fixture['archived-block'], 'archived-profile:archived-source:');
+profileContext.state.activeJob.job_id = 'another-paper';
+assert.deepEqual(filteredProfiles(), ['current-profile', 'archived-profile'], 'Display choices belong to their document.');
+profileContext.state.health.ai.services.translation.target_language = 'fr';
+assert.deepEqual(filteredProfiles(), ['archived-profile'], 'Retaining old profiles must not mix target languages.');
+assert.deepEqual(Array.from(profileContext.filter([french]), (record) => record.text), ['Traduction']);
 
 (async () => {
   await context.request(sentence, null, math('x'));
@@ -148,7 +167,7 @@ for (const readonly of [false, undefined, 'true']) {
 
   const timers = [];
   const tooltips = [];
-  const hoverDoc = { querySelector: () => null, getSelection: () => ({ toString: () => '' }), createElement: () => ({ append(source) { this.source = source; }, querySelectorAll: () => [] }) };
+  const hoverDoc = { querySelector: () => null, querySelectorAll: () => [], getSelection: () => ({ toString: () => '' }), createElement: () => ({ append(source) { this.source = source; }, querySelectorAll: () => [] }) };
   Object.assign(context, {
     readerSentenceState: { doc: hoverDoc, pendingTranslations: new Map() },
     window: { clearTimeout: () => {}, setTimeout: (callback) => { timers.push(callback); return timers.length; } },
@@ -189,5 +208,62 @@ for (const readonly of [false, undefined, 'true']) {
   assert.match(section('function setReaderSentenceHover(', 'function installReaderSentenceHover('), /translationSourceIdentity\(source\)/, 'Hover pending requests use the complete structured identity.');
   const consumers = app.replace(section('function hashText(', 'function paragraphSource('), '');
   assert.doesNotMatch(consumers, /cachedTranslation\(\w+, hashText\(source\.text\)/, 'Cache consumers must use the same source identity.');
-  console.log(JSON.stringify({ translationCacheIdentity: true, formulaVariants: 6, markerAndStyleVariants: 4, persistedReload: true, verifiedLegacyReuse: true, plainTextCompatibility: true, readonlyArchivedReplay: true, desktopProfileIsolation: true }));
+
+  cache = [];
+  const alignedText = 'First sentence. Second sentence.';
+  const boundary = alignedText.indexOf(' Second');
+  const segments = [
+    { id: `s0-${boundary}`, text: alignedText.slice(0, boundary) },
+    { id: `s${boundary + 1}-${alignedText.length}`, text: alignedText.slice(boundary + 1) },
+  ];
+  await context.request(alignedText, 'aligned', []);
+  const beforeAlignment = requests.length;
+  const aligned = await context.request(alignedText, 'aligned', [], { segments });
+  assert.equal(requests.length, beforeAlignment + 1, 'A legacy paragraph translation cannot satisfy an aligned request.');
+  assert.deepEqual(JSON.parse(JSON.stringify(requests.at(-1).segments)), segments);
+  assert.equal(requests.at(-1).alignment_version, 'sentence-v1');
+  assert.equal(aligned.segments.length, 2);
+  assert.equal((await context.request(alignedText, 'aligned', [], { segments })).cached, true);
+  assert.equal(requests.length, beforeAlignment + 1, 'Matching sentence boundaries reuse the aligned cache.');
+  await context.request(alignedText, 'aligned', [], { segments: [{ id: `s0-${alignedText.length}`, text: alignedText }] });
+  assert.equal(requests.length, beforeAlignment + 2, 'Changed sentence boundaries require a newly aligned answer.');
+
+  const isolatedText = 'A model-specific translation.';
+  await context.request(isolatedText, 'isolation', []);
+  const beforeProfile = requests.length;
+  profileId = 'second-profile';
+  assert.equal((await context.request(isolatedText, 'isolation', [])).cached, false);
+  assert.equal(requests.length, beforeProfile + 1, 'A retained old model answer must not satisfy another model request.');
+  profileId = 'profile';
+  assert.equal((await context.request(isolatedText, 'isolation', [])).cached, true);
+  targetLanguage = 'fr';
+  assert.equal((await context.request(isolatedText, 'isolation', [])).cached, false);
+  assert.equal(requests.at(-1).target_language, 'fr');
+  targetLanguage = 'zh';
+  assert.equal((await context.request(isolatedText, 'isolation', [])).cached, true);
+  assert.equal(requests.length, beforeProfile + 2, 'Returning to the previous profile and language reuses its own answer.');
+
+  let release;
+  requestGate = new Promise((resolve) => { release = resolve; });
+  const firstConsumer = new AbortController();
+  const beforeShared = requests.length;
+  const cancelled = context.request('Shared pending sentence.', 'singleflight', [], { signal: firstConsumer.signal });
+  const cancellation = assert.rejects(cancelled, { name: 'AbortError' });
+  const survivor = context.request('Shared pending sentence.', 'singleflight', []);
+  assert.equal(requests.length, beforeShared + 1, 'Identical pending requests share one API operation.');
+  firstConsumer.abort();
+  await cancellation;
+  release();
+  assert.equal((await survivor).text, 'Shared pending sentence.', 'Cancelling one consumer must not cancel another consumer.');
+  requestGate = null;
+  assert.equal((await context.request('Shared pending sentence.', 'singleflight', [])).cached, true);
+  assert.equal(requests.length, beforeShared + 1);
+
+  requestFailure = true;
+  await assert.rejects(context.request('Retry a failed operation.', 'retry', []), /fixture translation unavailable/u);
+  const beforeRetry = requests.length;
+  requestFailure = false;
+  assert.equal((await context.request('Retry a failed operation.', 'retry', [])).text, 'Retry a failed operation.');
+  assert.equal(requests.length, beforeRetry + 1, 'A rejected pending operation must not poison retries.');
+  console.log(JSON.stringify({ translationCacheIdentity: true, formulaVariants: 6, markerAndStyleVariants: 4, persistedReload: true, verifiedLegacyReuse: true, plainTextCompatibility: true, readonlyArchivedReplay: true, desktopProfileIsolation: true, retainedDisplayChoices: true, alignedCacheBoundaries: true, singleflight: true, independentCancellation: true, failedRequestRetry: true }));
 })().catch((error) => { console.error(error); process.exitCode = 1; });

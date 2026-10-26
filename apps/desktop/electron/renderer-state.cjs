@@ -18,6 +18,7 @@ const STATIC_KEYS = new Set([
   'my-scholar-assistant-width-v1',
   'my-scholar-translation-scope-v1',
   'my-scholar-translation-preferences-v1',
+  'my-scholar-translation-display-v1',
   'my-scholar-typography',
   'my-scholar-onboarding-v1',
   'my-scholar-onboarding-v2',

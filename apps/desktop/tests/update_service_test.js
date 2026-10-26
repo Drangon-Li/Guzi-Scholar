@@ -1,6 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
-const { REPOSITORY, compareVersions, parseVersion, versionChannel, assetURL, safeNetworkURL, validateReleaseManifest, findReleaseUpdate } = require('../electron/update-service.cjs');
+const { REPOSITORY, compareVersions, parseVersion, versionChannel, assetURL, releasePageURL, safeNetworkURL, validateReleaseManifest, findReleaseAnnouncement, findReleaseUpdate } = require('../electron/update-service.cjs');
 const { resolveUpdateConfig } = require('../electron/update-config.cjs');
 const digest = Buffer.alloc(64, 1).toString('base64');
 const tag = 'v0.6.3';
@@ -25,6 +25,22 @@ async function main() {
   const calls = [];
   const result = await findReleaseUpdate({ ...options, currentVersion: '0.6.2', fetcher: async (url) => { calls.push(url); return url.includes('/releases/latest') ? release : manifest; } });
   assert.equal(result.status, 'available'); assert.equal(calls.length, 2);
+  const announcementCalls = [];
+  const announcement = await findReleaseAnnouncement({ ...options, currentVersion: '0.6.2', fetcher: async (url) => {
+    announcementCalls.push(url);
+    return { ...release, assets: [], html_url: 'https://evil.example/update' };
+  } });
+  assert.equal(announcement.externalOnly, true);
+  assert.equal(announcement.releaseURL, `https://github.com/${REPOSITORY}/releases/tag/v0.6.3`);
+  assert.equal(announcementCalls.length, 1, 'Announcement must not fetch an installation manifest');
+  for (const key of ['downloadURL', 'canDownload', 'canInstall', 'sha256', 'edSignature']) assert.equal(Object.hasOwn(announcement, key), false);
+  assert.throws(() => releasePageURL('0.6.3/../../evil'));
+  await assert.rejects(findReleaseAnnouncement({ ...options, currentVersion: '0.6.2', fetcher: async () => ({ ...release, draft: true }) }));
+  await assert.rejects(findReleaseUpdate({ ...options, currentVersion: '0.6.2', fetcher: async () => ({ ...release, assets: [] }) }), /完整提供/u, 'Announcements must not weaken installation validation');
+  assert.equal((await findReleaseAnnouncement({ ...options, currentVersion: '0.6.4', fetcher: async () => release })).status, 'ahead');
+  assert.equal((await findReleaseAnnouncement({ ...options, currentVersion: '0.6.3', fetcher: async () => release })).status, 'current');
+  const betaAnnouncement = await findReleaseAnnouncement({ channel: 'beta', currentVersion: '0.6.3-beta.1', fetcher: async () => [release, { ...release, tag_name: 'v0.6.4-beta.2', prerelease: true, assets: [] }] });
+  assert.equal(betaAnnouncement.version, '0.6.4-beta.2');
   assert.equal((await findReleaseUpdate({ ...options, currentVersion: '0.6.3', fetcher: async () => release })).status, 'current');
   await assert.rejects(findReleaseUpdate({ ...options, currentVersion: '0.6.2', fetcher: async () => ({ ...release, draft: true }) }));
   await assert.rejects(findReleaseUpdate({ ...options, currentVersion: '0.6.2-beta.1', fetcher: async () => release }));
@@ -32,10 +48,23 @@ async function main() {
   const metadata = { version: '0.6.2', updater: { enabled: true, channel: 'stable', repository: REPOSITORY, publicKey: Buffer.alloc(32).toString('base64') } };
   const configOptions = { metadata, isPackaged: true, platform: 'darwin', arch: 'arm64' };
   assert.equal(resolveUpdateConfig(configOptions).enabled, true);
+  assert.equal(resolveUpdateConfig(configOptions).discoveryEnabled, true);
   assert.equal(resolveUpdateConfig({ ...configOptions, isPackaged: false }).enabled, false);
   assert.equal(resolveUpdateConfig({ ...configOptions, metadata: { ...metadata, localTestBuild: 'probe' } }).enabled, false);
   assert.equal(resolveUpdateConfig({ ...configOptions, metadata: { ...metadata, updater: { ...metadata.updater, channel: 'beta' } } }).enabled, false);
   assert.equal(resolveUpdateConfig({ ...configOptions, arch: 'x64' }).enabled, false);
+  assert.equal(resolveUpdateConfig({ ...configOptions, arch: 'x64' }).discoveryEnabled, true);
+  assert.equal(resolveUpdateConfig({ ...configOptions, metadata: { ...metadata, updater: { ...metadata.updater, publicKey: '' } } }).discoveryEnabled, true);
+  const externalOnly = resolveUpdateConfig({ ...configOptions, metadata: { ...metadata, updater: { ...metadata.updater, enabled: false } } });
+  assert.equal(externalOnly.enabled, false); assert.equal(externalOnly.discoveryEnabled, true);
+  for (const patch of [
+    { isPackaged: false },
+    { metadata: { ...metadata, localTestBuild: 'probe' } },
+    { metadata: { ...metadata, updater: { ...metadata.updater, channel: 'internal' } } },
+    { metadata: { ...metadata, updater: { ...metadata.updater, channel: 'beta' } } },
+    { metadata: { ...metadata, updater: { ...metadata.updater, repository: 'other/repository' } } },
+    { platform: 'win32', arch: 'x64', metadata: { ...metadata, updater: { ...metadata.updater, enabled: false, signing: 'unsigned-internal' } } },
+  ]) assert.equal(resolveUpdateConfig({ ...configOptions, ...patch }).discoveryEnabled, false);
   console.log('Release discovery, identity, integrity, channel and build policy tests passed');
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; });

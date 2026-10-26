@@ -10,10 +10,11 @@ assert(from >= 0 && to > from);
 
 class Element {
   constructor() { this.dataset = {}; this.children = []; this.className = ''; }
-  get classList() { return { contains: (name) => this.className.split(/\s/u).includes(name), add: (name) => { this.className += ` ${name}`; } }; }
+  get classList() { return { contains: (name) => this.className.split(/\s/u).includes(name), add: (name) => { this.className += ` ${name}`; }, remove: (name) => { this.className = this.className.split(/\s/u).filter((value) => value !== name).join(' '); } }; }
   append(node) { this.children.push(node); }
+  setAttribute(name, value) { this[name] = value; }
   closest() { return null; }
-  querySelectorAll() { return this.marks || []; }
+  querySelectorAll(selector) { return selector.includes('data-annotation-id') ? this.marks || [] : this.children.filter((node) => !node.removed && node.className?.includes(selector.slice(1))); }
   remove() { this.removed = true; }
 }
 function documentFixture() {
@@ -24,6 +25,7 @@ function documentFixture() {
   const doc = {
     block, translations,
     createElement: () => new Element(),
+    querySelector: () => translations.find((node) => !node.removed && !node.classList.contains('is-pending') && !node.classList.contains('is-error')) || null,
     querySelectorAll: () => translations.filter((node) => !node.removed),
     defaultView: {
       requestAnimationFrame(callback) { frames.set(++nextFrame, callback); return nextFrame; },
@@ -66,11 +68,18 @@ const context = vm.createContext({
 vm.runInContext(`${source.slice(from, to)}\nthis.insert = insertTranslation;`, context);
 const sentences = docState(doc).sentences;
 context.insert('one', '正在翻译…', { pending: true });
-assert(previousTranslation.removed);
+assert.equal(previousTranslation.removed, undefined, 'Re-translation keeps the previous translation and its annotations visible');
+assert.equal(doc.block.children.at(-1).role, 'status');
+assert.match(doc.block.children.at(-1).textContent, /原译文已保留/u);
 assert.deepEqual(marked, []);
 assert.equal(docState(doc).annotationsKey, 'unchanged');
 assert.equal(docState(doc).sentences, sentences);
+context.insert('one', '翻译失败', { error: true });
+assert.equal(previousTranslation.removed, undefined, 'Failed re-translation must retain the saved translation');
+assert.match(doc.block.children.at(-1).textContent, /翻译失败.*原译文已保留/u);
+assert.equal(positioned.length, 0, 'Retaining old text must not disturb sentence tooltip positioning');
 context.insert('one', 'Translated text');
+assert.equal(previousTranslation.removed, true, 'Only a successful replacement removes the previous translation');
 assert.deepEqual(marked, ['translation-note', 'relocated-note'], 'Only notes targeting the arriving translation are replayed, including marks displaced by a pending placeholder');
 assert.equal(originalMark.removed, undefined);
 assert.equal(docState(doc).translationLayoutPending, true);
@@ -79,7 +88,7 @@ assert.equal(docState(doc).translationLayoutPending, true, 'Layout scroll remain
 doc.nextFrame();
 assert.equal(docState(doc).translationLayoutPending, false);
 assert.equal(docState(doc).unresolvedAnnotations, 0);
-assert(positioned.length >= 3);
+assert.equal(positioned.length, 2, 'Successful insertion positions the tooltip immediately and after its layout frame');
 context.insert('one', 'Background text', { doc: background });
 assert.equal(docState(background).annotationsKey, undefined, 'Inactive readers reconcile their own annotations when activated');
 assert.deepEqual(marked, ['translation-note', 'relocated-note']);
@@ -125,6 +134,7 @@ async function testReopenedTranslationRun() {
         return new Promise((resolve) => { finish = resolve; });
       },
       translationErrorMessage: (error) => error.message,
+      rememberDisplayedTranslation() {},
     });
     vm.runInContext(`${source.slice(disposeFrom, disposeTo)}\n${source.slice(translateFrom, translateTo)}\nthis.test = { disposeReaderMount, translateSnapshot };`, lifecycle);
     const pending = lifecycle.test.translateSnapshot(snapshot, run);

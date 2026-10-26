@@ -2,7 +2,7 @@
   'use strict';
   const hostPermissions = { translate_text: 'ai.translate', open_source: 'reader.open' };
   const previewCalls = new Set(['search_library', 'get_document', 'get_document_content', 'list_folders', 'list_properties', 'get_notes', 'vocabulary_list', 'storage_get', 'storage_set', 'storage_remove', 'storage.get', 'storage.set', 'storage.remove']);
-  const bounded = (message) => { if (new TextEncoder().encode(JSON.stringify(message)).byteLength > 65536) throw new Error('插件消息不能超过 64 KiB。'); return message; };
+  const bounded = (message, maxBytes = 65536) => { if (new TextEncoder().encode(JSON.stringify(message)).byteLength > maxBytes) throw new Error(`插件消息不能超过 ${maxBytes === 65536 ? '64 KiB' : '8 MiB'}。`); return message; };
   const safeMessage = (error) => ({ message: String(error?.message || error).slice(0, 4000), code: String(error?.code || 'plugin_error') });
   function create({ api, jsonOptions, navigate, onRemoved, onContributionsChanged, translate, openSource, toast, confirm }) {
     const records = new Map();
@@ -137,7 +137,8 @@
         runtime.calls.add(message.id);
         try {
           const result = await invoke(runtime, message);
-          if (current(runtime)) runtime.port.postMessage(bounded({ type: 'result', id: message.id, result }));
+          const maxBytes = recordBundled(runtime) && runtime.id === 'guzi.vocabulary' && message.name === 'vocabulary_list' ? 8 * 1024 * 1024 : 65536;
+          if (current(runtime)) runtime.port.postMessage(bounded({ type: 'result', id: message.id, result }, maxBytes));
         } catch (error) {
           if (current(runtime)) runtime.port.postMessage({ type: 'result', id: message.id, error: safeMessage(error) });
         } finally { runtime.calls.delete(message.id); }

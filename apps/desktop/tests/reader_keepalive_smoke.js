@@ -136,7 +136,9 @@ async function signal(promise, label) {
         else if (endpoint === 'auto-highlights') payload = { result: { status: 'mock', highlights: [] } };
         else if (endpoint === 'translate') {
           const revision = body.text.match(/Source revision ([a-z-]+)\./u)?.[1] || 'hover';
-          const record = { ...body, text: `${id[0].toUpperCase()} mocked translation for ${body.block_id || 'hover'}. Source revision ${revision}. ${(body.formulas || []).map((formula) => formula.token).join(' ')}`.trim(), profile_id: activeProfile };
+          const text = `${id[0].toUpperCase()} mocked translation for ${body.block_id || 'hover'}. Source revision ${revision}. ${(body.formulas || []).map((formula) => formula.token).join(' ')}`.trim();
+          const segments = body.segments?.map((segment, index) => ({ ...segment, text: index ? `合成续句 ${index}。` : text }));
+          const record = { ...body, text: segments ? segments.map((segment) => segment.text).join(' ') : text, ...(segments ? { segments } : {}), profile_id: activeProfile };
           fixture.translations = fixture.translations.filter((item) => item.block_id !== record.block_id).concat(record);
           if (id === ids[0] && fixture.translations.filter((item) => /^paragraph-/u.test(item.block_id || '')).length === 6) fullCompleted.resolve();
           payload = { result: record };
@@ -235,7 +237,7 @@ async function signal(promise, label) {
     await open(a);
     await active().locator('#body-details summary').click();
     await translateParagraph(0);
-    await active().locator('.my-scholar-translation:not(.is-pending)').waitFor();
+    await active().locator('.my-scholar-translation[data-for="paragraph-0"]:not(.is-pending)').filter({ hasText: 'A mocked translation' }).waitFor();
     await active().locator('.my-scholar-media-resize-handle.is-right').press('Shift+ArrowLeft');
     await active().locator('[data-media-key="fixture-figure"]').evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished)));
     await active().locator('body').evaluate(() => scrollTo(0, 1100));
@@ -304,7 +306,7 @@ async function signal(promise, label) {
     assert.equal(count(a, 'translate', 'POST') - hoverBefore, 1, 'Hover dispatched duplicate translation requests');
     const paragraphBefore = count(a, 'translate', 'POST');
     await translateParagraph(1);
-    await active().locator('.my-scholar-translation[data-for="paragraph-1"]:not(.is-pending)').waitFor();
+    await active().locator('.my-scholar-translation[data-for="paragraph-1"]:not(.is-pending)').filter({ hasText: 'A mocked translation' }).waitFor();
     const inlineFormula = active().locator('.my-scholar-translation[data-for="paragraph-1"] img.math-source-inline');
     await inlineFormula.waitFor();
     await inlineFormula.evaluate((image) => image.decode());
@@ -331,7 +333,12 @@ async function signal(promise, label) {
     await signal(fullCompleted.promise, 'background full translation completion');
     assert.equal(await active().locator('.my-scholar-translation').count(), 0, 'Full translation leaked into B while completing');
     await activate(a);
-    await page.waitForFunction(() => document.querySelector('#html-preview').contentDocument.querySelectorAll('.my-scholar-translation:not(.is-pending):not(.is-error)').length === 6);
+    await page.waitForFunction(() => {
+      const doc = document.querySelector('#html-preview').contentDocument;
+      const translated = [...doc.querySelectorAll('.my-scholar-translation:not(.is-pending):not(.is-error)')];
+      return new Set(translated.map((node) => node.dataset.for)).size === 6
+        && !doc.querySelector('.my-scholar-translation.is-pending, .my-scholar-translation.is-error');
+    });
     assert.equal(await active().locator('.my-scholar-translation').filter({ hasText: 'B mocked translation' }).count(), 0);
     await activate(b);
     assert.equal(await active().locator('.my-scholar-translation').count(), 0, 'Full translation leaked into B');
@@ -433,19 +440,25 @@ async function signal(promise, label) {
     await structure(1);
 
     await open(a);
-    assert.equal(await active().locator('.my-scholar-translation').count(), 6, 'Profile case needs rendered A translations');
+    assert.equal(await active().locator('.my-scholar-translation').evaluateAll((nodes) => new Set(nodes.map((node) => node.dataset.for)).size), 6, 'Profile case needs rendered A translations');
     await remember(a, 'profile-a');
     await activate(b);
     await page.locator('[data-view="settings-view"]').click();
     await page.locator('.settings-navigation a[href="#settings-ai"]').click();
+    const translationsBeforeProfileChange = requests.filter((item) => item.endpoint === 'translate').length;
     const changedHealth = page.waitForResponse((response) => response.url().endsWith('/api/health'));
     await page.locator('#setting-translation-model').fill('keepalive-new-model');
     assert.equal((await (await changedHealth).json()).ai.services.translation.profile_id, `${profile}-changed`);
-    await page.waitForFunction(() => window.__keepaliveRefs['profile-a'].doc.querySelectorAll('.my-scholar-translation').length === 0);
+    assert.equal(await page.evaluate(() => {
+      const ref = window.__keepaliveRefs['profile-a'];
+      return ref.doc.querySelector('.my-scholar-translation') === ref.translation && ref.translation.isConnected;
+    }), true, 'Profile change must preserve existing background translation nodes');
     await activate(a);
-    assert.equal(await active().locator('.my-scholar-translation').count(), 0, 'Background document retained translations from the previous profile');
+    assert.equal(await active().locator('.my-scholar-translation').evaluateAll((nodes) => new Set(nodes.map((node) => node.dataset.for)).size), 6, 'Profile change must retain all previously translated paragraphs');
+    assert.equal(await active().locator('.my-scholar-translation').evaluateAll((nodes, oldProfile) => nodes.every((node) => node.dataset.profileId === oldProfile), profile), true, 'Retained translations must preserve their original engine provenance');
+    assert.equal(requests.filter((item) => item.endpoint === 'translate').length, translationsBeforeProfileChange, 'Profile change must not automatically retranslate background papers');
     assert.equal(await page.evaluate(() => document.querySelector('#html-preview').contentDocument === window.__keepaliveRefs['profile-a'].doc), true,
-      'Profile change must clear the resident Document without replacing it');
+      'Profile change must preserve the resident Document');
     await structure(2);
     assert.deepEqual(errors, [], 'Unexpected page errors');
     assert.deepEqual(unexpected, [], 'Unexpected endpoint: synthetic tests must never call real AI');
@@ -454,7 +467,7 @@ async function signal(promise, label) {
       'expanded-assistant-settings-library-return-wide-and-narrow',
       'no-duplicate-hover-or-paragraph-handlers', 'background-paragraph-and-full-translation-isolation',
       'pending-initial-load-switch-isolation', 'close-background-active-last-and-reopen', 'active-and-background-reflow-invalidate-generation',
-      'pending-full-translation-cannot-write-into-reopened-or-reflowed-document', 'profile-change-clears-background-resident-translations',
+      'pending-full-translation-cannot-write-into-reopened-or-reflowed-document', 'profile-change-preserves-background-translations-and-provenance',
     ] }));
   } finally {
     pending.forEach((gate) => gate.release());

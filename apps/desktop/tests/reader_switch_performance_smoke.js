@@ -141,7 +141,11 @@ async function staticServer() {
         if (endpoint === 'translations') payload = { translations: Array.from({ length: translationCount }, (_, index) => ({ block_id: `paragraph-${index * 11}`, source_text: paragraph(id, index * 11), text: `文献 ${id[0].toUpperCase()} 第 ${index} 条合成缓存译文。`, profile_id: profile, target_language: '中文', formulas: [] })) };
         else if (endpoint === 'media-layout') payload = { media_layout: { version: 1, items: {} } };
         else if (endpoint === 'annotations') payload = { annotations: savedAnnotations.get(id) };
-        else if (endpoint === 'translate' && method === 'POST') payload = { result: { ...request.postDataJSON(), text: insertedTranslation, profile_id: profile } };
+        else if (endpoint === 'translate' && method === 'POST') {
+          const body = request.postDataJSON();
+          const segments = body.segments?.map((segment, index) => ({ ...segment, text: index ? `合成续句 ${index}。` : insertedTranslation }));
+          payload = { result: { ...body, text: segments ? segments.map((segment) => segment.text).join(' ') : insertedTranslation, ...(segments ? { segments } : {}), profile_id: profile } };
+        }
         else if (endpoint === 'notes') payload = { markdown: '' };
         else if (endpoint === 'auto-highlights') payload = { result: { status: 'mock', highlights: [] } };
         else if (!endpoint) payload = jobs.find((job) => job.job_id === id);

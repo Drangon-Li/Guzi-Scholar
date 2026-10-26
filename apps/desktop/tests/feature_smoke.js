@@ -1413,7 +1413,7 @@ let browserSession;
   await page.route(`**/api/jobs/${virtualJobId}/media-layout`, async (route) => {
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ media_layout: { version: 1, items: {} } }) });
   });
-  await page.route(`**/api/jobs/${virtualJobId}/translations`, async (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ translations: [] }) }));
+  await page.route((url) => url.pathname === `/api/jobs/${virtualJobId}/translations`, async (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ translations: [] }) }));
   await page.route(`**/api/jobs/${virtualJobId}/translate`, async (route) => {
     const payload = JSON.parse(route.request().postData() || '{}');
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ result: { text: payload.text || '虚拟文献译文', cached: false, profile_id: 'translation-smoke-profile' } }) });

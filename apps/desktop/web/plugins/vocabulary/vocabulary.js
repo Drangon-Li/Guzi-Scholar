@@ -29,6 +29,13 @@
     return haystack.includes(query.trim().toLocaleLowerCase());
   }
 
+  function paginate(entries, requestedPage, pageSize = 12) {
+    const pages = Math.max(1, Math.ceil(entries.length / pageSize));
+    const page = Math.min(pages, Math.max(1, requestedPage));
+    const start = (page - 1) * pageSize;
+    return { page, pages, start, entries: entries.slice(start, start + pageSize) };
+  }
+
   function create({ api, jsonOptions, escapeHTML: h, translate, openSource, toast, confirm }) {
     const root = document.querySelector('#vocabulary-view');
     const list = root.querySelector('#vocabulary-list');
@@ -38,6 +45,7 @@
     let loadToken = 0;
     let mutationRevision = 0;
     const entryRevisions = new Map();
+    let page = 1;
     let editingId = '';
     let draft = null;
     let draftFields = new Set();
@@ -114,6 +122,16 @@
         : details[field].trim() ? [`<div class="vocabulary-detail-field"><dt>${label}</dt><dd>${h(details[field])}</dd></div>`] : []).join('');
       return `<details class="vocabulary-details" data-details-key="${h(key)}"${expandedDetails.has(key) ? ' open' : ''}><summary>详细释义 <span class="vocabulary-details-badge">AI 辅助 · 可编辑</span></summary>${editing ? `<div class="vocabulary-details-editor">${fields}</div>` : `<dl>${fields}</dl>`}</details>`;
     }
+    function collapsibleText(text, className, key, limit = 220) {
+      if (text.length <= limit) return `<p class="${className}">${h(text)}</p>`;
+      return `<details class="vocabulary-long-content" data-details-key="${h(key)}"${expandedDetails.has(key) ? ' open' : ''}><summary><span>${h(text.slice(0, limit))}…</span><span class="vocabulary-expand-label">展开全文</span></summary><p class="${className}">${h(text)}</p></details>`;
+    }
+    function sourcesMarkup(entry) {
+      const sources = entry.sources || [];
+      const sourceMarkup = (source, index) => `<div class="vocabulary-source">${collapsibleText(source.quote || source.selected_text || entry.term, 'vocabulary-source-quote', `quote:${entry.id}:${index}`, 180)}<button data-vocab-action="source" data-source-index="${index}" class="tiny-button vocabulary-source-link" type="button">${h(source.title || '来源文献')}${source.page ? ` · 第 ${h(source.page)} 页` : ''} ↗</button></div>`;
+      const key = `sources:${entry.id}`;
+      return `<div class="vocabulary-sources">${sources[0] ? sourceMarkup(sources[0], 0) : '<span class="vocabulary-field-hint">暂无来源原句</span>'}${sources.length > 1 ? `<details class="vocabulary-more-sources" data-details-key="${h(key)}"${expandedDetails.has(key) ? ' open' : ''}><summary>更多来源（${sources.length - 1}）</summary>${sources.slice(1).map((source, index) => sourceMarkup(source, index + 1)).join('')}</details>` : ''}</div>`;
+    }
     async function explain(entry) {
       if (explaining.has(entry.id)) return;
       explaining.add(entry.id); render();
@@ -151,13 +169,19 @@
       tagSelect.innerHTML = `<option value="">全部标签</option>${tags.map((tag) => `<option value="${h(tag)}">${h(tag)}</option>`).join('')}`;
       tagSelect.value = tags.includes(selectedTag) ? selectedTag : '';
       const shown = filtered();
+      const paged = paginate(shown, page);
+      page = paged.page;
       root.querySelector('#vocabulary-count').textContent = `${shown.length} / ${entries.length} 个词条`;
+      root.querySelector('#vocabulary-range').textContent = shown.length ? `显示 ${paged.start + 1}–${paged.start + paged.entries.length} / ${shown.length} 个词条` : '显示 0 / 0 个词条';
+      root.querySelector('#vocabulary-page').textContent = `第 ${page} / ${paged.pages} 页`;
+      root.querySelector('[data-vocab-action="previous-page"]').disabled = page === 1;
+      root.querySelector('[data-vocab-action="next-page"]').disabled = page === paged.pages;
       root.querySelector('#vocabulary-start-review').disabled = !shown.length;
       root.querySelector('#vocabulary-browser').hidden = Boolean(review);
-      list.innerHTML = shown.length ? shown.map((entry) => {
+      list.innerHTML = shown.length ? paged.entries.map((entry) => {
         const editing = entry.id === editingId;
         const model = editing ? draft : entry;
-        return `<article class="vocabulary-card" data-vocabulary-id="${h(entry.id)}"><div class="vocabulary-card-heading"><h2>${h(entry.term)}</h2><span class="vocabulary-review-status">${entry.review?.status === 'mastered' ? '已掌握' : '未掌握'}</span><div class="vocabulary-card-actions"><button data-vocab-action="edit" class="tiny-button" type="button">编辑</button><button data-vocab-action="delete" class="tiny-button" type="button">删除</button></div></div>${editing ? `<form class="vocabulary-edit"><label>释义<textarea name="meaning" rows="3" maxlength="10000">${h(model.meaning || '')}</textarea></label><label>标签<span class="vocabulary-field-hint">逗号分隔，修改后保存即可分类或改名</span><input name="tags" maxlength="1000" value="${h(model.tags || '')}" placeholder="例如：机器学习, 数学"></label><label>备注<textarea name="note" rows="2" maxlength="10000">${h(model.note || '')}</textarea></label>${detailsMarkup({ ...entry, details: model.details }, { editing: true })}<div class="vocabulary-edit-actions"><button data-vocab-action="save-edit" class="primary-button compact-button" type="button">保存</button><button data-vocab-action="cancel-edit" class="secondary-button compact-button" type="button">取消</button></div></form>` : `<p class="vocabulary-meaning">${h(entry.meaning || '暂无释义')}</p>${!entry.meaning ? `<button data-vocab-action="complete" class="tiny-button" type="button"${completing.has(entry.id) ? ' disabled' : ''}>${completing.has(entry.id) ? '补全中…' : '补全释义 / 重试'}</button>` : ''}${entry.note ? `<p class="vocabulary-note">${h(entry.note)}</p>` : ''}${detailsMarkup(entry)}${!hasDetails(entry.details) ? `<button data-vocab-action="explain" class="tiny-button vocabulary-explain" type="button"${explaining.has(entry.id) ? ' disabled aria-busy="true"' : ''}>${explaining.has(entry.id) ? '详细释义生成中…' : '生成详细释义 / 重试'}</button>` : ''}<div class="vocabulary-tags">${(entry.tags || []).map((tag) => `<button data-vocab-action="tag" data-tag="${h(tag)}" type="button">${h(tag)}</button>`).join('')}</div>`}<div class="vocabulary-sources">${(entry.sources || []).map((source, index) => `<div class="vocabulary-source"><blockquote>${h(source.quote || source.selected_text || entry.term)}</blockquote><button data-vocab-action="source" data-source-index="${index}" class="tiny-button" type="button">${h(source.title || '来源文献')}${source.page ? ` · 第 ${h(source.page)} 页` : ''} ↗</button></div>`).join('')}</div></article>`;
+        return `<article class="vocabulary-card" data-vocabulary-id="${h(entry.id)}"><div class="vocabulary-card-heading"><div class="vocabulary-term"><h2>${h(entry.term)}</h2>${entry.details?.part_of_speech ? `<span class="vocabulary-part-of-speech">${h(entry.details.part_of_speech)}</span>` : ''}</div><span class="vocabulary-review-status">${entry.review?.status === 'mastered' ? '已掌握' : '未掌握'}</span><div class="vocabulary-card-actions"><button data-vocab-action="edit" class="tiny-button" type="button">编辑</button><button data-vocab-action="delete" class="tiny-button" type="button">删除</button></div></div>${editing ? `<form class="vocabulary-edit"><label>释义<textarea name="meaning" rows="3" maxlength="10000">${h(model.meaning || '')}</textarea></label><label>标签<span class="vocabulary-field-hint">逗号分隔，修改后保存即可分类或改名</span><input name="tags" maxlength="1000" value="${h(model.tags || '')}" placeholder="例如：机器学习, 数学"></label><label>备注<textarea name="note" rows="2" maxlength="10000">${h(model.note || '')}</textarea></label>${detailsMarkup({ ...entry, details: model.details }, { editing: true })}<div class="vocabulary-edit-actions"><button data-vocab-action="save-edit" class="primary-button compact-button" type="button">保存</button><button data-vocab-action="cancel-edit" class="secondary-button compact-button" type="button">取消</button></div></form>` : `${collapsibleText(entry.meaning || '暂无释义', 'vocabulary-meaning', `meaning:${entry.id}`)}${!entry.meaning ? `<button data-vocab-action="complete" class="tiny-button" type="button"${completing.has(entry.id) ? ' disabled' : ''}>${completing.has(entry.id) ? '补全中…' : '补全释义 / 重试'}</button>` : ''}${entry.note ? collapsibleText(entry.note, 'vocabulary-note', `note:${entry.id}`, 120) : ''}${detailsMarkup(entry)}${!hasDetails(entry.details) ? `<button data-vocab-action="explain" class="tiny-button vocabulary-explain" type="button"${explaining.has(entry.id) ? ' disabled aria-busy="true"' : ''}>${explaining.has(entry.id) ? '详细释义生成中…' : '生成详细释义 / 重试'}</button>` : ''}<div class="vocabulary-tags">${(entry.tags || []).map((tag) => `<button data-vocab-action="tag" data-tag="${h(tag)}" type="button">${h(tag)}</button>`).join('')}</div>`}${sourcesMarkup(entry)}${Number.isInteger(entry.review?.review_count) || entry.review?.last_reviewed_at ? `<div class="vocabulary-review-history">${[Number.isInteger(entry.review?.review_count) ? `已复习 ${h(entry.review.review_count)} 次` : '', entry.review?.last_reviewed_at ? `最近 ${h(entry.review.last_reviewed_at.slice(0, 10))}` : ''].filter(Boolean).join(' · ')}</div>` : ''}</article>`;
       }).join('') : '<div class="empty-state">没有匹配的词条。阅读原文时选中单词或短语，点击「加入生词本」。</div>';
       renderReview();
     }
@@ -200,7 +224,7 @@
       try { return await task; } finally { pendingSaves.delete(key); }
     }
     for (const id of ['vocabulary-search', 'vocabulary-filter', 'vocabulary-tag']) {
-      root.querySelector(`#${id}`).addEventListener(id === 'vocabulary-search' ? 'input' : 'change', render);
+      root.querySelector(`#${id}`).addEventListener(id === 'vocabulary-search' ? 'input' : 'change', () => { page = 1; render(); });
     }
     root.querySelector('#vocabulary-reload').addEventListener('click', () => void load());
     root.querySelector('#vocabulary-start-review').addEventListener('click', () => {
@@ -250,6 +274,7 @@
       const id = button.closest('[data-vocabulary-id]')?.dataset.vocabularyId;
       const entry = entries.find((item) => item.id === id);
       try {
+        if (action === 'previous-page' || action === 'next-page') { page += action === 'next-page' ? 1 : -1; render(); return; }
         if (action === 'save-edit') { await saveDraft(); return; }
         if (action === 'edit' && entry) { expandedDetails.delete(`edit:${id}`); editingId = id; draft = { meaning: entry.meaning || '', note: entry.note || '', tags: (entry.tags || []).join(', '), details: normalizeDetails(entry.details) }; draftFields = new Set(); render(); }
         if (action === 'cancel-edit') { editingId = ''; draft = null; render(); }
@@ -260,7 +285,7 @@
           if (editingId === id) { editingId = ''; draft = null; }
           render();
         }
-        if (action === 'tag') { root.querySelector('#vocabulary-tag').value = button.dataset.tag; render(); }
+        if (action === 'tag') { root.querySelector('#vocabulary-tag').value = button.dataset.tag; page = 1; render(); }
         if (action === 'source' && entry) await openSource(entry.sources[Number(button.dataset.sourceIndex)]);
         if (action === 'complete' && entry && !completing.has(id)) {
           completing.add(id); render();
@@ -286,5 +311,5 @@
     return { load, saveSelection };
   }
 
-  window.MyScholarVocabulary = { create, validTerm, sentenceContext, matches, normalizeDetails, hasDetails };
+  window.MyScholarVocabulary = { create, validTerm, sentenceContext, matches, normalizeDetails, hasDetails, paginate };
 })();

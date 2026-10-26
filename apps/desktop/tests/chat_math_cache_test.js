@@ -30,13 +30,17 @@ const context = vm.createContext({
 });
 vm.runInContext(`${source.slice(start, end)}
 this.cache = chatMathCache; this.pending = chatMathPending;
-this.node = chatMathNode; this.schedule = scheduleChatMathHydration;`, context);
+this.node = chatMathNode; this.schedule = scheduleChatMathHydration;
+this.revision = () => chatMathRevision;`, context);
 
 async function fireTimer() {
   assert.equal(timers.size, 1, 'Only one hydration timer may be outstanding');
   const [id, callback] = timers.entries().next().value;
   timers.delete(id);
+  const revisionBefore = context.revision();
   await callback();
+  assert.equal(context.revision(), revisionBefore + (failRequest ? 0 : 1),
+    'Only successful MathML hydration should invalidate existing chat bubble revisions');
   assert.ok(context.cache.size <= 256, 'Completed MathML cache exceeds its bound');
 }
 async function drainPending() {

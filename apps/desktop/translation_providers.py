@@ -129,37 +129,39 @@ def _translate_batch(texts: list[str], profile: Mapping[str, str], source: str, 
     return [item[field].strip() for item in items]
 
 
-def translate(text: str, profile: Mapping[str, str], *, target_language: str = "", timeout: int = 60) -> str:
+def translate_many(values: list[str], profile: Mapping[str, str], *, target_language: str = "", timeout: int = 60) -> list[str]:
     if not configured(profile):
         raise RuntimeError("请先完整配置机器翻译服务的凭据。")
     source = language_code(profile.get("source_language", "auto"), source=True)
     target = language_code(target_language or profile.get("target_language", "zh"))
-    # Keep formulas and layout locally: machine translators are not required
-    # to echo placeholders, even when a provider offers ignored XML tags.
     parts: list[str] = []
     positions: list[int] = []
     texts: list[str] = []
-    for segment in PROTECTED_SPAN_RE.split(text):
-        if PROTECTED_SPAN_RE.fullmatch(segment) or not any(char.isalpha() for char in segment):
-            parts.append(segment)
-            continue
-        while segment:
-            end = min(len(segment), 4000)
-            if end < len(segment):
-                boundaries = list(re.finditer(r"[.!?。！？]\s", segment[:end]))
-                boundary = boundaries[-1].end() if boundaries else segment.rfind(" ", 0, end) + 1
-                if boundary > end // 2:
-                    end = boundary
-            piece, segment = segment[:end], segment[end:]
-            if not any(char.isalpha() for char in piece):
-                parts.append(piece)
+    ranges: list[tuple[int, int]] = []
+    for text in values:
+        start = len(parts)
+        for segment in PROTECTED_SPAN_RE.split(text):
+            if PROTECTED_SPAN_RE.fullmatch(segment) or not any(char.isalpha() for char in segment):
+                parts.append(segment)
                 continue
-            leading = piece[:len(piece) - len(piece.lstrip())]
-            trailing = piece[len(piece.rstrip()):]
-            parts.append(leading)
-            positions.append(len(parts))
-            texts.append(piece.strip())
-            parts.extend(["", trailing])
+            while segment:
+                end = min(len(segment), 4000)
+                if end < len(segment):
+                    boundaries = list(re.finditer(r"[.!?。！？]\s", segment[:end]))
+                    boundary = boundaries[-1].end() if boundaries else segment.rfind(" ", 0, end) + 1
+                    if boundary > end // 2:
+                        end = boundary
+                piece, segment = segment[:end], segment[end:]
+                if not any(char.isalpha() for char in piece):
+                    parts.append(piece)
+                    continue
+                leading = piece[:len(piece) - len(piece.lstrip())]
+                trailing = piece[len(piece.rstrip()):]
+                parts.append(leading)
+                positions.append(len(parts))
+                texts.append(piece.strip())
+                parts.extend(["", trailing])
+        ranges.append((start, len(parts)))
     # Bound batches to Volcengine's 16 texts / 5000 characters.
     offset = 0
     while offset < len(texts):
@@ -171,4 +173,8 @@ def translate(text: str, profile: Mapping[str, str], *, target_language: str = "
         for index, value in enumerate(translated, offset):
             parts[positions[index]] = value
         offset = end
-    return "".join(parts)
+    return ["".join(parts[start:end]) for start, end in ranges]
+
+
+def translate(text: str, profile: Mapping[str, str], *, target_language: str = "", timeout: int = 60) -> str:
+    return translate_many([text], profile, target_language=target_language, timeout=timeout)[0]

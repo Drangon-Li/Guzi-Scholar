@@ -934,7 +934,7 @@ let browserSession;
   await frame.locator('a.cross-reference[href="#table-1"]').first().click();
   const manualHighlightsBefore = await frame.locator('mark.my-scholar-highlight[data-user-color="true"]').count();
   const selectedBlockTranslationsBefore = await frame.locator('.my-scholar-translation[data-for="block-1-6-paragraph"]').count();
-  await frame.locator('[data-block-id="block-1-6-paragraph"]').evaluate((block) => {
+  const selectedQuote = await frame.locator('[data-block-id="block-1-6-paragraph"]').evaluate((block) => {
     const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT);
     const node = walker.nextNode();
     const range = document.createRange();
@@ -944,15 +944,17 @@ let browserSession;
     selection.removeAllRanges();
     selection.addRange(range);
     document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    return range.toString();
   });
+  const selectedTextRequests = () => selectionTranslationRequests.filter((request) => request.text === selectedQuote);
   await page.locator('#selection-popover:not([hidden])').waitFor();
   const selectionTranslationResult = page.locator('#selection-translation-result');
   await selectionTranslationResult.locator('.selection-translation-loading').waitFor();
   await selectionTranslationResult.filter({ hasText: selectionTranslationText }).waitFor();
   const selectionTranslationState = await selectionTranslationResult.getAttribute('data-state');
   const selectedBlockTranslationsAfter = await frame.locator('.my-scholar-translation[data-for="block-1-6-paragraph"]').count();
-  if (selectionTranslationState !== 'ready' || selectionTranslationRequests.length !== 1) throw new Error(`Selected text was not translated automatically exactly once (${JSON.stringify({ state: selectionTranslationState, requests: selectionTranslationRequests })})`);
-  if (selectionTranslationRequests[0].block_id != null && selectionTranslationRequests[0].block_id !== '') throw new Error(`Selection translation reused a paragraph cache key (${JSON.stringify(selectionTranslationRequests[0])})`);
+  if (selectionTranslationState !== 'ready' || selectedTextRequests().length !== 1) throw new Error(`Selected text was not translated automatically exactly once (${JSON.stringify({ state: selectionTranslationState, quote: selectedQuote, requests: selectionTranslationRequests })})`);
+  if (selectedTextRequests()[0].block_id != null && selectedTextRequests()[0].block_id !== '') throw new Error(`Selection translation reused a paragraph cache key (${JSON.stringify(selectedTextRequests()[0])})`);
   if (selectedBlockTranslationsAfter !== selectedBlockTranslationsBefore) throw new Error(`Selection translation inserted or replaced a document translation (${selectedBlockTranslationsBefore} -> ${selectedBlockTranslationsAfter})`);
   const selectionStructure = await page.locator('#selection-popover').evaluate((node) => {
     const actions = node.querySelector('.selection-actions').getBoundingClientRect();
@@ -989,7 +991,7 @@ let browserSession;
     if (placement.left < placement.wrapLeft - 1 || placement.right > placement.wrapRight + 1 || placement.top < placement.wrapTop - 1 || placement.bottom > placement.wrapBottom + 1) throw new Error(`Scaled selection toolbar escaped the reading area (${JSON.stringify(metrics.selectionTypography)})`);
   }
   if (metrics.selectionTypography.at120.fontSize <= metrics.selectionTypography.at115.fontSize) throw new Error(`Selection toolbar font did not scale with the reader setting (${JSON.stringify(metrics.selectionTypography)})`);
-  if (metrics.selectionTypography.at120.resultFontSize <= metrics.selectionTypography.at115.resultFontSize || selectionTranslationRequests.length !== 1) throw new Error(`Selection translation typography or request deduplication failed (${JSON.stringify({ typography: metrics.selectionTypography, requests: selectionTranslationRequests })})`);
+  if (metrics.selectionTypography.at120.resultFontSize <= metrics.selectionTypography.at115.resultFontSize || selectedTextRequests().length !== 1) throw new Error(`Selection translation typography or request deduplication failed (${JSON.stringify({ typography: metrics.selectionTypography, requests: selectionTranslationRequests })})`);
   await page.locator('#selection-highlight').click();
   const manualHighlight = frame.locator('mark.my-scholar-highlight[data-user-color="true"]').nth(manualHighlightsBefore);
   await manualHighlight.waitFor();

@@ -240,6 +240,19 @@ class AIAdapterTest(unittest.TestCase):
         self.assertNotIn("核心概念区分", prompt)
         self.assertEqual(complete.call_args.kwargs["temperature"], 0.2)
 
+    def test_chat_plain_and_streamed_prompts_require_latex_for_math(self) -> None:
+        history = [{"role": "user", "content": "解释变量 r_i 的含义。"}]
+        with patch("ai._complete", return_value="$r_i$") as plain, \
+             patch("ai._complete_stream", return_value=iter(["$r_i$"])) as streamed:
+            chat(history)
+            self.assertEqual(list(chat_stream(history)), ["$r_i$"])
+
+        self.assertEqual(plain.call_args.args[0], streamed.call_args.args[0])
+        prompt = plain.call_args.args[0][0]["content"]
+        self.assertIn("数学变量和公式使用 LaTeX：行内用 $...$，独立公式块用 $$...$$", prompt)
+        self.assertIn("不要用 Markdown 反引号包裹数学变量或公式", prompt)
+        self.assertIn("真正的代码仍使用代码格式", prompt)
+
     def test_chat_binds_each_quote_to_its_question_in_plain_and_streamed_requests(self) -> None:
         old_quote = "These retrieved strategic priors guide the planner toward globally coherent reasoning graphs."
         quote = "Each unit is encoded using a hybrid representation that combines semantic embeddings with sparse lexical features to support both conceptual and literal alignment."
