@@ -233,7 +233,7 @@ async function review(api, context, reports, publicKey = process.env.SPARKLE_PUB
 }
 
 function releaseNotes(context) {
-  return `谷子学术 ${context.tag}\n\n支持 macOS Apple Silicon（arm64）与 Windows x64。应用内更新会先保存阅读状态与文献库数据，取消保存时不会安装更新。\n\n旧版用户请先手动安装一次 0.6.3 或更新版本，之后可使用应用内更新。安装包、更新附件与 SHA256SUMS 校验文件见本页附件。\n\nmacOS 使用 ad-hoc 代码签名及 Sparkle Ed25519 更新签名，未使用 Apple Developer ID 签名或公证，首次打开可能出现系统安全提示。Windows 安装包未使用发布者证书签名。\n\n本次原始候选已通过 macOS 与 Windows 的升级验收，包含保存取消、普通退出、重启和数据保留检查。`;
+  return `谷子学术 ${context.tag}\n\n支持 macOS Apple Silicon（arm64）与 Windows x64。应用内更新会先保存阅读状态与文献库数据，取消保存时不会安装更新。\n\n尚未内置更新器的旧版用户，请先手动安装一次本版本，之后可使用应用内更新。安装包、更新附件与 SHA256SUMS 校验文件见本页附件。\n\nmacOS 使用 ad-hoc 代码签名及 Sparkle Ed25519 更新签名，未使用 Apple Developer ID 签名或公证，首次打开可能出现系统安全提示。Windows 安装包未使用发布者证书签名。\n\n本次原始候选已通过 macOS 与 Windows 的升级验收，包含保存取消、普通退出、重启和数据保留检查。`;
 }
 
 async function promote(api, context, reports, acceptanceRunID, publicKey = process.env.SPARKLE_PUBLIC_KEY) {

@@ -7,7 +7,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const { run, canonicalPath } = require('./windows_updater_acceptance.js');
+const { run, canonicalPath, powershell } = require('./windows_updater_acceptance.js');
 const { createWindowsBuildConfig, identities } = require('../../../platforms/windows/builder-config.cjs');
 const { REPOSITORY, assetURL, compareVersions } = require('../electron/update-service.cjs');
 const { identity, acceptance, ACCEPTANCE_CHECKS } = require('../scripts/release-pipeline.cjs');
@@ -157,7 +157,7 @@ async function main() {
     logFile: path.join(evidence, `windows-${name}.log`), onResult: (result) => { if (result.pid) owned.add(result.pid); } });
   const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (_) { return false; } };
   const rows = () => {
-    const result = JSON.parse(run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress']));
+    const result = JSON.parse(powershell('Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress'));
     return Array.isArray(result) ? result : [result];
   };
   const ownedProcesses = () => {
@@ -260,7 +260,7 @@ async function main() {
     assert.ok(!fs.existsSync(userData), 'Fresh VM required: production user data already exists');
     report.user_data = userData;
     const guid = identities[context.channel].guid;
-    run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `foreach ($hive in @('HKCU:', 'HKLM:')) { foreach ($key in @('Software\\${guid}', 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}')) { if (Test-Path ($hive + '\\' + $key)) { throw 'Formal installation already exists' } } }`]);
+    powershell(`foreach ($hive in @('HKCU:', 'HKLM:')) { foreach ($key in @('Software\\${guid}', 'Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}')) { if (Test-Path ($hive + '\\' + $key)) { throw 'Formal installation already exists' } } }`);
     let corrupt = false;
     const requests = [];
     server = http.createServer((request, response) => {
@@ -367,8 +367,7 @@ async function main() {
     assert.ok(!targetMetadata.localTestBuild && !targetMetadata.windowsUpdateAcceptance);
     assert.ok(!fs.existsSync(path.join(installed, 'resources/app/electron/windows-release-probe-main.cjs')), 'Target cannot retain the old test entry');
     assert.equal(digest(installer), artifact.sha256, 'Original candidate must remain byte-identical');
-    const registered = JSON.parse(run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-      `$ErrorActionPreference='Stop'; $install=Get-ItemProperty 'HKCU:\\Software\\${guid}'; $uninstall=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}'; @{ InstallLocation=$install.InstallLocation; DisplayVersion=$uninstall.DisplayVersion } | ConvertTo-Json -Compress`]));
+    const registered = JSON.parse(powershell(`$ErrorActionPreference='Stop'; $install=Get-ItemProperty 'HKCU:\\Software\\${guid}'; $uninstall=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}'; @{ InstallLocation=$install.InstallLocation; DisplayVersion=$uninstall.DisplayVersion } | ConvertTo-Json -Compress`));
     assert.equal(canonicalPath(registered.InstallLocation), canonicalPath(installed));
     assert.equal(registered.DisplayVersion, context.version);
     const startup = await until(() => {
