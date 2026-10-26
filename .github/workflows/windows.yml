@@ -8,7 +8,7 @@ on:
       - '.github/workflows/windows.yml'
       - 'package.json'
   push:
-    branches: [main, 'codex/windows-*']
+    branches: [main]
     paths:
       - 'apps/desktop/**'
       - 'platforms/windows/**'
@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   windows:
-    name: Build and verify Windows x64
+    name: Build and verify Windows x64 packages
     runs-on: windows-2022
     timeout-minutes: 120
     env:
@@ -41,6 +41,7 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
       - name: Set up Python
+        id: python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -51,8 +52,27 @@ jobs:
           distribution: temurin
           java-version: '21'
           architecture: x64
+      - name: Configure download caches
+        shell: pwsh
+        env:
+          DOWNLOAD_CACHE_ROOT: ${{ runner.temp }}/guzi-windows-download-cache
+        run: |
+          "PIP_CACHE_DIR=$env:DOWNLOAD_CACHE_ROOT/pip" >> $env:GITHUB_ENV
+          "ELECTRON_CACHE=$env:DOWNLOAD_CACHE_ROOT/electron" >> $env:GITHUB_ENV
+          "ELECTRON_BUILDER_CACHE=$env:DOWNLOAD_CACHE_ROOT/electron-builder" >> $env:GITHUB_ENV
+      - name: Restore download caches
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ env.PIP_CACHE_DIR }}
+            ${{ env.ELECTRON_CACHE }}
+            ${{ env.ELECTRON_BUILDER_CACHE }}
+            apps/desktop/build/windows-downloads
+          key: windows-downloads-v1-${{ runner.os }}-${{ runner.arch }}-python-${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/requirements*.txt', 'platforms/windows/runtime-dependencies.json') }}
       - name: Install desktop dependencies
         run: npm ci --prefix apps/desktop
+      - name: Check release contracts before packaging
+        run: npm --prefix apps/desktop run check:release-contracts
       - name: Configure native build tools
         shell: pwsh
         run: |
@@ -86,6 +106,79 @@ jobs:
         run: npm run build:windows
       - name: Verify packaged runtime, install and uninstall
         run: npm run verify:windows:artifacts
+      - name: Record artifact checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem platforms/windows/dist -File |
+            Where-Object { $_.Extension -in '.exe', '.zip' } |
+            ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" } |
+            Set-Content platforms/windows/dist/SHA256SUMS.txt -Encoding utf8
+      - name: Upload verified Windows test packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: guzi-scholar-windows-x64
+          path: |
+            platforms/windows/dist/*.exe
+            platforms/windows/dist/*.zip
+            platforms/windows/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-upgrade:
+    name: Verify isolated Windows x64 upgrade
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      PYTHONUTF8: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - name: Set up Python
+        id: python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          architecture: x64
+      - name: Configure download caches
+        shell: pwsh
+        env:
+          DOWNLOAD_CACHE_ROOT: ${{ runner.temp }}/guzi-windows-download-cache
+        run: |
+          "PIP_CACHE_DIR=$env:DOWNLOAD_CACHE_ROOT/pip" >> $env:GITHUB_ENV
+          "ELECTRON_CACHE=$env:DOWNLOAD_CACHE_ROOT/electron" >> $env:GITHUB_ENV
+          "ELECTRON_BUILDER_CACHE=$env:DOWNLOAD_CACHE_ROOT/electron-builder" >> $env:GITHUB_ENV
+      - name: Restore download caches
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ env.PIP_CACHE_DIR }}
+            ${{ env.ELECTRON_CACHE }}
+            ${{ env.ELECTRON_BUILDER_CACHE }}
+            apps/desktop/build/windows-downloads
+          key: windows-downloads-v1-${{ runner.os }}-${{ runner.arch }}-python-${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/requirements*.txt', 'platforms/windows/runtime-dependencies.json') }}
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+      - name: Check release contracts before packaging
+        run: npm --prefix apps/desktop run check:release-contracts
+      - name: Configure native build tools
+        shell: pwsh
+        run: |
+          "MY_SCHOLAR_BUILD_PYTHON=$((Get-Command python).Source)" >> $env:GITHUB_ENV
+          "MY_SCHOLAR_TEST_PYTHON=$((Get-Command python).Source)" >> $env:GITHUB_ENV
+          "MY_SCHOLAR_JAVA_HOME=$env:JAVA_HOME" >> $env:GITHUB_ENV
       - name: Exercise isolated NSIS 0.6.2 to 0.6.3 upgrade
         shell: pwsh
         timeout-minutes: 100
@@ -105,20 +198,17 @@ jobs:
             ${{ runner.temp }}/guzi-windows-upgrade-evidence/*.log
           if-no-files-found: warn
           retention-days: 14
-      - name: Record artifact checksums
-        shell: pwsh
+
+  windows-status:
+    name: Build and verify Windows x64
+    if: always()
+    needs: [windows, windows-upgrade]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both Windows jobs to succeed
+        env:
+          PACKAGES_RESULT: ${{ needs.windows.result }}
+          UPGRADE_RESULT: ${{ needs.windows-upgrade.result }}
         run: |
-          Get-ChildItem platforms/windows/dist -File |
-            Where-Object { $_.Extension -in '.exe', '.zip' } |
-            ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" } |
-            Set-Content platforms/windows/dist/SHA256SUMS.txt -Encoding utf8
-      - name: Upload verified Windows test packages
-        uses: actions/upload-artifact@v4
-        with:
-          name: guzi-scholar-windows-x64
-          path: |
-            platforms/windows/dist/*.exe
-            platforms/windows/dist/*.zip
-            platforms/windows/dist/SHA256SUMS.txt
-          if-no-files-found: error
-          retention-days: 14
+          test "$PACKAGES_RESULT" = success
+          test "$UPGRADE_RESULT" = success

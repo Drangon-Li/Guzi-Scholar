@@ -37,6 +37,7 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        id: python
         with:
           python-version: '3.11'
           architecture: arm64
@@ -47,11 +48,27 @@ jobs:
           architecture: aarch64
       - name: Select update channel from the application version
         run: node -e 'const fs=require("fs"); const {versionChannel}=require("./apps/desktop/electron/update-service.cjs"); fs.appendFileSync(process.env.GITHUB_ENV, `GUZI_UPDATE_CHANNEL=${versionChannel(require("./apps/desktop/package.json").version)}\n`);'
-      - name: Install locked dependencies and prepare macOS runtime
+      - name: Configure download caches
+        run: |
+          echo "PIP_CACHE_DIR=$RUNNER_TEMP/guzi-download-cache/pip" >> "$GITHUB_ENV"
+          echo "ELECTRON_CACHE=$RUNNER_TEMP/guzi-download-cache/electron" >> "$GITHUB_ENV"
+          echo "ELECTRON_BUILDER_CACHE=$RUNNER_TEMP/guzi-download-cache/electron-builder" >> "$GITHUB_ENV"
+      - name: Restore download caches
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ env.PIP_CACHE_DIR }}
+            ${{ env.ELECTRON_CACHE }}
+            ${{ env.ELECTRON_BUILDER_CACHE }}
+          key: macos-downloads-v1-${{ runner.os }}-${{ runner.arch }}-python-${{ steps.python.outputs.python-version }}-${{ hashFiles('apps/desktop/package-lock.json', 'apps/desktop/scripts/prepare-mac-release.sh') }}
+      - name: Install locked dependencies
         run: |
           python3 -m pip install --disable-pip-version-check certifi==2025.8.3
           npm ci --prefix apps/desktop
-          npm --prefix apps/desktop run prepare:mac
+      - name: Check release contracts before packaging
+        run: npm --prefix apps/desktop run check:release-contracts
+      - name: Prepare macOS runtime
+        run: npm --prefix apps/desktop run prepare:mac
       - name: Build ad-hoc arm64 DMG and updater ZIP
         run: node apps/desktop/scripts/build-mac-target.cjs all internal
       - name: Verify packaged runtime and updater acceptance contract

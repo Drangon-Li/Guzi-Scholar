@@ -10,50 +10,11 @@ const { spawn, spawnSync } = require('child_process');
 const args = process.argv.slice(2);
 const explicitBaseURL = args.find((arg) => !arg.startsWith('--')) || '';
 
-// Every suite runs against the synthetic library produced by
-// tests/fixtures/seed_library.py. The reader suites assert on fixed block ids,
-// verbatim sentences and an exact document census, so the fixture reproduces
-// that shape deliberately -- see the comments in seed_library.py.
-const tests = [
-  ['document', 'web_smoke.js', { ci: true }],
-  ['features', 'feature_smoke.js', { ci: true }],
-  ['ai-controls', 'ai_controls_smoke.js', { ci: true }],
-  ['vocabulary', 'vocabulary_smoke.js', { ci: true }],
-  ['plugin-market', 'plugin_market_smoke.js', { ci: true }],
-  ['notes-revision', 'notes_revision_smoke.js', { ci: true }],
-  ['zotero-import', 'zotero_import_smoke.js', { ci: true }],
-  ['zotero-note-markers', 'zotero_note_markers_smoke.js', { ci: true }],
-  ['zotero-anchor-mapping', 'zotero_anchor_mapping_smoke.js', { ci: true }],
-  ['translation', 'translation_smoke.js', { ci: true }],
-  ['translation-controls', 'translation_controls_smoke.js', { ci: true }],
-  ['math-typography', 'math_typography_smoke.js', { ci: true }],
-  ['chat-math', 'chat_math_rendering_test.js', { ci: true }],
-  ['reader-experience', 'reader_experience_smoke.js', { ci: true }],
-  ['sentence-translation', 'sentence_translation_smoke.js', { ci: true }],
-  ['reader-copy', 'reader_copy_test.js', { ci: true }],
-  ['translation-annotation', 'translation_annotation_test.js', { ci: true }],
-  ['annotation-colors', 'annotation_colors_smoke.js', { ci: true }],
-  ['annotation-hover', 'annotation_hover_smoke.js', { ci: true }],
-  ['reader-transition', 'reader_transition_smoke.js', { ci: true }],
-  ['reader-keepalive', 'reader_keepalive_smoke.js', { ci: true }],
-  ['reader-memory', 'reader_memory_smoke.js', { ci: true }],
-  ['reader-switch-performance', 'reader_switch_performance_smoke.js', { ci: true }],
-  ['navigation-performance', 'navigation_performance_smoke.js', { ci: true }],
-  ['citations', 'citation_anchor_smoke.js', { ci: true }],
-  ['library', 'library_smoke.js', { ci: true }],
-  ['library-v3', 'library_v3_smoke.js', { ci: true }],
-  ['interactions', 'interaction_regression.js', { ci: true }],
-  ['library-v4', 'library_interactions_v4.js', { ci: true }],
-  ['reading-progress', 'reading_progress_retirement_smoke.js', { ci: true }],
-  ['graph', 'graph_ui_smoke.js', { ci: true }],
-  ['onboarding', 'onboarding_smoke.js', { ci: true }],
-];
-
-const ciOnly = args.includes('--ci')
-  || ['1', 'true', 'yes'].includes(String(process.env.MY_SCHOLAR_UI_CI || '').toLowerCase());
-const only = args.find((arg) => arg.startsWith('--only='))?.slice('--only='.length) || '';
-if (only && !tests.some(([name]) => name === only)) throw new Error(`Unknown UI suite: ${only}`);
-const selected = tests.filter(([name, , meta]) => (!ciOnly || meta.ci) && (!only || name === only));
+const { selectTests } = require('./ui-test-plan.cjs');
+const { ciOnly, shard, selected } = selectTests(args);
+const reportArg = args.find((arg) => arg.startsWith('--report='));
+const reportPath = reportArg ? path.resolve(reportArg.slice('--report='.length)) : '';
+if (args.includes('--report') || reportArg === '--report=') throw new Error('UI report requires --report=PATH');
 
 const desktopRoot = path.join(__dirname, '..');
 function resolvePython() {
@@ -76,7 +37,7 @@ function resolvePython() {
   }
   throw new Error('UI 测试需要具备 hashlib.scrypt 与 sqlite3 的 Python；可通过 MY_SCHOLAR_PYTHON 指定。');
 }
-const python = explicitBaseURL ? null : resolvePython();
+let python = null;
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -166,18 +127,59 @@ function runShared(script, baseURL) {
   return { passed: result.status === 0 && !result.signal, status: result.status, signal: result.signal || null };
 }
 
-(async () => {
-  const results = [];
-  for (const [name, script] of selected) {
-    console.log(`\n[UI ${results.length + 1}/${selected.length}] ${name}`);
-    const outcome = explicitBaseURL ? runShared(script, explicitBaseURL) : await runManaged(script);
-    results.push({ name, ...outcome });
+async function main() {
+  const report = {
+    schemaVersion: 1,
+    ciOnly,
+    shard,
+    expectedSuites: selected.map(([name]) => name),
+    complete: false,
+    error: null,
+    results: [],
+  };
+  function writeReport() {
+    if (!reportPath) return;
+    fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+    const temporary = `${reportPath}.${process.pid}.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(report, null, 2)}\n`);
+    fs.renameSync(temporary, reportPath);
   }
-  const failed = results.filter((result) => !result.passed);
+  writeReport();
+  try {
+    python = explicitBaseURL ? null : resolvePython();
+    for (const [name, script] of selected) {
+      console.log(`\n[UI ${report.results.length + 1}/${selected.length}, shard ${shard.index}/${shard.total}] ${name}`);
+      const started = Date.now();
+      try {
+        const outcome = explicitBaseURL ? runShared(script, explicitBaseURL) : await runManaged(script);
+        report.results.push({ name, script, ...outcome, error: null, durationMs: Date.now() - started });
+      } catch (error) {
+        report.results.push({ name, script, passed: false, status: null, signal: null, error: String(error), durationMs: Date.now() - started });
+        throw error;
+      } finally {
+        writeReport();
+      }
+    }
+    report.complete = true;
+  } catch (error) {
+    report.error = String(error);
+    console.error(error);
+    process.exitCode = 1;
+  } finally {
+    writeReport();
+  }
+  const failed = report.results.filter((result) => !result.passed);
   console.log(JSON.stringify({
-    total: results.length,
-    passed: results.length - failed.length,
+    total: report.results.length,
+    passed: report.results.length - failed.length,
     failed: failed.map((result) => result.name),
+    complete: report.complete,
+    shard,
   }));
-  if (failed.length) process.exitCode = 1;
-})();
+  if (failed.length || !report.complete) process.exitCode = 1;
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
