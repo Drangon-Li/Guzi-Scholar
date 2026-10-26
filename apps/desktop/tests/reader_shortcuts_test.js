@@ -79,7 +79,7 @@ for (const [platform, modifier] of [['MacIntel', 'Cmd'], ['Win32', 'Ctrl'], ['Li
   const e = event();
   assert.equal(h.context.handle(e), true);
   assert.equal(e.defaultPrevented, true);
-  assert.deepEqual(h.calls, [['translate']], 'The default scope and cache arguments stay untouched');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls)), [['translate', { refresh: true }]], 'An explicit full-translation shortcut refreshes existing translations');
   h.context.state.translationRuns.set('job', { running: true });
   assert.equal(h.context.handle(event()), true);
   assert.equal(h.calls.length, 1, 'A running translation is neither restarted nor cancelled');
@@ -167,7 +167,7 @@ for (const [platform, modifiers, action] of [
   assert.equal(Boolean(e.propagationStopped), false, 'The application shortcut can continue bubbling');
   assert.equal(tab.clicks(), 0, 'Modified Enter must not activate the focused tab');
   assert.equal(h.context.handle(e), true);
-  assert.deepEqual(h.calls, [[action]], 'The bubbled event reaches the application command');
+  assert.deepEqual(JSON.parse(JSON.stringify(h.calls)), [action === 'translate' ? [action, { refresh: true }] : [action]], 'The bubbled event reaches the application command');
 }
 
 

@@ -4306,6 +4306,7 @@
     window.clearTimeout(mount.saveMaxTimer);
     mount.cancelFontWait?.();
     mount.frame.contentWindow?.cancelAnimationFrame(mount.viewportRAF);
+    disposeInterlinearTranslations(mount.frame.contentDocument);
     mount.transition?.cancel();
     mount.transition = null;
     mount.wiredDocument = null;
@@ -5199,7 +5200,9 @@
       const belowSpace = wrapRect.height - (frameRect.top - wrapRect.top + anchor.bottom * scaleY + 6) - 8;
       const aboveSpace = frameRect.top - wrapRect.top + anchor.top * scaleY - 14;
       const minimumHeight = Math.min(240, wrapRect.height - 16);
-      popover.style.maxHeight = `${Math.min(wrapRect.height - 16, Math.max(minimumHeight, belowSpace, aboveSpace))}px`;
+      // offsetHeight rounds to whole pixels; reserve a whole-pixel height so
+      // rounding cannot reject the side that actually has enough room.
+      popover.style.maxHeight = `${Math.floor(Math.min(wrapRect.height - 16, Math.max(minimumHeight, belowSpace, aboveSpace)))}px`;
     }
     const popoverWidth = popover.offsetWidth || 320;
     const popoverHeight = popover.offsetHeight || 96;
@@ -6445,6 +6448,7 @@
       if (readerDocumentStates.has(doc)) {
         delete readerDocumentState(doc).sentences;
         if (doc === frameDocument()) rebuildReaderSentencePairs(doc);
+        scheduleInterlinearTranslations(doc);
       }
     };
     if (doc.defaultView?.katex) {
@@ -6546,16 +6550,25 @@
         :root[data-translation-display="translation"] .my-scholar-translation-original:not(.reader-sentence-pairs) { display:none!important; }
         :root[data-translation-display="translation"] .reader-source-sentence { display:none!important; }
         :root[data-translation-display="original"] .reader-source-sentence { display:inline!important; }
-        .reader-content .reader-sentence-pairs { line-height:1.45!important; }
-        .reader-content .reader-source-sentence { display:block; line-height:calc(var(--reader-line-height,1.72) * .85); }
+        .reader-content .reader-source-sentence { display:inline; }
         .reader-content .reader-sentence-pairs .reader-sentence-translation {
-          display:block; margin:.12em 0 .55em!important; padding:0!important; border:0!important;
-          font-size:90%!important; line-height:1.45!important; color:var(--reader-ui-muted,#625c56);
+          display:inline; margin:0 .65em 0 0!important; padding:0!important; border:0!important;
+          font-size:80%!important; font-weight:400; line-height:1.4!important; color:var(--reader-ui-muted,#625c56);
           background:transparent!important; text-indent:0!important;
         }
+        .reader-content .reader-interlinear-container {
+          position:relative; line-height:var(--reader-interlinear-line-height,1.4)!important;
+          padding-bottom:var(--reader-interlinear-bottom,0px)!important;
+        }
+        .reader-content .reader-interlinear-container > .reader-sentence-translation {
+          display:block; position:absolute; left:0; right:0; top:var(--reader-translation-top,0px);
+          margin:0!important; text-indent:var(--reader-translation-indent,0px)!important; pointer-events:none;
+        }
+        .reader-interlinear-container .translation-text, .reader-interlinear-container .annotation-note-trigger { pointer-events:auto; }
         .reader-content .reader-sentence-translation .translation-text { font-size:inherit!important; line-height:inherit!important; }
         .translation-source-label { display:block; font:10px/1.4 system-ui,sans-serif; opacity:.75; margin-top:2px; user-select:none; }
         .reader-sentence-translation .translation-source-label { display:inline-block; margin:0 0 0 8px; }
+        .reader-interlinear-container .translation-source-label { display:none; }
         .translation-retained-status { display:block; color:var(--reader-ui-muted,#756b60); font:12px/1.5 system-ui,sans-serif; margin:4px 0; user-select:none; }
         :root:not([data-translation-display="translation"]) .my-scholar-translation-placeholder { display:none!important; }
         .my-scholar-translation-placeholder { display:flex; align-items:center; gap:12px; margin:.6em 0; padding:8px 0; color:var(--muted,#756b60); font:13px/1.6 system-ui,sans-serif; }
@@ -6565,6 +6578,7 @@
       doc.head.append(style);
     }
     doc.documentElement.dataset.translationDisplay = state.translationPreferences.displayMode;
+    scheduleInterlinearTranslations(doc);
     if (state.translationPreferences.displayMode !== 'translation') {
       doc.querySelectorAll('.my-scholar-translation-placeholder').forEach((node) => node.remove());
       return;
@@ -8255,6 +8269,7 @@
     documentState.unresolvedAnnotations = unresolvedIds.size;
     updateAnnotationAnchorStatus(unresolvedIds.size);
     rebuildReaderSentencePairs(doc, { preserveHover });
+    scheduleInterlinearTranslations(doc);
     if (readerSearchState.open && doc === frameDocument()) refreshReaderSearch();
   }
 
@@ -9407,10 +9422,174 @@
     updateAnnotationAnchorStatus(unresolvedIds.size);
   }
 
+  function layoutInterlinearContainer(container) {
+    const doc = container.ownerDocument;
+    const view = doc.defaultView;
+    container.classList.remove('reader-interlinear-container');
+    container.style.removeProperty('--reader-interlinear-line-height');
+    container.style.removeProperty('--reader-interlinear-bottom');
+    if (doc.documentElement.dataset.translationDisplay !== 'bilingual' || !container.clientWidth) return;
+    const sources = [...container.querySelectorAll(':scope > .reader-source-sentence')];
+    const translations = [...container.querySelectorAll(':scope > .reader-sentence-translation')];
+    if (!sources.length || sources.length !== translations.length) return;
+    const computed = view.getComputedStyle(container);
+    const fontSize = parseFloat(computed.fontSize);
+    const sourceLeading = Math.max(1.35, Number(computed.getPropertyValue('--reader-line-height')) * .85 || 1.45);
+    const gap = Math.max(2, fontSize * .12);
+    const horizontalGap = fontSize * .45;
+    container.classList.add('reader-interlinear-container');
+    container.style.setProperty('--reader-interlinear-line-height', `${fontSize * sourceLeading}px`);
+
+    const measureRows = () => {
+      const rows = [];
+      sources.forEach((source, index) => {
+        const rects = [...source.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0);
+        const sourceRows = rects.map((rect) => {
+          let row = rows.find((candidate) => Math.abs(candidate.y - rect.top) < 2);
+          if (!row) { row = { y: rect.top, top: rect.top, bottom: rect.bottom, pairs: [] }; rows.push(row); }
+          row.bottom = Math.max(row.bottom, rect.bottom);
+          return row;
+        });
+        if (!rects.length) return;
+        source.querySelectorAll('math, .katex, .math-source-visual, sup, sub').forEach((node) => {
+          const rect = node.getBoundingClientRect();
+          const center = (rect.top + rect.bottom) / 2;
+          const closest = rects.reduce((best, candidate, i) => Math.abs((candidate.top + candidate.bottom) / 2 - center) < best.distance
+            ? { index: i, distance: Math.abs((candidate.top + candidate.bottom) / 2 - center) } : best, { index: 0, distance: Infinity });
+          sourceRows[closest.index].top = Math.min(sourceRows[closest.index].top, rect.top);
+          sourceRows[closest.index].bottom = Math.max(sourceRows[closest.index].bottom, rect.bottom);
+        });
+        let left = rects[0].left;
+        const text = textNodes(source, doc).find((node) => /\S/u.test(node.nodeValue));
+        const atomic = [...source.querySelectorAll('math, .katex, .math-source-visual, sup, sub, img')].find((node) => node.getBoundingClientRect().width > 0);
+        if (atomic && (!text || atomic.contains(text) || (atomic.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING))) {
+          left = atomic.getBoundingClientRect().left;
+        } else if (text) {
+          const range = doc.createRange();
+          const start = text.nodeValue.search(/\S/u);
+          range.setStart(text, start);
+          range.setEnd(text, start + 1);
+          left = range.getBoundingClientRect().left;
+        }
+        sourceRows[0].pairs.push({ source, translation: translations[index], left });
+      });
+      return rows;
+    };
+
+    // Chinese is one continuous sentence. Only its first line is indented to
+    // the English start; its own wrapping never slices or rewrites the text.
+    const origin = container.getBoundingClientRect();
+    const placements = new Map();
+    let lineHeight = fontSize * sourceLeading;
+    for (const row of measureRows()) {
+      const occupied = [];
+      let depth = 0;
+      for (const { translation, left } of row.pairs) {
+        translation.style.setProperty('--reader-translation-top', '0px');
+        translation.style.setProperty('--reader-translation-indent', `${Math.max(0, left - origin.left - container.clientLeft)}px`);
+        const box = translation.getBoundingClientRect();
+        const range = doc.createRange();
+        range.selectNodeContents(translation.querySelector('.translation-text'));
+        const shapes = [...range.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0)
+          .map((rect) => ({ left: rect.left, right: rect.right, top: rect.top - box.top, bottom: rect.bottom - box.top }));
+        let offset = 0;
+        for (;;) {
+          let next = offset;
+          for (const shape of shapes) {
+            for (const previous of occupied) {
+              if (shape.left < previous.right + horizontalGap && shape.right + horizontalGap > previous.left
+                && shape.top + offset < previous.bottom + gap && shape.bottom + offset + gap > previous.top) {
+                next = Math.max(next, previous.bottom + gap - shape.top);
+              }
+            }
+          }
+          if (next === offset) break;
+          offset = next;
+        }
+        occupied.push(...shapes.map((shape) => ({ ...shape, top: shape.top + offset, bottom: shape.bottom + offset })));
+        placements.set(translation, { offset, height: box.height });
+        depth = Math.max(depth, offset + box.height);
+      }
+      if (depth) lineHeight = Math.max(lineHeight, row.bottom - row.top + depth + gap * 3);
+    }
+    container.style.setProperty('--reader-interlinear-line-height', `${lineHeight}px`);
+    const finalOrigin = container.getBoundingClientRect();
+    let bottom = finalOrigin.bottom;
+    for (const row of measureRows()) {
+      for (const { translation } of row.pairs) {
+        const placement = placements.get(translation);
+        const top = row.bottom + gap + placement.offset;
+        translation.style.setProperty('--reader-translation-top', `${top - finalOrigin.top - container.clientTop}px`);
+        bottom = Math.max(bottom, top + placement.height + gap);
+      }
+    }
+    container.style.setProperty('--reader-interlinear-bottom', `${Math.max(0, bottom - finalOrigin.bottom)}px`);
+  }
+
+  function scheduleInterlinearTranslations(doc, block = null) {
+    if (!doc?.defaultView || !doc.querySelector('.reader-sentence-pairs')) return;
+    const documentState = readerDocumentState(doc);
+    let layout = documentState.interlinear;
+    if (layout?.disposed) return;
+    if (!layout) {
+      layout = documentState.interlinear = { frame: 0, dirty: new Set(), widths: new WeakMap() };
+      layout.schedule = () => scheduleInterlinearTranslations(doc);
+      layout.observer = new doc.defaultView.ResizeObserver((entries) => {
+        for (const entry of entries) {
+          if (layout.widths.get(entry.target) === entry.contentRect.width) continue;
+          layout.widths.set(entry.target, entry.contentRect.width);
+          scheduleInterlinearTranslations(doc, entry.target.closest('.reader-sentence-pairs'));
+        }
+      });
+      layout.imageLoad = (event) => {
+        if (!event.target.matches?.('img')) return;
+        const root = event.target.closest('.reader-sentence-pairs');
+        if (root) scheduleInterlinearTranslations(doc, root);
+      };
+      doc.addEventListener('load', layout.imageLoad, true);
+      doc.addEventListener('error', layout.imageLoad, true);
+      doc.fonts?.addEventListener('loadingdone', layout.schedule);
+      doc.fonts?.ready.then(layout.schedule);
+    }
+    if (!block) layout.dirty = null;
+    else layout.dirty?.add(block);
+    if (layout.frame) return;
+    layout.frame = doc.defaultView.requestAnimationFrame(() => {
+      layout.frame = 0;
+      const blocks = layout.dirty || doc.querySelectorAll('.reader-sentence-pairs');
+      layout.dirty = new Set();
+      for (const root of blocks) {
+        if (!root.isConnected) continue;
+        const containers = root.matches('ul, ol') ? root.querySelectorAll(':scope > li') : [root];
+        for (const container of containers) {
+          layoutInterlinearContainer(container);
+          layout.observer.observe(container);
+        }
+      }
+      if (doc === frameDocument()) positionReaderSentenceTooltip(doc);
+    });
+  }
+
+  function disposeInterlinearTranslations(doc) {
+    const layout = doc && readerDocumentState(doc).interlinear;
+    if (!layout) return;
+    layout.disposed = true;
+    layout.observer.disconnect();
+    doc.defaultView?.cancelAnimationFrame(layout.frame);
+    doc.removeEventListener('load', layout.imageLoad, true);
+    doc.removeEventListener('error', layout.imageLoad, true);
+    doc.fonts?.removeEventListener('loadingdone', layout.schedule);
+  }
+
   function unwrapSentenceTranslations(block) {
     block?.querySelectorAll('.reader-sentence-translation').forEach((node) => node.remove());
     block?.querySelectorAll('.reader-source-sentence').forEach((node) => node.replaceWith(...node.childNodes));
     block?.classList.remove('reader-sentence-pairs');
+    for (const container of [block, ...block?.querySelectorAll('.reader-interlinear-container') || []]) {
+      container?.classList.remove('reader-interlinear-container');
+      container?.style.removeProperty('--reader-interlinear-line-height');
+      container?.style.removeProperty('--reader-interlinear-bottom');
+    }
   }
 
   function insertSentenceTranslations(block, segments, options) {
@@ -9430,6 +9609,7 @@
     for (const { container, start, items } of groups) {
       if (!items.length) continue;
       const pairs = doc.createDocumentFragment();
+      const translations = doc.createDocumentFragment();
       let consumed = start;
       items.forEach(({ item, index }) => {
         const range = rangeAtOffsets(container, 0, item.end - consumed, doc);
@@ -9459,16 +9639,18 @@
           label.textContent = translationProviderLabel(record);
           translated.append(label);
         }
-        pairs.append(original, translated);
+        pairs.append(original);
+        translations.append(translated);
         first ||= translated;
         consumed = item.end;
       });
       const lastSource = [...pairs.querySelectorAll('.reader-source-sentence')].at(-1);
       if (lastSource && container.firstChild) lastSource.append(...container.childNodes);
-      container.replaceChildren(pairs);
+      container.replaceChildren(pairs, translations);
     }
     if (trigger) block.append(trigger);
     block.classList.add('reader-sentence-pairs');
+    scheduleInterlinearTranslations(doc, block);
     return first;
   }
 
@@ -9834,7 +10016,7 @@
     const label = $('#full-translate-label');
     if (label) label.textContent = scope === 'body' ? '正文翻译' : '全文翻译';
     const button = $('#full-translate-button');
-    if (button) setReaderShortcutHint(button, 'full_translation', `${scope === 'body' ? '翻译正文（不含附录）' : '翻译全文（含附录）'}；按住 ${shortcutAltModifier} 点击可重新翻译已有译文的段落`);
+    if (button) setReaderShortcutHint(button, 'full_translation', `${scope === 'body' ? '翻译正文（不含附录）' : '翻译全文（含附录）'}；再次点击可重新翻译已有译文的段落`);
     $$('#translation-scope-menu [data-translation-scope]').forEach((item) => item.setAttribute('aria-checked', String(item.dataset.translationScope === scope)));
     syncTranslationVisibilityButton();
   }
@@ -9922,7 +10104,7 @@
       } else if (run.failed) {
         showToast(`${prefix}${scopeLabel}翻译完成，但有 ${run.failed} 段失败；失败段落可稍后单独重试。`, true);
       } else {
-        showToast(total ? (snapshots.length ? `${prefix}${scopeLabel}翻译完成，译文已插入原文下方。` : `${scopeLabel}译文已存在，已直接复用本机缓存。按住 ${shortcutAltModifier} 点击可重新翻译${scopeLabel}。`) : '没有找到可翻译的正文段落。');
+        showToast(total ? (snapshots.length ? `${prefix}${scopeLabel}翻译完成，译文已插入原文下方。` : `${scopeLabel}译文已存在，已直接复用本机缓存。再次点击可重新翻译${scopeLabel}。`) : '没有找到可翻译的正文段落。');
       }
     } catch (error) {
       showToast(`全文${translationErrorMessage(error)}`, true);
@@ -14643,20 +14825,18 @@
     }
   });
 
-  $('#full-translate-button').addEventListener('click', (event) => {
-    // Alt/Option re-translates everything, including paragraphs that already
-    // have a stored translation.
-    runFullTranslation({ refresh: event.altKey });
+  $('#full-translate-button').addEventListener('click', () => {
+    runFullTranslation({ refresh: true });
   });
   $('#full-translate-scope-button')?.addEventListener('click', (event) => {
     event.stopPropagation();
     toggleTranslationScopeMenu(event.currentTarget);
   });
-  $$('#translation-scope-menu [data-translation-scope]').forEach((item) => item.addEventListener('click', (event) => {
+  $$('#translation-scope-menu [data-translation-scope]').forEach((item) => item.addEventListener('click', () => {
     const scope = item.dataset.translationScope === 'body' ? 'body' : 'all';
     closeTranslationScopeMenu();
     setTranslationScope(scope);
-    runFullTranslation({ refresh: event.altKey, scope });
+    runFullTranslation({ refresh: true, scope });
   }));
   $$('#translation-scope-menu [data-translation-display]').forEach((item) => item.addEventListener('click', () => {
     setTranslationPreferences({ displayMode: item.dataset.translationDisplay });
@@ -15073,6 +15253,7 @@
     if (lineValue) lineValue.value = String(state.typography.lineHeight);
     if (marginValue) marginValue.value = String(state.typography.pageMargin);
     persistentStateSet('my-scholar-typography', JSON.stringify(state.typography));
+    scheduleInterlinearTranslations(doc);
   }
   function normalizeHexColor(value, fallback = '#f59e0b') {
     const candidate = String(value || '').trim();
@@ -15249,7 +15430,7 @@
     if (shortcutMatches(event, state.shortcuts.full_translation)) {
       if (!readerShortcutReady()) return false;
       event.preventDefault();
-      if (!state.translationRuns.get(state.activeJob.job_id)?.running) void runFullTranslation();
+      if (!state.translationRuns.get(state.activeJob.job_id)?.running) void runFullTranslation({ refresh: true });
       return true;
     }
     if (shortcutMatches(event, state.shortcuts.reflow)) {

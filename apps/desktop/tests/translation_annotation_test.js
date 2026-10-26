@@ -20,8 +20,8 @@ const functions = [
   const session = await launchManagedChromium();
   try {
     const page = await session.browser.newPage();
-    await page.setContent(`<style>.reader-source-sentence,.reader-sentence-translation { display:block; }</style><main class="reader-content"><p data-block-id="fixture" data-page="1" class="reader-sentence-pairs">
-      <span class="reader-source-sentence" id="source-one"><strong>ORIGINAL FIRST.</strong></span><span class="my-scholar-translation reader-sentence-translation" data-for="fixture" data-translation-for="fixture" data-block-id="translation-fixture--s0-6" data-page="1" id="translation-one">Alpha.</span><span class="reader-source-sentence" id="source-two"><strong>ORIGINAL SECOND.</strong></span><span class="my-scholar-translation reader-sentence-translation" data-for="fixture" data-translation-for="fixture" data-block-id="translation-fixture--s7-12" data-page="1" id="translation-two">Beta.</span>
+    await page.setContent(`<style>.reader-source-sentence { display:inline; }.reader-sentence-translation { display:block; }</style><main class="reader-content"><p data-block-id="fixture" data-page="1" class="reader-sentence-pairs">
+      <span class="reader-source-sentence" id="source-one"><strong>ORIGINAL FIRST.</strong></span><span class="reader-source-sentence" id="source-two"><strong> ORIGINAL SECOND.</strong></span><span class="my-scholar-translation reader-sentence-translation" data-for="fixture" data-translation-for="fixture" data-block-id="translation-fixture--s0-6" data-page="1" id="translation-one">Alpha.</span><span class="my-scholar-translation reader-sentence-translation" data-for="fixture" data-translation-for="fixture" data-block-id="translation-fixture--s7-12" data-page="1" id="translation-two">Beta.</span>
     </p><p data-block-id="other"><span class="my-scholar-translation" data-for="other" data-translation-for="other" data-block-id="translation-other" id="other-translation">Other.</span></p></main><div id="selection-popover" hidden><div class="selection-hover-note"></div></div><div id="selection-translation-result"></div>`);
     await page.evaluate((code) => {
       Object.assign(window, {
@@ -68,14 +68,17 @@ const functions = [
       };
     }, functions);
     const originalBefore = await page.locator('#source-one').innerHTML() + await page.locator('#source-two').innerHTML();
-    await page.locator('#source-one').click({ clickCount: 3, position: { x: 20, y: 8 } });
     const nativeSelection = await page.evaluate(() => {
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('source-one'));
+      document.getSelection().removeAllRanges();
+      document.getSelection().addRange(range);
       const quote = document.getSelection().toString().trim();
       window.showSelection();
       return { quote, selection: window.state.selection, toast: window.lastToast };
     });
     assert.equal(nativeSelection.quote, 'ORIGINAL FIRST.');
-    assert.equal(nativeSelection.selection?.quote, nativeSelection.quote, 'Native triple-click opens the source selection toolbar');
+    assert.equal(nativeSelection.selection?.quote, nativeSelection.quote, 'An explicit complete-sentence Range opens the source selection toolbar');
     assert.equal(nativeSelection.selection.surface, 'paper');
     assert.equal(nativeSelection.toast, undefined);
     assert.equal(await page.locator('#selection-popover').evaluate((node) => node.hidden), false);
@@ -92,15 +95,15 @@ const functions = [
       });
     });
     for (const selected of boundaries) {
-      assert.equal(selected?.quote, 'ORIGINAL FIRST.', 'An empty exclusive endpoint cannot change the selected surface');
+      assert.equal(selected?.quote, 'ORIGINAL FIRST. ORIGINAL SECOND.', 'An empty exclusive translation endpoint keeps the continuous source paragraph on its source surface');
       assert.equal(selected.block_id, 'fixture');
       assert.equal(selected.surface, 'paper');
     }
-    const translationBoundary = await page.evaluate(() => window.selectText('translation-one', 0, 'source-two', 0));
+    const translationBoundary = await page.evaluate(() => window.selectText('source-two', 17, 'translation-one', 6));
     assert.equal(translationBoundary?.quote, 'Alpha.');
     assert.equal(translationBoundary.surface, 'translation');
     assert.equal(translationBoundary.block_id, 'translation-fixture');
-    for (const [from, to] of [['source-one', 'translation-one'], ['translation-one', 'source-two']]) {
+    for (const [from, to] of [['source-one', 'translation-one'], ['source-two', 'translation-two']]) {
       const mixedSurface = await page.evaluate(([start, end]) => window.selectText(start, 0, end, 3), [from, to]);
       assert.equal(mixedSurface, null, 'A nonempty source/translation endpoint mix is rejected');
       assert.equal(await page.locator('#selection-popover').evaluate((node) => node.hidden), true);
@@ -114,7 +117,7 @@ const functions = [
     await page.evaluate(() => window.saveAnnotation('highlight'));
     assert.equal(await page.locator('.reader-sentence-translation mark[data-annotation-id="saved"]').count(), 2);
     assert.deepEqual(await page.locator('.reader-sentence-translation mark[data-annotation-id="saved"]').allTextContents(), ['ha.', 'Be']);
-    assert.equal(await page.locator('.reader-source-sentence :is(mark,mrow)').count(), 0, 'Interleaved source sentences are never marked by a translation annotation');
+    assert.equal(await page.locator('.reader-source-sentence :is(mark,mrow)').count(), 0, 'Continuous source sentences are never marked by a translation annotation');
     assert.equal(await page.locator('#source-one').innerHTML() + await page.locator('#source-two').innerHTML(), originalBefore);
     const restored = await page.evaluate(() => {
       const annotation = window.state.annotations[0];
@@ -148,8 +151,8 @@ const functions = [
     const mixedGroup = await page.evaluate(() => { window.removeTestMarks(); return window.selectText('translation-one', 0, 'other-translation', 3); });
     assert.equal(mixedGroup, null, 'Separate logical source paragraphs cannot be merged into one annotation');
     assert.equal(await page.locator('#source-one').innerHTML() + await page.locator('#source-two').innerHTML(), originalBefore);
-    const sourceSelected = await page.evaluate(() => window.selectText('source-one', 0, 'source-two', 16));
-    assert.equal(sourceSelected.quote, 'ORIGINAL FIRST.ORIGINAL SECOND.');
+    const sourceSelected = await page.evaluate(() => window.selectText('source-one', 0, 'source-two', 17));
+    assert.equal(sourceSelected.quote, 'ORIGINAL FIRST. ORIGINAL SECOND.');
     assert.equal(sourceSelected.surface, 'paper');
     await page.evaluate(() => window.saveAnnotation('underline'));
     assert.equal(await page.locator('.reader-source-sentence mark[data-annotation-id="saved"]').count(), 2);
@@ -164,7 +167,7 @@ const functions = [
     });
     assert.equal(annotatedSentence.quote, 'ORIGINAL FIRST.', 'A note control at the selection endpoint must not invalidate or contaminate the source quote');
     const reusePage = await session.browser.newPage();
-    await reusePage.setContent('<p data-block-id="reuse"><span class="reader-source-sentence">First sentence.</span><span class="reader-sentence-translation" data-for="reuse" data-sentence-id="s0-15">第一句。</span><span class="reader-source-sentence"> Second sentence.</span><span class="reader-sentence-translation" data-for="reuse" data-sentence-id="s16-32">第二句。</span></p><p data-block-id="other">First sentence.</p><div id="selection-popover"></div>');
+    await reusePage.setContent('<p data-block-id="reuse"><span class="reader-source-sentence">First sentence.</span><span class="reader-source-sentence"> Second sentence.</span><span class="reader-sentence-translation" data-for="reuse" data-sentence-id="s0-15">第一句。</span><span class="reader-sentence-translation" data-for="reuse" data-sentence-id="s16-32">第二句。</span></p><p data-block-id="other">First sentence.</p><div id="selection-popover"></div>');
     await reusePage.evaluate((code) => {
       Object.assign(window, {
         state: { activeJob: { job_id: 'reuse-job' }, selection: null },
@@ -182,7 +185,7 @@ const functions = [
       });
       const first = document.querySelector('.reader-sentence-translation');
       first.translationResult = { text: '第一句。', formulas: [{ tex: 'x/y' }], markers: [{ label: 'A' }], emphasis: ['bold'] };
-      first.nextElementSibling.nextElementSibling.translationResult = { text: '第二句。' };
+      first.nextElementSibling.translationResult = { text: '第二句。' };
       window.eval(code);
       window.translateSelection = async (selection, options) => {
         window.state.selection = { surface: 'paper', block_id: 'reuse', ...selection };

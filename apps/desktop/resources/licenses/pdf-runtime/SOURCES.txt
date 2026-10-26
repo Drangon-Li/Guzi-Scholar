@@ -1,4 +1,4 @@
-Guzi Scholar v0.6.6: bundled PDF runtime source and license materials
+Guzi Scholar v0.6.7: bundled PDF runtime source and license materials
 
 Components: PyMuPDF 1.28.2 and MuPDF 1.28.2 (Artifex Software).
 The upstream PyMuPDF package metadata states:
@@ -30,7 +30,7 @@ PyMuPDF 1.28.2
 Original source:
 https://files.pythonhosted.org/packages/a3/fb/b6761fa2d5266f2cdb24c3b91f4023070ab7848381417678e7a289a1d52a/pymupdf-1.28.2.tar.gz
 Same source archive accompanying this release:
-https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.6.6/pymupdf-1.28.2.tar.gz
+https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.6.7/pymupdf-1.28.2.tar.gz
 SHA256: 5e0be7908a715aa20333caddd73f1d6f01e4cd0c26e869fa2dd0b7f344da2249
 Size: 87903557 bytes
 Upstream source repository: https://github.com/pymupdf/PyMuPDF
@@ -44,7 +44,7 @@ MuPDF 1.28.2
 Original source (also recorded by the upstream wheel's _build.py):
 https://mupdf.com/downloads/archive/mupdf-1.28.2-source.tar.gz
 Same source archive accompanying this release:
-https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.6.6/mupdf-1.28.2-source.tar.gz
+https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.6.7/mupdf-1.28.2-source.tar.gz
 SHA256: 44075a84e329db55b9bef5f342a70fd26d69e48ad1d33cb89d9664581c641156
 Size: 68898646 bytes
 Upstream source repository: https://github.com/ArtifexSoftware/mupdf
@@ -52,14 +52,14 @@ Upstream build entry points included in the archive: Makefile, Makerules,
 Makethird, setup.py, and scripts/mupdfwrap.py.
 
 Guzi Scholar source and packaging instructions for this exact release:
-https://github.com/Drangon-Li/Guzi-Scholar/tree/v0.6.6
-https://github.com/Drangon-Li/Guzi-Scholar/archive/refs/tags/v0.6.6.tar.gz
-https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.6.6/apps/desktop/scripts/prepare-mac-release.sh
-https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.6.6/apps/desktop/scripts/build-mac-target.cjs
-https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.6.6/apps/desktop/package.json
-https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.6.6/apps/desktop/scripts/prepare-windows-release.py
-https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.6.6/platforms/windows/runtime-dependencies.json
-https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.6.6/platforms/windows/build-windows.cjs
+https://github.com/Drangon-Li/Guzi-Scholar/tree/v0.6.7
+https://github.com/Drangon-Li/Guzi-Scholar/archive/refs/tags/v0.6.7.tar.gz
+https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.6.7/apps/desktop/scripts/prepare-mac-release.sh
+https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.6.7/apps/desktop/scripts/build-mac-target.cjs
+https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.6.7/apps/desktop/package.json
+https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.6.7/apps/desktop/scripts/prepare-windows-release.py
+https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.6.7/platforms/windows/runtime-dependencies.json
+https://github.com/Drangon-Li/Guzi-Scholar/blob/v0.6.7/platforms/windows/build-windows.cjs
 
 The macOS packaging script pins PyMuPDF==1.28.2 from PyPI and includes its Python
 module, native MuPDF libraries, wheel metadata, and these license materials in
@@ -79,4 +79,4 @@ From the repository root, install desktop dependencies with npm ci --prefix
 apps/desktop, then run npm run build:windows to produce the NSIS installer and ZIP.
 
 Release asset checksums:
-https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.6.6/SHA256SUMS
+https://github.com/Drangon-Li/Guzi-Scholar/releases/download/v0.6.7/SHA256SUMS
