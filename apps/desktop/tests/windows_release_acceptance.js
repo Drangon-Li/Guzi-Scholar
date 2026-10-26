@@ -7,7 +7,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const { run } = require('./windows_updater_acceptance.js');
+const { run, canonicalPath } = require('./windows_updater_acceptance.js');
 const { createWindowsBuildConfig, identities } = require('../../../platforms/windows/builder-config.cjs');
 const { REPOSITORY, assetURL, compareVersions } = require('../electron/update-service.cjs');
 const { identity, acceptance, ACCEPTANCE_CHECKS } = require('../scripts/release-pipeline.cjs');
@@ -105,6 +105,7 @@ function staticCheck() {
   else assert.throws(() => requireCIWindows());
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'guzi-release-contract-'));
   try {
+    assert.equal(canonicalPath(directory), canonicalPath(fs.realpathSync.native(directory)));
     const context = { schema: 1, repository: REPOSITORY, tag: 'v0.6.3', commit: 'a'.repeat(40), version: '0.6.3', channel: 'stable' };
     const name = 'Guzi-Scholar-0.6.3-windows-x64-setup.exe';
     const bytes = Buffer.from('Static contract fixture; never executed.');
@@ -140,7 +141,7 @@ async function main() {
     kind: 'original-release-nsis-upgrade', transport: 'staged draft descriptor and original manifest/feed over local test transport',
     production_certificate_validated: false, public_release_discovery_validated: false,
     checks: Object.fromEntries(ACCEPTANCE_CHECKS.map((name) => [name, false])) };
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'guzi-release-upgrade-'));
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'guzi-release-upgrade-')));
   const owner = crypto.randomBytes(16).toString('hex');
   fs.writeFileSync(path.join(root, '.owner'), owner, { flag: 'wx' });
   const eventsFile = path.join(evidence, 'windows-events.jsonl');
@@ -296,8 +297,8 @@ async function main() {
     execute('install-old', initial, ['/S', `/D=${installed}`], { windowsVerbatimArguments: true });
     const first = await launch();
     assert.equal(first.version, report.from_version);
-    assert.equal(path.resolve(first.executable).toLowerCase(), executable.toLowerCase());
-    assert.equal(path.resolve(first.userData).toLowerCase(), userData.toLowerCase());
+    assert.equal(canonicalPath(first.executable), canonicalPath(executable));
+    assert.equal(canonicalPath(first.userData), canonicalPath(userData));
     appLog = path.join(first.logs, 'my-scholar-electron.log');
     const discovery = await command('discover');
     assert.equal(discovery.version, context.version);
@@ -351,7 +352,8 @@ async function main() {
       let metadata;
       try { metadata = json(metadataFile); } catch (_) { return false; }
       if (metadata.version !== context.version || metadata.main !== 'electron/main.cjs' || metadata.windowsReleaseAcceptance) return false;
-      return ownedProcesses().find((row) => row.ProcessId !== oldPID && row.ExecutablePath?.toLowerCase() === executable.toLowerCase()
+      return ownedProcesses().find((row) => row.ProcessId !== oldPID && row.ExecutablePath
+        && path.basename(row.ExecutablePath).toLowerCase() === 'guzi-scholar.exe' && canonicalPath(row.ExecutablePath) === canonicalPath(executable)
         && !/--type=/u.test(row.CommandLine || ''));
     }, 'original NSIS installed and relaunched unmodified target', 180000);
     currentPID = next.ProcessId;
@@ -367,7 +369,7 @@ async function main() {
     assert.equal(digest(installer), artifact.sha256, 'Original candidate must remain byte-identical');
     const registered = JSON.parse(run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
       `$ErrorActionPreference='Stop'; $install=Get-ItemProperty 'HKCU:\\Software\\${guid}'; $uninstall=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}'; @{ InstallLocation=$install.InstallLocation; DisplayVersion=$uninstall.DisplayVersion } | ConvertTo-Json -Compress`]));
-    assert.equal(path.resolve(registered.InstallLocation).toLowerCase(), installed.toLowerCase());
+    assert.equal(canonicalPath(registered.InstallLocation), canonicalPath(installed));
     assert.equal(registered.DisplayVersion, context.version);
     const startup = await until(() => {
       if (!alive(currentPID)) throw new Error('Original target exited during startup');
@@ -375,10 +377,11 @@ async function main() {
       const descendants = new Set([currentPID]);
       let size;
       do { size = descendants.size; for (const row of all) if (descendants.has(row.ParentProcessId)) descendants.add(row.ProcessId); } while (size !== descendants.size);
-      const backend = all.find((row) => descendants.has(row.ProcessId)
-        && row.ExecutablePath?.toLowerCase() === path.join(installed, 'resources/python-server/my-scholar-server.exe').toLowerCase());
+      const backend = all.find((row) => descendants.has(row.ProcessId) && row.ExecutablePath
+        && path.basename(row.ExecutablePath).toLowerCase() === 'my-scholar-server.exe'
+        && canonicalPath(row.ExecutablePath) === canonicalPath(path.join(installed, 'resources/python-server/my-scholar-server.exe')));
       const renderer = all.find((row) => row.ParentProcessId === currentPID && /--type=renderer(?:\s|$)/u.test(row.CommandLine || '')
-        && path.resolve(rendererUserData(row.CommandLine)).toLowerCase() === userData.toLowerCase());
+        && rendererUserData(row.CommandLine) && canonicalPath(rendererUserData(row.CommandLine)) === canonicalPath(userData));
       const targetLog = fs.existsSync(appLog) ? fs.readFileSync(appLog).subarray(logOffset).toString('utf8') : '';
       const ready = targetLog.match(/create-window shell=\S+ url=(http:\/\/127\.0\.0\.1:\d+)/u);
       const windowReady = targetLog.split(/\r?\n/u).find((line) => line.endsWith(`] window-ready pid=${currentPID} version=${context.version}`));

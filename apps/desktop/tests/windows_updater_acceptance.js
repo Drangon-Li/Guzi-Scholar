@@ -12,6 +12,7 @@ const desktopRoot = path.resolve(__dirname, '..');
 const windowsRoot = path.resolve(desktopRoot, '../../platforms/windows');
 const initialVersion = '0.6.2';
 const targetVersion = '0.6.3';
+const canonicalPath = (filename) => fs.realpathSync.native(filename).toLowerCase();
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const digest = (file, algorithm = 'sha256', encoding = 'hex') => new Promise((resolve, reject) => {
   const hash = crypto.createHash(algorithm);
@@ -71,7 +72,7 @@ async function main() {
   }
   requireWindows();
   assert.ok(process.argv.includes('--build-and-run'), 'Usage: node tests/windows_updater_acceptance.js --build-and-run (builds two isolated NSIS packages and installs only that identity)');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'guzi-windows-upgrade-'));
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'guzi-windows-upgrade-')));
   const evidence = process.env.GUZI_WINDOWS_UPGRADE_EVIDENCE_DIR
     ? path.resolve(process.env.GUZI_WINDOWS_UPGRADE_EVIDENCE_DIR) : path.join(root, 'evidence');
   fs.mkdirSync(evidence, { recursive: true });
@@ -185,8 +186,8 @@ async function main() {
     execute('install-initial', initial, ['/S', `/D=${installed}`], { env: environment, windowsVerbatimArguments: true });
     const first = await launch();
     assert.equal(first.version, initialVersion);
-    assert.equal(path.resolve(first.executable), path.resolve(executable));
-    assert.equal(path.resolve(first.userData), path.join(root, 'user-data'));
+    assert.equal(canonicalPath(first.executable), canonicalPath(executable));
+    assert.equal(canonicalPath(first.userData), canonicalPath(path.join(root, 'user-data')));
     note('isolated-installed-identity', { appId: report.appId, guid: report.guid, executable });
     brokenBytes = true;
     await assert.rejects(command('download', {}, 180000), /checksum|sha|校验|完整性/iu);
@@ -227,8 +228,8 @@ async function main() {
     const relaunched = await until(() => events().find((event) => event.type === 'launched' && event.version === targetVersion), 'real NSIS upgrade and force relaunch', 180000);
     currentPID = relaunched.pid;
     owned.add(currentPID);
-    assert.equal(relaunched.executable, executable);
-    assert.equal(relaunched.userData, path.join(root, 'user-data'));
+    assert.equal(canonicalPath(relaunched.executable), canonicalPath(executable));
+    assert.equal(canonicalPath(relaunched.userData), canonicalPath(path.join(root, 'user-data')));
     assert.equal(relaunched.guid, report.guid);
     assert.equal(await digest(document), documentHash);
     assert.equal(await digest(path.join(root, 'state/settings.json')), settingsHash);
@@ -276,5 +277,5 @@ async function main() {
   if (cleanupFailure) throw cleanupFailure;
 }
 
-module.exports = { configFor, requireWindows, run };
+module.exports = { configFor, requireWindows, run, canonicalPath };
 if (require.main === module) main().catch((error) => { console.error(error); process.exitCode = 1; });
