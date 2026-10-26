@@ -47,6 +47,14 @@ function functionSource(name) {
     assert.deepEqual(await copy('translation-one', 1, 'translation-two', 3, 'bilingual'), { text: '一句。第二句', prevented: true }, 'A bilingual copy beginning on translated prose stays on the translation surface');
     assert.deepEqual(await copy('translation-one', 1, 'translation-one', 3, 'translation'), { text: '一句', prevented: false }, 'A local text selection keeps native copying and is not expanded');
     assert.equal(await page.locator('#paired').innerHTML(), pairedBefore, 'Copy filtering never mutates the reader DOM');
+    await page.locator('#paired').evaluate((node) => {
+      for (const id of ['source-one', 'source-two', 'translation-one', 'translation-two']) node.append(node.ownerDocument.getElementById(id));
+      node.append(node.querySelector('button'));
+    });
+    const continuousBefore = await page.locator('#paired').innerHTML();
+    assert.deepEqual(await copy('source-one', 2, 'source-two', 8, 'bilingual'), { text: 'rst sentence. Second ', prevented: true }, 'Continuous source copying excludes the positioned translations');
+    assert.deepEqual(await copy('translation-one', 1, 'translation-two', 3, 'bilingual'), { text: '一句。第二句', prevented: true }, 'Positioned translations retain their canonical sentence order');
+    assert.equal(await page.locator('#paired').innerHTML(), continuousBefore);
     const richBefore = await page.locator('#rich').innerHTML();
     const rich = await page.evaluate(() => {
       const element = document.getElementById('rich');

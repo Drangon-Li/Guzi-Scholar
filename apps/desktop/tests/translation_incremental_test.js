@@ -9,7 +9,7 @@ const to = source.indexOf('  async function translateBlock(', from);
 assert(from >= 0 && to > from);
 
 class Element {
-  constructor() { this.dataset = {}; this.children = []; this.className = ''; }
+  constructor() { this.dataset = {}; this.children = []; this.className = ''; this.style = { removeProperty() {} }; }
   get classList() { return { contains: (name) => this.className.split(/\s/u).includes(name), add: (name) => { this.className += ` ${name}`; }, remove: (name) => { this.className = this.className.split(/\s/u).filter((value) => value !== name).join(' '); } }; }
   append(node) { this.children.push(node); }
   setAttribute(name, value) { this[name] = value; }
@@ -118,11 +118,13 @@ async function testReopenedTranslationRun() {
     const run = { jobId: 'paper', generation: 'base', mount: original, document: original.frame.contentDocument, abortController: new AbortController() };
     const painted = [];
     const requested = [];
+    const disposed = [];
     let finish;
     const lifecycle = vm.createContext({
       state: { activeJob: { job_id: 'paper' }, translationRuns: new Map([['paper', run]]) },
       readerMount: original, readerMounts: mounts, readerSections: [],
       window: { clearTimeout() {} }, deactivateReaderMount() {},
+      disposeInterlinearTranslations: (document) => disposed.push(document),
       readerMountIsCurrent: (mount) => Boolean(mount && mounts.get(mount.jobId) === mount),
       translationProfileId: () => 'profile',
       translationSourceHash: (value) => JSON.stringify(value),
@@ -140,6 +142,7 @@ async function testReopenedTranslationRun() {
     const pending = lifecycle.test.translateSnapshot(snapshot, run);
     assert.strictEqual(painted[0].document, original.frame.contentDocument);
     lifecycle.test.disposeReaderMount('paper');
+    assert.deepEqual(disposed, [original.frame.contentDocument], 'Closing a reader releases its interlinear layout resources');
     assert.strictEqual(run.mount, null);
     assert.strictEqual(run.document, null);
     painted.length = 0;

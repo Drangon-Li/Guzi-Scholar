@@ -40,7 +40,7 @@ function documentFixture() {
 const doc = documentFixture(); const secondDoc = documentFixture();
 const modeItems = ['original', 'bilingual', 'translation'].map((mode) => { const item = new Element(doc); item.dataset.translationDisplay = mode; return item; });
 const hoverItem = new Element(doc);
-const writes = []; const translated = []; const cleared = [];
+const writes = []; const translated = []; const cleared = []; const layouts = [];
 const context = vm.createContext({
   state: { translationPreferences: { hoverEnabled: true, displayMode: 'bilingual' } },
   translationPreferencesStorageKey: 'my-scholar-translation-preferences-v1',
@@ -50,6 +50,7 @@ const context = vm.createContext({
   clearReaderSentenceHover: (value) => cleared.push(value),
   readerMounts: new Map([['second', { frame: { contentDocument: secondDoc } }]]),
   refreshReaderSearch: () => {},
+  scheduleInterlinearTranslations: (value) => layouts.push(value),
   translatableBlocks: (value) => value.blocks,
   cssEscape: (value) => value,
   $: (selector) => selector === '#translation-hover-toggle' ? hoverItem : null,
@@ -66,6 +67,7 @@ t.setTranslationPreferences({ displayMode: 'translation', hoverEnabled: false })
 assert.equal(t.readerHoverTranslationEnabled(), false);
 assert.equal(doc.documentElement.dataset.translationDisplay, 'translation');
 assert.equal(secondDoc.documentElement.dataset.translationDisplay, 'translation');
+assert.deepEqual(layouts, [secondDoc, doc], 'Both mounted readers must reflow when the display mode changes');
 assert.equal(cleared.at(-1), doc);
 assert.equal(hoverItem.attributes['aria-checked'], 'false');
 assert.equal(modeItems[2].attributes['aria-checked'], 'true');

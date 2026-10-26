@@ -26,7 +26,7 @@ let browserSession;
       translationPostCount += 1;
       const payload = request.postDataJSON() || {};
       translationPostBlocks.push(String(payload.block_id || ''));
-      translationPostPayloads.push({ blockId: String(payload.block_id || ''), sourceHash: String(payload.source_hash || ''), text: String(payload.text || '') });
+      translationPostPayloads.push({ blockId: String(payload.block_id || ''), sourceHash: String(payload.source_hash || ''), text: String(payload.text || ''), refresh: payload.refresh === true });
     }
   });
   await page.route('**/api/health', async (route) => route.fulfill({
@@ -325,9 +325,8 @@ let browserSession;
   if (!placedAfterSource) throw new Error('Translation was not inserted directly after its source paragraph or caption');
 
   fullTranslationStarted = true;
+  const postCountBeforeFullRun = translationPostCount;
   await page.locator('#full-translate-button').click();
-  // A cache-only run can finish before Playwright observes the transient
-  // visible state; accept either the visible panel or its completed value.
   await page.waitForFunction(() => {
     const panel = document.querySelector('#translation-progress');
     const track = panel?.querySelector('[role="progressbar"]');
@@ -362,21 +361,19 @@ let browserSession;
   if (await frame.locator('.paper-metadata + .my-scholar-translation').count()) throw new Error('Full translation included author or affiliation metadata');
 
   const postCountAfterCompletedRun = translationPostCount;
+  const firstFullTranslationRequests = postCountAfterCompletedRun - postCountBeforeFullRun;
   const postBlocksAfterCompletedRun = translationPostBlocks.length;
   await page.locator('#full-translate-button').click();
   await page.waitForFunction(() => document.querySelector('#translation-progress')?.hidden);
-  await page.waitForTimeout(250);
-  if (translationPostCount !== postCountAfterCompletedRun) {
-    const repeated = translationPostPayloads.slice(postBlocksAfterCompletedRun).map((payload) => {
-      const previous = [...translationPostPayloads.slice(0, postBlocksAfterCompletedRun)].reverse().find((candidate) => candidate.blockId === payload.blockId);
-      const before = previous?.text || '';
-      const after = payload.text;
-      let difference = 0;
-      while (difference < before.length && difference < after.length && before[difference] === after[difference]) difference += 1;
-      return `${payload.blockId}:${previous?.sourceHash || 'missing'}->${payload.sourceHash}@${difference} ${JSON.stringify(before.slice(Math.max(0, difference - 24), difference + 48))}=>${JSON.stringify(after.slice(Math.max(0, difference - 24), difference + 48))}`;
-    });
-    throw new Error(`A repeated full translation issued ${translationPostCount - postCountAfterCompletedRun} unnecessary model requests (${repeated.join(', ')})`);
+  const repeatedFullTranslationRequests = translationPostCount - postCountAfterCompletedRun;
+  if (!firstFullTranslationRequests || repeatedFullTranslationRequests !== firstFullTranslationRequests) {
+    throw new Error(`A repeated ordinary click did not retranslate every block (${repeatedFullTranslationRequests}/${firstFullTranslationRequests})`);
   }
+  if (translationPostPayloads.slice(postCountBeforeFullRun).some((payload) => !payload.refresh)) {
+    throw new Error('An ordinary full-translation click did not refresh existing cached translations');
+  }
+  const repeatedBlocks = translationPostBlocks.slice(postBlocksAfterCompletedRun);
+  if (new Set(repeatedBlocks).size !== repeatedBlocks.length) throw new Error('A repeated full translation requested a block more than once');
 
   // A synthetic fetch response exercises the real API error path without
   // emitting expected HTTP failures into the browser's console-error audit.
@@ -418,7 +415,7 @@ let browserSession;
     await assertRetainedFailure(id, 'Full translation');
   }
 
-  console.log(JSON.stringify({ blockId, titleBlockId, formulaBlockId, titleTranslated: true, metadataSkipped: true, inlineFormulaRendered: true, nestedStylesAndManyRunsRestored: true, errorPrefixNormalized: true, captionTranslations, listTranslations, translatedText, translationSpacing: { ...translationSpacing, sourceGapRatio, followingGapDelta }, specialTokenPreserved: tokenTranslationText.includes('[I_CLS]'), cacheRestored: true, fullTranslationPeakConcurrency, repeatedFullTranslationRequests: 0, placedAfterSource: true, progress, errors }));
+  console.log(JSON.stringify({ blockId, titleBlockId, formulaBlockId, titleTranslated: true, metadataSkipped: true, inlineFormulaRendered: true, nestedStylesAndManyRunsRestored: true, errorPrefixNormalized: true, captionTranslations, listTranslations, translatedText, translationSpacing: { ...translationSpacing, sourceGapRatio, followingGapDelta }, specialTokenPreserved: tokenTranslationText.includes('[I_CLS]'), cacheRestored: true, fullTranslationPeakConcurrency, repeatedFullTranslationRequests, placedAfterSource: true, progress, errors }));
   if (errors.length) process.exitCode = 1;
 })().catch((error) => {
   console.error(error);

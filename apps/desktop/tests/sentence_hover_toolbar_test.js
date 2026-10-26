@@ -160,6 +160,15 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
     context.readerSentenceState.activePairId = second.id; second.source.isConnected = true; currentDoc = doc; readerView.classes.add('active-view');
   }
 
+  const previousAnchor = context.state.selection.anchorRect;
+  context.state.selection.anchorRect = { left: 40, top: 190.453125, bottom: 210.453125 };
+  Object.defineProperty(popover, 'offsetHeight', { configurable: true, get: () => Math.round(Math.min(900, parseFloat(popover.style.maxHeight))) });
+  context.positionSelectionPopover();
+  assert.equal(parseFloat(popover.style.top), 216.453125, 'Fractional available height must not move a long tooltip over its source sentence');
+  assert(parseFloat(popover.style.top) + popover.offsetHeight <= 792, 'The long tooltip remains within the reader viewport');
+  Object.defineProperty(popover, 'offsetHeight', { configurable: true, writable: true, value: 120 });
+  context.state.selection.anchorRect = previousAnchor;
+
   context.readerSentenceState.toolbarPointerInside = true;
   popover.style.top = '123px'; t.positionReaderSentenceTooltip(doc);
   assert.equal(popover.style.top, '123px', 'Background layout changes keep the hovered toolbar stationary');

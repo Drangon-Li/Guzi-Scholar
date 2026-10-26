@@ -16,21 +16,29 @@ const jobId = 'dddddddddddddddd';
 const paragraphId = 'block-1-2-paragraph';
 const richId = 'block-1-3-paragraph';
 const listId = 'block-1-4-list';
+const atomicId = 'block-1-5-paragraph';
+const lazyFormulaPath = '/api/test-assets/sentence-inline-formula.svg';
 const sentences = [
   'First sentence explains the experimental setup.',
   'Middle sentence describes the main principle.',
   'Final sentence states the conclusion.',
 ];
 const sourceText = sentences.join(' ');
+const chineseSentences = [
+  '第一句介绍实验设置，并完整说明样本选择、数据准备、训练步骤与评价方式；这些内容组成一个连续译句，即使显示空间变窄，也应按照中文文本本身的长度自然换行，不能跟随英文的视觉行切成多个片段。',
+  '中间一句解释主要原理，说明方法如何在保留上下文的同时建立对应关系。',
+  '最后一句给出研究结论，并概括实验观察所支持的主要发现。',
+];
 const jobs = [{ job_id: jobId, status: 'completed', source_filename: 'Sentence translation fixture.pdf', created_at: '2026-10-26T00:00:00Z', links: { html: `/api/jobs/${jobId}/document.html` }, manifest: { counts: { pages: 1, images: 0, tables: 0 } } }];
 const library = { folders: [], properties: [], views: [], display: { columns: [{ id: 'name', visible: true, order: 0 }] }, items: { [jobId]: { folder_ids: [], values: { reading_status: '未读', importance: 0 }, metadata: { status: 'complete', fields: { title: 'Sentence translation fixture' } } } } };
 const documentHTML = `<!doctype html><html><head><style>
-body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:18px;line-height:1.72}p{margin:20px 0}
+body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18px * var(--reader-font-scale,1));line-height:1.72}p{margin:20px 0}
 </style></head><body><main class="reader-content"><section class="pdf-page" data-page="1">
 <h2>Sentence translation fixture</h2>
 <p data-block-id="${paragraphId}" data-page="1">${sourceText}</p>
 <p data-block-id="${richId}" data-page="1">Inline formula <math alttext="x/y"><mfrac><mi>x</mi><mi>y</mi></mfrac></math> remains atomic. The second sentence preserves citation <sup><a href="#ref-143">143,144</a></sup> and formula <math alttext="10^4"><msup><mn>10</mn><mn>4</mn></msup></math> without splitting its exponent.</p>
 <ul data-block-id="${listId}" data-page="1"><li>First list item has two sentences. Its second sentence stays in the same item.</li><li>Second list item keeps its bullet without terminal punctuation</li></ul>
+<p data-block-id="${atomicId}" data-page="1"><math alttext="x/(wide+denominator)"><mfrac><mi>x</mi><mrow><mi>wide</mi><mo>+</mo><mi>denominator</mi></mrow></mfrac></math> normalizes the input <img class="math-source-inline" data-lazy-formula loading="lazy" alt="" style="height:24px;width:auto;max-width:none;vertical-align:middle"> before estimation. The next sentence reports the resulting estimate.</p>
 <section class="references"><p id="ref-143">[143] Synthetic reference.</p></section>
 </section></main></body></html>`;
 
@@ -54,6 +62,8 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:18px;li
     let activeProfile = 'sentence-profile-a';
     let failNextRefresh = false;
     let successfulRevision = 0;
+    let releaseLazyImage;
+    const lazyImageGate = new Promise((resolve) => { releaseLazyImage = resolve; });
     let settings = {
       metadata: { auto_retrieve: false },
       ai: {
@@ -68,6 +78,11 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:18px;li
       if (url.origin !== origin) { await route.abort(); return; }
       if (!url.pathname.startsWith('/api/')) { await route.continue(); return; }
       const pathname = url.pathname;
+      if (pathname === lazyFormulaPath) {
+        await lazyImageGate;
+        await route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="380" height="24"><text x="4" y="18" font-size="18">z = a + b + c + d + e + f + g + h</text></svg>' });
+        return;
+      }
       let payload = {};
       if (pathname === '/api/jobs') payload = { jobs };
       else if (pathname === '/api/library') payload = { library };
@@ -111,7 +126,12 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:18px;li
         }
         successfulRevision += 1;
         const label = activeProfile === 'sentence-profile-a' ? '旧引擎译文' : '新引擎译文';
-        const translated = body.segments.map((segment, index) => ({ id: segment.id, text: `${label}${index + 1}：${segment.text}` }));
+        const translated = body.segments.map((segment, index) => {
+          const tokens = segment.text.match(/__MY_SCHOLAR_[A-Z0-9_]+__/gu) || [];
+          const text = body.block_id === paragraphId ? chineseSentences[index]
+            : `本句保留原文中的公式、引用和列表结构，完整呈现对应内容${tokens.length ? `：${tokens.join(' ')}` : ''}。`;
+          return { id: segment.id, text: `${label}${index + 1}：${text}` };
+        });
         const result = {
           ...body, source_text: body.text, source_segments: body.segments, segments: translated,
           text: translated.map((segment) => segment.text).join(' '),
@@ -172,13 +192,144 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:18px;li
       }));
       assert.deepEqual(canonicalSentences, sentences);
       const structure = await paragraph().evaluate((node) => [...node.children].filter((child) => child.matches('.reader-source-sentence,.reader-sentence-translation')).map((child) => child.classList.contains('reader-source-sentence') ? 'source' : 'translation'));
-      assert.deepEqual(structure, ['source', 'translation', 'source', 'translation', 'source', 'translation']);
-      for (const text of await translated().locator('.translation-text').allTextContents()) assert(text.startsWith(label));
+      assert.deepEqual(structure, ['source', 'source', 'source', 'translation', 'translation', 'translation']);
+      assert.deepEqual(await translated().locator('.translation-text').allTextContents(), chineseSentences.map((text, index) => `${label}${index + 1}：${text}`));
+      assert.equal(await translated().locator('.translation-text').count(), sentences.length, 'Each translated sentence must retain one complete text container');
+      assert.equal(await translated().locator('br,.reader-sentence-translation,.reader-source-sentence').count(), 0, 'Translations must not clone source lines or slice sentences into visual rows');
       if (annotations.length) {
         assert(await source().locator('mark[data-annotation-id="sentence-annotation-1"]').count() >= 2, 'Original annotation marks must survive translation display updates');
         assert(await paragraph().locator('.annotation-note-trigger[data-annotation-id="sentence-annotation-1"]').count() > 0, 'Original annotation control must survive translation display updates');
         assert.equal(await translated().locator('[data-annotation-id="sentence-annotation-1"]').count(), 0, 'Original annotation must never move into translated sentences');
       }
+    }
+    async function hoverSourceSentence(index) {
+      const character = await source().nth(index).evaluate((node) => {
+        const doc = node.ownerDocument;
+        const walker = doc.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+        let text;
+        while ((text = walker.nextNode())) {
+          const offset = text.data.search(/\S/u);
+          if (offset < 0 || text.parentElement.closest('button,.annotation-note-trigger')) continue;
+          const range = doc.createRange();
+          range.setStart(text, offset);
+          range.setEnd(text, offset + 1);
+          const rect = range.getBoundingClientRect();
+          return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        }
+        throw new Error('Source sentence has no visible character');
+      });
+      const iframe = page.locator('#html-preview');
+      const box = await iframe.boundingBox();
+      const border = await iframe.evaluate((node) => ({ left: node.clientLeft, top: node.clientTop }));
+      const result = { ...character, x: character.x + box.x + border.left, y: character.y + box.y + border.top };
+      await page.mouse.move(result.x + result.width / 2, result.y + result.height / 2);
+      return result;
+    }
+    async function selectWholeSourceSentence(index = 0) {
+      await source().nth(index).evaluate((node) => {
+        const doc = node.ownerDocument;
+        const range = doc.createRange();
+        range.selectNodeContents(node);
+        doc.getSelection().removeAllRanges();
+        doc.getSelection().addRange(range);
+        doc.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      });
+    }
+    async function settleLayout() {
+      await paragraph().evaluate((node) => new Promise((resolve) => node.ownerDocument.defaultView.requestAnimationFrame(() => node.ownerDocument.defaultView.requestAnimationFrame(resolve))));
+    }
+    async function measureSentenceLayout() {
+      return paragraph().evaluate((node) => {
+        const doc = node.ownerDocument;
+        const block = node.getBoundingClientRect();
+        const characters = (element) => {
+          const result = [];
+          const walker = doc.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+          let text;
+          while ((text = walker.nextNode())) {
+            if (text.parentElement.closest('button,.annotation-note-trigger,.annotation-note-popover,.paragraph-translate-trigger')) continue;
+            for (let offset = 0; offset < text.length; offset += 1) {
+              if (/\s/u.test(text.data[offset])) continue;
+              const range = doc.createRange();
+              range.setStart(text, offset);
+              range.setEnd(text, offset + 1);
+              const rect = range.getBoundingClientRect();
+              if (!rect.width || !rect.height) continue;
+              result.push({ text: text.data[offset], left: rect.left - block.left, right: rect.right - block.left, top: rect.top - block.top, bottom: rect.bottom - block.top });
+            }
+          }
+          return result;
+        };
+        const sources = [...node.querySelectorAll(':scope > .reader-source-sentence')].map(characters);
+        const lineTops = [];
+        for (const sentence of sources) for (const character of sentence) {
+          let line = lineTops.findIndex((top) => Math.abs(top - character.top) < 1);
+          if (line < 0) { line = lineTops.length; lineTops.push(character.top); }
+          character.line = line;
+        }
+        const translations = [...node.querySelectorAll(':scope > .reader-sentence-translation')].map((translation) => {
+          const text = translation.querySelector('.translation-text');
+          const lines = [];
+          for (const character of characters(text)) {
+            const line = lines.find((candidate) => Math.abs(candidate.top - character.top) < 1);
+            if (line) {
+              line.left = Math.min(line.left, character.left);
+              line.right = Math.max(line.right, character.right);
+              line.bottom = Math.max(line.bottom, character.bottom);
+            } else lines.push({ ...character });
+          }
+          const glyphs = characters(text);
+          const hits = [...new Set([0, Math.floor(glyphs.length / 2), glyphs.length - 1])].map((index) => glyphs[index]).filter(Boolean).filter((glyph) => {
+            const x = block.left + (glyph.left + glyph.right) / 2;
+            const y = block.top + (glyph.top + glyph.bottom) / 2;
+            return x > 0 && y > 0 && x < doc.defaultView.innerWidth && y < doc.defaultView.innerHeight;
+          }).map((glyph) => {
+            const hit = doc.elementFromPoint(block.left + (glyph.left + glyph.right) / 2, block.top + (glyph.top + glyph.bottom) / 2);
+            return { text: glyph.text, ownSentence: hit?.closest('.reader-sentence-translation') === translation };
+          });
+          return { first: glyphs[0], lines, hits, position: getComputedStyle(translation).position };
+        });
+        return { sources, translations, width: block.width, height: block.height, sourceLines: lineTops.length, fontSize: parseFloat(getComputedStyle(node.querySelector('.reader-source-sentence')).fontSize) };
+      });
+    }
+    async function assertContinuousLayout(label, { expectWrappedTranslation = false } = {}) {
+      await settleLayout();
+      const bilingual = await measureSentenceLayout();
+      for (let index = 0; index < bilingual.translations.length; index += 1) {
+        const translation = bilingual.translations[index];
+        assert.equal(translation.position, 'absolute', `${label}: a translated sentence must remain one positioned block`);
+        for (const hit of translation.hits) assert(hit.ownSentence, `${label}: sentence ${index + 1} character ${hit.text} is blocked by another sentence's blank positioning layer`);
+        assert(translation.first && bilingual.sources[index][0], `${label}: both sentences must expose visible text`);
+        assert(Math.abs(translation.first.left - bilingual.sources[index][0].left) <= 1, `${label}: sentence ${index + 1} begins at a different X coordinate`);
+        for (const line of translation.lines) {
+          assert(line.bottom <= bilingual.height + 1, `${label}: translated text extends below its paragraph`);
+          assert(line.left >= -1 && line.right <= bilingual.width + 1, `${label}: translated text extends beyond its paragraph width`);
+        }
+        for (const previous of bilingual.translations.slice(0, index)) for (const a of previous.lines) for (const b of translation.lines) {
+          const overlapWidth = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+          const overlapHeight = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+          assert(overlapWidth <= 1 || overlapHeight <= 1, `${label}: translated sentences overlap`);
+        }
+      }
+      if (expectWrappedTranslation) assert(bilingual.translations[0].lines.length > 1, `${label}: the long Chinese sentence must wrap naturally`);
+      await displayMode('original');
+      await settleLayout();
+      const original = await measureSentenceLayout();
+      assert.equal(bilingual.sourceLines, original.sourceLines, `${label}: bilingual mode changed the English line count`);
+      assert(original.sources.some((sentence, index) => index && original.sources[index - 1].at(-1).line === sentence[0].line), `${label}: fixture must include a natural sentence boundary within an English line`);
+      for (let index = 0; index < original.sources.length; index += 1) {
+        assert.equal(bilingual.sources[index].length, original.sources[index].length, `${label}: English characters changed`);
+        for (let offset = 0; offset < original.sources[index].length; offset += 1) {
+          const before = original.sources[index][offset];
+          const after = bilingual.sources[index][offset];
+          assert.equal(after.text, before.text);
+          assert.equal(after.line, before.line, `${label}: English wraps at a different character`);
+          assert(Math.abs(after.left - before.left) <= 1, `${label}: English horizontal flow changed`);
+        }
+      }
+      await displayMode('bilingual');
+      await settleLayout();
+      return bilingual;
     }
     async function clearNativeSelection() {
       await frame().locator('body').evaluate((node) => {
@@ -209,18 +360,48 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:18px;li
       const translationNode = node.querySelector('.reader-sentence-translation .translation-text');
       return parseFloat(getComputedStyle(translationNode).fontSize) / parseFloat(getComputedStyle(sourceNode).fontSize);
     });
-    assert(Math.abs(fontRatio - 0.9) < 0.015, `Sentence translation font must be 90% of source; got ${fontRatio}`);
+    assert(Math.abs(fontRatio - 0.8) < 0.015, `Sentence translation font must be 80% of source; got ${fontRatio}`);
+    phase = 'continuous-interlinear-layout';
+    const defaultLayout = await assertContinuousLayout('default', { expectWrappedTranslation: true });
+    const layouts = [];
+    const originalFontScale = await page.locator('#font-size-range').inputValue();
+    for (const variant of [{ width: 1024, contentWidth: 420, fontScale: 100 }, { width: 1600, contentWidth: 720, fontScale: 100 }, { width: 1600, contentWidth: 720, fontScale: 140 }]) {
+      await page.setViewportSize({ width: variant.width, height: 940 });
+      await paragraph().evaluate((node, style) => {
+        const content = node.closest('.reader-content');
+        content.style.maxWidth = `${style.contentWidth}px`;
+      }, variant);
+      await page.locator('#font-size-range').evaluate((control, scale) => {
+        control.value = String(scale);
+        control.dispatchEvent(new Event('input', { bubbles: true }));
+      }, variant.fontScale);
+      layouts.push(await assertContinuousLayout(`${variant.width}px viewport / ${variant.fontScale}% text`, { expectWrappedTranslation: true }));
+    }
+    assert(layouts[0].width < layouts[1].width, 'Narrow viewport fixture must reduce the reading width');
+    assert(layouts[0].sourceLines > layouts[1].sourceLines, 'Narrow layout must reflow continuous English');
+    assert(layouts[2].fontSize > layouts[1].fontSize, 'The reader font-size control must change the displayed source size');
+    assert(layouts[2].sourceLines > layouts[1].sourceLines, 'Increasing the text size must reflow continuous English');
+    await page.setViewportSize({ width: 1450, height: 940 });
+    await paragraph().evaluate((node) => {
+      const content = node.closest('.reader-content');
+      content.style.removeProperty('max-width');
+    });
+    await page.locator('#font-size-range').evaluate((control, scale) => {
+      control.value = scale;
+      control.dispatchEvent(new Event('input', { bubbles: true }));
+    }, originalFontScale);
+    await settleLayout();
+    assert.equal((await measureSentenceLayout()).sourceLines, defaultLayout.sourceLines, 'Restoring width and text size must restore English wrapping');
     await page.screenshot({ path: '/tmp/guzi-sentence-translation.png' });
 
     phase = 'explicit-aligned-hover';
     const requestsBeforeHover = requests.length;
-    await source().nth(1).hover();
+    const hoverBox = await hoverSourceSentence(1);
     await page.locator('#selection-popover:not([hidden])').waitFor();
     await page.locator('#selection-translation-result').filter({ hasText: '旧引擎译文2' }).waitFor();
     assert.equal(blockRequests().length, 1, 'Hovering an aligned source sentence must reuse its translation');
     assert.equal(requests.length, requestsBeforeHover, `Aligned hover added a request: ${JSON.stringify(requests.slice(requestsBeforeHover))}`);
     assert.equal(requests.length, 1, `Unexpected translation before or during aligned hover: ${JSON.stringify(diagnostics)}`);
-    const hoverBox = await source().nth(1).boundingBox();
     const copyBox = await page.locator('#selection-copy').boundingBox();
     for (let step = 1; step <= 12; step += 1) {
       const fraction = step / 12;
@@ -234,7 +415,7 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:18px;li
     await page.keyboard.press('Escape');
     await page.mouse.move(12, 12);
     phase = 'whole-sentence-selection-reuse';
-    await source().first().click({ clickCount: 3, position: { x: 20, y: 8 } });
+    await selectWholeSourceSentence();
     await page.locator('#selection-translation-result').filter({ hasText: '旧引擎译文1' }).waitFor();
     assert.equal(requests.length, requestsBeforeHover, 'Selecting an already translated whole sentence must not call AI again');
     await clearNativeSelection();
@@ -286,7 +467,7 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:18px;li
     assert.equal(annotations[0].block_id, paragraphId);
     assert(!annotations[0].quote.includes('引擎译文'), 'Canonical selection quote included translated text');
     await source().locator('[data-annotation-id="sentence-annotation-1"]').first().waitFor();
-    assert.equal(await translated().locator('[data-annotation-id="sentence-annotation-1"]').count(), 0, 'Cross-sentence source highlighting must not mark the interleaved translation');
+    assert.equal(await translated().locator('[data-annotation-id="sentence-annotation-1"]').count(), 0, 'Cross-sentence source highlighting must not mark the translated sentences');
     assert(await source().locator('[data-annotation-id="sentence-annotation-1"]').count() >= 2, 'The original highlight must span both source sentences');
 
     await clearNativeSelection();
@@ -311,6 +492,70 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:18px;li
     assert.equal(await rich.locator('.reader-source-sentence sup a[href="#ref-143"]').count(), 1);
     assert.equal(await rich.locator('.reader-sentence-translation math').count(), 2, 'Translated formula placeholders must render as intact MathML');
     assert.equal(await rich.locator('.reader-sentence-translation sup').filter({ hasText: '143,144' }).count(), 1, 'Translated citation must remain an intact superscript');
+
+    phase = 'leading-fraction-and-lazy-image';
+    const atomic = frame().locator(`p[data-block-id="${atomicId}"]`);
+    await atomic.locator('.paragraph-translate-trigger').click();
+    await page.mouse.move(12, 12);
+    await atomic.locator(':scope > .reader-sentence-translation').nth(1).waitFor();
+    assert.equal(blockRequests(atomicId).length, 1, 'The formula/image paragraph must use one batch');
+    const atomicRequest = blockRequests(atomicId)[0];
+    assert.equal(atomicRequest.segments.length, 2);
+    assert.equal(atomicRequest.formulas.length, 1, 'The leading fraction remains one protected formula');
+    assert(atomicRequest.segments[0].text.includes(atomicRequest.formulas[0].token));
+    assert.equal(await atomic.locator(':scope > .reader-source-sentence math mfrac').count(), 1);
+    assert.equal(await atomic.locator(':scope > .reader-sentence-translation math mfrac').count(), 1, 'The translated fraction must remain whole');
+    async function measureAtomicLayout() {
+      return atomic.evaluate((node) => {
+        const doc = node.ownerDocument;
+        const box = node.getBoundingClientRect();
+        const firstCharacter = (root) => {
+          const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+          let text;
+          while ((text = walker.nextNode())) {
+            const offset = text.data.search(/\S/u);
+            if (offset < 0 || text.parentElement.closest('button')) continue;
+            const range = doc.createRange();
+            range.setStart(text, offset); range.setEnd(text, offset + 1);
+            const rect = range.getBoundingClientRect();
+            return { left: rect.left - box.left, top: rect.top - box.top, bottom: rect.bottom - box.top };
+          }
+          throw new Error('Atomic layout fixture has no visible text');
+        };
+        const sources = [...node.querySelectorAll(':scope > .reader-source-sentence')];
+        const translations = [...node.querySelectorAll(':scope > .reader-sentence-translation')];
+        const math = sources[0].querySelector('math').getBoundingClientRect();
+        const numerator = sources[0].querySelector('mfrac > mi').getBoundingClientRect();
+        return {
+          mathLeft: math.left - box.left, numeratorLeft: numerator.left - box.left,
+          source: firstCharacter(sources[1]), translations: translations.map((translation) => firstCharacter(translation.querySelector('.translation-text'))),
+          lines: new Set(sources.flatMap((source) => [...source.getClientRects()].filter((rect) => rect.width > 0).map((rect) => Math.round(rect.top - box.top)))).size,
+          imageWidth: sources[0].querySelector('img[data-lazy-formula]').getBoundingClientRect().width,
+        };
+      });
+    }
+    await settleLayout();
+    const beforeImage = await measureAtomicLayout();
+    assert(beforeImage.numeratorLeft - beforeImage.mathLeft > 5, 'The wide denominator must visibly center the numerator inside the fraction');
+    assert(Math.abs(beforeImage.translations[0].left - beforeImage.mathLeft) <= 1, 'A leading fraction aligns Chinese with the whole math box, not its centered numerator');
+    const requestsBeforeImage = requests.length;
+    await atomic.locator('.reader-source-sentence img[data-lazy-formula]').scrollIntoViewIfNeeded();
+    await Promise.all([
+      page.waitForRequest((request) => new URL(request.url()).pathname === lazyFormulaPath),
+      atomic.locator('.reader-source-sentence img[data-lazy-formula]').evaluate((image, path) => { image.src = path; }, lazyFormulaPath),
+    ]);
+    releaseLazyImage();
+    await atomic.locator('.reader-source-sentence img[data-lazy-formula]').evaluate((image) => image.decode());
+    await settleLayout();
+    const afterImage = await measureAtomicLayout();
+    diagnostics.atomicLayout = { beforeImage, afterImage };
+    assert(Math.abs(afterImage.imageWidth - beforeImage.imageWidth) > 1, 'The delayed image must change its intrinsic inline width');
+    assert(afterImage.lines !== beforeImage.lines || Math.abs(afterImage.source.left - beforeImage.source.left) > 1, 'The loaded image must actually change the English wrapping or sentence start');
+    assert(Math.abs(afterImage.translations[1].left - afterImage.source.left) <= 1, 'Chinese must realign with the moved source sentence after image load');
+    assert(afterImage.translations[1].top >= afterImage.source.bottom - 1, 'The moved source sentence must remain above its translation after image load');
+    assert(Math.abs(afterImage.translations[1].left - beforeImage.translations[1].left) > 1 || Math.abs(afterImage.translations[1].top - beforeImage.translations[1].top) > 1, 'Image load must update the positioned Chinese sentence');
+    assert(Math.abs(afterImage.translations[0].left - afterImage.mathLeft) <= 1, 'Image reflow must retain the leading fraction alignment');
+    assert.equal(requests.length, requestsBeforeImage, 'Image-only reflow must not request another translation');
 
     phase = 'list-sentence-pairs';
     const list = frame().locator(`ul[data-block-id="${listId}"]`);
@@ -351,7 +596,7 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:18px;li
     await assertSentenceDisplay('旧引擎译文');
     assert.equal(requests.length, beforeSwitch, 'Switching engines and retaining must not request translation');
     assert((await translated().first().getAttribute('title')).includes('fixture-engine-a'), 'Retained translation must identify its original engine');
-    await source().first().click({ clickCount: 3, position: { x: 20, y: 8 } });
+    await selectWholeSourceSentence();
     await page.locator('#selection-translation-result').filter({ hasText: '旧引擎译文1' }).waitFor();
     assert.equal(requests.length, beforeSwitch, 'Whole-sentence selection must reuse the retained translation after switching engines');
     await clearNativeSelection();
@@ -388,7 +633,7 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:18px;li
     assert.deepEqual(errors, []);
     assert.deepEqual(unexpected, [], `Unexpected requests: ${JSON.stringify(unexpected)}`);
     assert.deepEqual(diagnostics.routeErrors, [], `Route errors: ${JSON.stringify(diagnostics.routeErrors)}`);
-    console.log(JSON.stringify({ passed: true, cases: ['paragraph-batch-and-sentence-order', 'translation-font-90-percent', 'translated-hover-cache', 'canonical-cross-sentence-selection', 'source-only-highlight', 'atomic-formulas-and-citations', 'math-before-later-sup-token-order', 'list-sentence-pairs', 'original-translation-bilingual-modes', 'engine-switch-retains-and-prompts', 'history-survives-reload', 'failed-refresh-retains', 'successful-refresh-replaces'], translationRequests: requests.length }));
+    console.log(JSON.stringify({ passed: true, cases: ['paragraph-batch-and-sentence-order', 'translation-font-80-percent', 'continuous-English-flow', 'complete-Chinese-sentence-layout', 'sentence-start-X-alignment', 'nonoverlapping-Chinese-natural-wrap', 'responsive-width-and-font-reflow', 'translated-hover-cache', 'canonical-cross-sentence-selection', 'source-only-highlight', 'atomic-formulas-and-citations', 'math-before-later-sup-token-order', 'leading-fraction-whole-box-alignment', 'lazy-image-load-realignment', 'translated-glyph-hit-targets', 'list-sentence-pairs', 'original-translation-bilingual-modes', 'engine-switch-retains-and-prompts', 'history-survives-reload', 'failed-refresh-retains', 'successful-refresh-replaces'], translationRequests: requests.length }));
   } catch (error) {
     diagnostics.selectionState = await session.browser.contexts()[0]?.pages()[0]?.evaluate(() => {
       const frameDocument = document.querySelector('#html-preview')?.contentDocument;
