@@ -8,6 +8,18 @@ const metadata = require('../package.json');
 const probe = metadata.windowsReleaseAcceptance;
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' || !app.isPackaged
   || !probe || !path.isAbsolute(probe.root)) throw new Error('Ephemeral Windows release acceptance VM required');
+const transportURL = new URL(probe.transportURL);
+if (transportURL.protocol !== 'http:' || transportURL.hostname !== '127.0.0.1'
+  || transportURL.username || transportURL.password || transportURL.pathname !== '/' || transportURL.search || transportURL.hash) {
+  throw new Error('Old fixture requires a staged loopback transport');
+}
+const updateConfig = require('./update-config.cjs');
+const resolveUpdateConfig = updateConfig.resolveUpdateConfig;
+// Only the old CI fixture may exercise unsigned update installation over staged transport.
+updateConfig.resolveUpdateConfig = (options) => {
+  if (options.metadata !== metadata) throw new Error('Update override belongs only to the old release fixture');
+  return { ...resolveUpdateConfig(options), enabled: true, discoveryEnabled: false, reason: '' };
+};
 const root = probe.root;
 const record = (type, data = {}) => fs.appendFileSync(probe.eventsPath, `${JSON.stringify({ time: new Date().toISOString(), type, pid: process.pid, version: app.getVersion(), ...data })}\n`);
 let saveFailureResponse = 1;
