@@ -305,15 +305,49 @@ async function testCorruptPointerNeverFallsBackToDefaultLibrary() {
   }
 }
 
-function testQuitDuringMigrationStopsRestartedServer() {
+async function testQuitDuringMigrationStopsRestartedServer() {
   const source = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
-  const branchStart = source.indexOf('if (!allowQuit && libraryMigrationPromise)');
-  const branchEnd = source.indexOf('if (allowQuit || !pythonServer', branchStart);
-  assert.ok(branchStart >= 0 && branchEnd > branchStart, 'migration quit branch should remain present');
-  const branch = source.slice(branchStart, branchEnd);
-  assert.ok(branch.includes('.then(() => stopServer())'), 'quitting during migration must stop the server restarted by migration or rollback');
-  assert.ok(branch.indexOf('.then(() => stopServer())') < branch.indexOf('allowQuit = true'), 'server shutdown must finish before the final quit is allowed');
-  assert.ok(branch.includes('.catch(reportSafeQuitFailure)'), 'a failed server shutdown must cancel the final quit');
+  const { createExitCoordinator } = require('../electron/exit-coordinator.cjs');
+  const vm = require('vm');
+  const waitBinding = source.match(/waitForMigration: (async \(\) => \{[^\n]+\})/u)?.[1];
+  assert.ok(waitBinding, 'main must supply its live migration promise to the exit coordinator');
+  assert.match(source, /before-quit[\s\S]*event\.preventDefault\(\)[\s\S]*exitCoordinator\.request\(\{ intent: 'quit' \}\)/u, 'quit during migration must enter the same awaited coordinator');
+  for (const failMigration of [false, true]) {
+    for (const failStop of [false, true]) {
+      let finishMigration;
+      let failPendingMigration;
+      const events = [];
+      let backend = 'original';
+      let allowQuit = false;
+      const migration = new Promise((resolve, reject) => { finishMigration = resolve; failPendingMigration = reject; });
+      const waitForMigration = vm.runInNewContext(`(${waitBinding})`, { libraryMigrationPromise: migration });
+      const coordinator = createExitCoordinator({
+        waitForMigration,
+        hasRenderer: () => true,
+        flush: async () => { events.push('flush'); },
+        cancelPreparedUpdateForExit: async () => { events.push('cancel-update'); },
+        stopBackend: async () => { events.push(`stop-${backend}`); if (failStop) throw new Error('stop failed'); },
+        finish: async (intent) => { assert.strictEqual(intent, 'quit'); events.push('quit'); allowQuit = true; },
+        recoverBackend: async () => { events.push('recover'); },
+        resumeRenderer: async () => { events.push('resume'); },
+        resetExit: () => { allowQuit = false; },
+        reportFailure: async () => {},
+      });
+      const quitting = coordinator.request({ intent: 'quit' });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepStrictEqual(events, [], 'quit must neither flush nor stop a service while migration is pending');
+      backend = failMigration ? 'rollback-restarted' : 'migration-restarted';
+      if (failMigration) failPendingMigration(new Error('migration failed after rollback'));
+      else finishMigration();
+      const result = await quitting;
+      assert.ok(events.includes(`stop-${backend}`), 'quit must stop the backend restarted by successful migration or rollback');
+      assert.ok(!events.includes('stop-original'), 'quit must not capture the old backend before migration completes');
+      assert.strictEqual(result.ok, !failStop);
+      assert.strictEqual(allowQuit, !failStop, 'a failed server stop must keep final quit blocked');
+      if (!failStop) assert.ok(events.indexOf(`stop-${backend}`) < events.indexOf('quit'), 'the restarted backend must stop before final quit');
+      else assert.ok(events.includes('resume'), 'failed stop must restore the renderer');
+    }
+  }
   assert.ok(source.includes('throw new Error(`本地文献服务进程'), 'a server that survives SIGKILL must keep the migration from copying a live library');
 }
 
@@ -336,7 +370,7 @@ async function main() {
   await testSymlinkFailureLeavesSourceAndTargetUntouched();
   await testPointerRollback();
   await testCorruptPointerNeverFallsBackToDefaultLibrary();
-  testQuitDuringMigrationStopsRestartedServer();
+  await testQuitDuringMigrationStopsRestartedServer();
   testBrowserFallbackUsesTheSavedLibraryPointer();
   console.log('library storage tests passed');
 }

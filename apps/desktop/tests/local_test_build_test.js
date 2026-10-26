@@ -36,6 +36,7 @@ function loadMain(metadata, directory, development = false) {
   const projectRequire = createRequire(mainPath);
   const counters = { updates: 0, legacy: 0, installation: 0 };
   const context = vm.createContext({
+    module: { exports: {} },
     require: (name) => {
       if (name === 'electron') return { app, powerMonitor: { on: () => {} }, ipcMain: { handle: (key, handler) => handlers.set(key, handler) } };
       if (name === '../package.json') return metadata;
@@ -55,7 +56,7 @@ function loadMain(metadata, directory, development = false) {
     },
     __dirname: path.dirname(mainPath),
     process: {
-      platform: 'darwin', arch: 'arm64',
+      platform: 'darwin', arch: 'arm64', getSystemVersion: () => '13.0.0',
       argv: development ? ['electron', '--guzi-development', `--guzi-dev-root=${path.join(directory, 'isolated-development')}`] : [],
       env: { MY_SCHOLAR_DATA_DIR: path.join(directory, 'production-state'), MY_SCHOLAR_LIBRARY_DIR: path.join(directory, 'production-library') },
     },
@@ -125,7 +126,9 @@ async function main() {
     assert.strictEqual(startup.app.localTestBuild, LOCAL_TEST_BUILD);
     assert.strictEqual(startup.app.channel, 'local-test');
     assert.strictEqual((await test.handlers.get('my-scholar:check-for-updates')(test.event)).ok, false);
-    assert.strictEqual((await test.handlers.get('my-scholar:open-update-download')(test.event)).ok, false);
+    assert.strictEqual((await test.handlers.get('my-scholar:download-update')(test.event)).ok, false);
+    assert.strictEqual((await test.handlers.get('my-scholar:install-update')(test.event)).ok, false);
+    assert.strictEqual((await test.handlers.get('my-scholar:get-update-state')(test.event)).enabled, false);
     assert.strictEqual(test.counters.updates, 0, 'test build must never query a production manifest');
     const development = loadMain({}, directory, true);
     const developmentRoot = path.join(directory, 'isolated-development');
@@ -140,6 +143,11 @@ async function main() {
     assert.strictEqual(developmentContext.app.channel, 'development');
     assert.strictEqual(developmentContext.app.name, '谷子学术开发版');
     assert.strictEqual((await development.handlers.get('my-scholar:check-for-updates')(development.event)).ok, false);
+    const beta = loadMain({ version: '0.6.3-beta.1', updater: { enabled: false, channel: 'beta' } }, directory);
+    assert.strictEqual(beta.paths.userData, path.join(directory, 'GuziScholar-Beta'));
+    assert.strictEqual(vm.runInContext('storageConfiguration().stateDir', beta.context), path.join(directory, 'GuziScholar-Beta', 'state'));
+    await vm.runInContext('prepareDesktopStorage()', beta.context);
+    assert.strictEqual(beta.counters.legacy, 0, 'beta must not adopt stable library or state');
     const production = loadMain({}, directory);
     assert.strictEqual(production.paths.userData, path.join(directory, 'production'));
     assert.strictEqual(vm.runInContext('storageConfiguration().stateDir', production.context), path.join(directory, 'production-state'));

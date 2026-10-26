@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const os = require('os');
 const {
   adoptLegacyLibraryIfSafe,
   copyLibraryToEmptyTarget,
@@ -21,9 +22,11 @@ const { packagedToolchainEnvironment: resolvePackagedToolchainEnvironment, resol
 const { RendererStateStore } = require('./renderer-state.cjs');
 const { hasTrustedOrigin, localRequestPolicy } = require('./url-security.cjs');
 const { mcpClientConfiguration } = require('./mcp-config.cjs');
-const { checkForUpdate, resolveUpdateManifestURL } = require('./update-service.cjs');
+const { resolveUpdateConfig } = require('./update-config.cjs');
+const { createUpdateController } = require('./update-controller.cjs');
 const { consumeInstallationMarker, requestMacInstallation } = require('./macos-installation.cjs');
 const { configurePluginIsolation, checkPreviewBoundaries, PluginProcessGuard } = require('./plugin-guard.cjs');
+const { createExitCoordinator, flushRenderer } = require('./exit-coordinator.cjs');
 
 configurePluginIsolation(app.commandLine);
 
@@ -32,10 +35,10 @@ const LOCAL_TEST_BUILD = typeof packageMetadata.localTestBuild === 'string' ? pa
 const developmentArguments = !app.isPackaged ? (process.argv || []) : [];
 const DEVELOPMENT_BUILD = developmentArguments.includes('--guzi-development') ? 'MCP · Plugins' : '';
 const isolatedBuild = Boolean(LOCAL_TEST_BUILD || DEVELOPMENT_BUILD);
-const PRODUCT_NAME = DEVELOPMENT_BUILD ? '谷子学术开发版' : LOCAL_TEST_BUILD ? '谷子学术测试版' : '谷子学术';
-const UPDATE_CHANNEL = 'internal';
-const UPDATE_MANIFEST_URL = resolveUpdateManifestURL({ env: process.env, platform: process.platform, arch: process.arch });
-const UPDATE_ALLOWED_ORIGINS = Object.freeze(['https://raw.githubusercontent.com', 'https://github.com']);
+const updateConfig = resolveUpdateConfig({ metadata: packageMetadata, isPackaged: app.isPackaged, platform: process.platform, arch: process.arch });
+const BETA_BUILD = !isolatedBuild && updateConfig.channel === 'beta';
+const PRODUCT_NAME = DEVELOPMENT_BUILD ? '谷子学术开发版' : LOCAL_TEST_BUILD || BETA_BUILD ? '谷子学术测试版' : '谷子学术';
+const UPDATE_CHANNEL = updateConfig.channel;
 const defaultUserDataPath = app.getPath('userData');
 app.setName(PRODUCT_NAME);
 if (DEVELOPMENT_BUILD) {
@@ -45,6 +48,9 @@ if (DEVELOPMENT_BUILD) {
   app.setAppLogsPath(path.join(app.getPath('userData'), 'logs'));
 } else if (LOCAL_TEST_BUILD) {
   app.setPath('userData', path.join(app.getPath('appData'), 'GuziScholar-LocalTest'));
+  app.setAppLogsPath(path.join(app.getPath('userData'), 'logs'));
+} else if (BETA_BUILD) {
+  app.setPath('userData', path.join(app.getPath('appData'), 'GuziScholar-Beta'));
   app.setAppLogsPath(path.join(app.getPath('userData'), 'logs'));
 } else if (!app.isPackaged) app.setPath('userData', `${defaultUserDataPath}-development`);
 
@@ -61,8 +67,10 @@ let libraryMigrationPromise = null;
 let rendererStateStore = null;
 let rendererCrashShutdownPromise = null;
 let startupStorageReport = { state: 'pending', adopted: false, current: null, legacy: [] };
-let availableUpdate = null;
+let updateController = null;
 let pluginGuard = null;
+let cancelPreparedUpdateForExit = async () => {};
+const windowsAllowedToClose = new WeakSet();
 const pluginRuntimeChecks = new Map();
 const migrationControlToken = crypto.randomBytes(32).toString('hex');
 const apiAccessToken = crypto.randomBytes(32).toString('hex');
@@ -149,6 +157,7 @@ ipcMain.handle('my-scholar:get-startup-context', (event) => {
       platform: process.platform,
       arch: process.arch,
       channel: DEVELOPMENT_BUILD ? 'development' : LOCAL_TEST_BUILD ? 'local-test' : UPDATE_CHANNEL,
+      updatesEnabled: updateConfig.enabled,
       ...(LOCAL_TEST_BUILD ? { localTestBuild: LOCAL_TEST_BUILD } : {}),
       ...(DEVELOPMENT_BUILD ? { developmentBuild: DEVELOPMENT_BUILD } : {}),
     },
@@ -212,35 +221,27 @@ ipcMain.handle('my-scholar:mcp-config', async (event) => {
   return { ok: true, ...mcpClientConfiguration({ executable: process.execPath, projectRoot: path.resolve(__dirname, '..'), connectionFile: status.connection_file }) };
 });
 
-ipcMain.handle('my-scholar:check-for-updates', async (event) => {
+async function updateAction(event, action) {
   requireMainWindowSender(event);
-  if (isolatedBuild) return { ok: false, error: '开发和测试版本不连接正式更新服务。' };
-  try {
-    const result = await checkForUpdate({
-      manifestURL: UPDATE_MANIFEST_URL,
-      currentVersion: app.getVersion(),
-      platform: process.platform,
-      arch: process.arch,
-      channel: UPDATE_CHANNEL,
-      allowedOrigins: UPDATE_ALLOWED_ORIGINS,
-    });
-    availableUpdate = result.status === 'available' ? result : null;
-    diagnosticLog('update-check', `status=${result.status} current=${result.currentVersion} latest=${result.version}`);
-    if (result.status === 'unavailable') return { ok: false, ...result, error: '当前平台尚未配置更新服务。' };
-    return { ok: true, ...result };
-  } catch (error) {
-    availableUpdate = null;
-    diagnosticLog('update-check-error', error.message || String(error));
-    return { ok: false, error: error.message || '暂时无法检查更新，请稍后重试。' };
-  }
-});
-
-ipcMain.handle('my-scholar:open-update-download', async (event) => {
+  if (!updateController) return { ok: false, error: '更新服务尚未就绪。' };
+  try { return { ok: true, ...await updateController[action]() }; }
+  catch (error) { return { ok: false, ...await updateController.getState(), error: error.message }; }
+}
+ipcMain.handle('my-scholar:get-update-state', (event) => updateAction(event, 'getState'));
+ipcMain.handle('my-scholar:check-for-updates', (event) => updateAction(event, 'check'));
+ipcMain.handle('my-scholar:download-update', (event) => updateAction(event, 'download'));
+ipcMain.handle('my-scholar:install-update', async (event) => {
   requireMainWindowSender(event);
-  if (isolatedBuild) return { ok: false, error: '开发和测试版本不提供正式版本更新下载。' };
-  if (!availableUpdate?.downloadURL) return { ok: false, error: '请先检查更新。' };
-  await shell.openExternal(availableUpdate.downloadURL, { activate: true });
-  return { ok: true };
+  const state = await updateController?.getState();
+  if (!state?.canInstall) return { ok: false, ...state, error: '请先完整下载更新。' };
+  const choice = await dialog.showMessageBox(mainWindow, {
+    type: 'question', title: '安装更新并重新启动', message: `安装谷子学术 v${state.version}？`,
+    detail: '将先保存当前笔记、设置和阅读记录，再退出并安装更新。若保存失败，你可以取消安装。',
+    buttons: ['保存并安装', '取消'], defaultId: 0, cancelId: 1, noLink: true,
+  });
+  requireMainWindowSender(event);
+  if (choice.response !== 0) return { ok: true, ...await updateController.getState(), cancelled: true };
+  return updateAction(event, 'install');
 });
 
 ipcMain.handle('my-scholar:select-startup-library', (event, selectedPath) => {
@@ -289,7 +290,7 @@ app.on('second-instance', () => {
 function storageConfiguration() {
   const projectRoot = path.resolve(__dirname, '..');
   // A test launch must not inherit a production library or state override.
-  const storageEnvironment = isolatedBuild
+  const storageEnvironment = isolatedBuild || BETA_BUILD
     ? { ...process.env, MY_SCHOLAR_DATA_DIR: '', MY_SCHOLAR_LIBRARY_DIR: '' }
     : process.env;
   const layout = desktopStorageLayout({
@@ -304,7 +305,7 @@ function storageConfiguration() {
 
 async function prepareDesktopStorage() {
   let storage = storageConfiguration();
-  if (isolatedBuild) {
+  if (isolatedBuild || BETA_BUILD) {
     startupStorageReport = { state: 'none', adopted: false, current: await inspectLibraryDirectory(storage.currentPath), legacy: [] };
     return;
   }
@@ -403,7 +404,10 @@ function scheduleWindowReload(url) {
   setTimeout(() => {
     if (shuttingDown || !mainWindow || mainWindow.isDestroyed()) return;
     const settingsURL = new URL('/#settings-metadata', url).toString();
-    mainWindow.loadURL(settingsURL).catch((error) => diagnosticLog('reload-after-library-migration-error', error.message || String(error)));
+    mainWindow.loadURL(settingsURL).catch(async (error) => {
+      diagnosticLog('reload-after-library-migration-error', error.message || String(error));
+      await resumeRendererState().catch((failure) => diagnosticLog('resume-after-library-migration-error', failure.message || String(failure)));
+    });
   }, 250);
 }
 
@@ -493,6 +497,7 @@ async function selectStartupLibrary(selectedPath) {
       }
     }
     reportLibraryMigration({ phase: 'error', message: error.message || '文献库切换失败。' });
+    await resumeRendererState().catch((failure) => { rollbackError = rollbackError || failure; });
     if (rollbackError) throw new Error(`${error.message || '文献库切换失败。'} 原文献库自动恢复失败：${rollbackError.message || rollbackError}`);
     throw error;
   }
@@ -576,6 +581,7 @@ async function chooseAndMigrateLibrary() {
       }
     }
     reportLibraryMigration({ phase: 'error', message: error.message || '文献库迁移失败。' });
+    await resumeRendererState().catch((failure) => { rollbackError = rollbackError || failure; });
     if (rollbackError) {
       throw new Error(`${error.message || '文献库迁移失败。'} 原文献库自动恢复失败：${rollbackError.message || rollbackError}`);
     }
@@ -654,7 +660,7 @@ function waitForServerExit(child, timeout) {
   });
 }
 
-function stopServer() {
+function stopServer({ allowForce = true } = {}) {
   if (serverStopPromise) return serverStopPromise;
   const child = pythonServer;
   if (!child || child.exitCode !== null || child.signalCode) {
@@ -666,7 +672,7 @@ function stopServer() {
     diagnosticLog('stop-local-service', `pid=${child.pid}`);
     signalServer(child, 'SIGTERM');
     let stopped = await waitForServerExit(child, 5000);
-    if (!stopped) {
+    if (!stopped && allowForce) {
       diagnosticLog('force-stop-local-service', `pid=${child.pid}`);
       signalServer(child, 'SIGKILL');
       stopped = await waitForServerExit(child, 1000);
@@ -682,29 +688,83 @@ function stopServer() {
   return serverStopPromise;
 }
 
-function reportSafeQuitFailure(error) {
-  if (rendererCrashShutdownPromise) {
-    diagnosticLog('safe-quit-superseded-by-renderer-crash', error.message || String(error));
-    return;
-  }
-  shuttingDown = false;
-  diagnosticLog('safe-quit-error', error.message || String(error));
-  dialog.showErrorBox('谷子学术暂时无法安全退出', '设置、笔记或本地文献服务尚未安全完成。请稍后重试；为避免丢失改动或留下文献库锁，谷子学术没有强制退出。');
+function flushRendererState(window = mainWindow, timeout = 5000, options = {}) {
+  return flushRenderer(window, { ...options, timeout });
 }
 
-async function flushRendererState(window = mainWindow, timeout = 5000) {
-  if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return;
-  let timer;
-  try {
-    const result = await Promise.race([
-      window.webContents.executeJavaScript('window.__myScholarFlushBeforeClose ? window.__myScholarFlushBeforeClose() : true', true),
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('等待设置与笔记保存超时。')), timeout); }),
-    ]);
-    if (result === false) throw new Error('设置或笔记尚未保存。');
-  } finally {
-    clearTimeout(timer);
-  }
+async function resumeRendererState() {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) return;
+  await mainWindow.webContents.executeJavaScript("typeof window.__myScholarResumeAfterClose === 'function' && window.__myScholarResumeAfterClose()", true);
 }
+
+function hasLiveBackend() {
+  return Boolean(serverURL && pythonServer && pythonServer.exitCode === null && !pythonServer.signalCode);
+}
+
+const exitCoordinator = createExitCoordinator({
+  waitForMigration: async () => { if (libraryMigrationPromise) await libraryMigrationPromise.catch(() => {}); },
+  hasRenderer: () => Boolean(mainWindow && !mainWindow.isDestroyed()),
+  flush: (options) => flushRendererState(mainWindow, 5000, options),
+  assertInstallReady: () => {
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) throw new Error('阅读窗口不可用，无法安全安装更新。');
+    if (!hasLiveBackend()) throw new Error('本地文献服务不可用，无法安全安装更新。');
+    if (rendererCrashShutdownPromise) throw new Error('阅读器异常退出，已取消安装更新。');
+  },
+  chooseSaveFailure: async (error, intent) => {
+    const options = {
+      type: 'warning', title: '改动尚未保存', message: error.message || '设置或笔记尚未保存。',
+      detail: intent === 'install-update' ? '保存完成或明确放弃本次保存后，才会安装更新。放弃后仍保留可恢复的草稿副本。' : '保存完成或明确放弃本次保存后，才会退出。放弃后仍保留可恢复的草稿副本。',
+      buttons: ['重试保存', '取消', '放弃本次保存'], defaultId: 0, cancelId: 1, noLink: true,
+    };
+    const result = mainWindow && !mainWindow.isDestroyed() ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
+    return ['retry', 'cancel', 'discard'][result.response] || 'cancel';
+  },
+  prepareBackend: () => backendMigrationControl('prepare'),
+  cancelBackendPreparation: async () => { if (hasLiveBackend()) await backendMigrationControl('cancel', 5000); },
+  cancelPreparedUpdateForExit: () => cancelPreparedUpdateForExit(),
+  stopBackend: (options) => { shuttingDown = true; return stopServer(options); },
+  recoverBackend: async () => {
+    shuttingDown = false;
+    allowQuit = false;
+    const previousURL = serverURL;
+    const restoredURL = await startServer();
+    if (mainWindow && !mainWindow.isDestroyed() && previousURL !== restoredURL) await mainWindow.loadURL(restoredURL);
+  },
+  resumeRenderer: resumeRendererState,
+  resetExit: () => { shuttingDown = false; allowQuit = false; },
+  finish: (intent) => {
+    if (intent === 'quit') { allowQuit = true; app.quit(); return; }
+    const window = mainWindow;
+    if (window && !window.isDestroyed()) {
+      if (process.platform !== 'darwin') allowQuit = true;
+      windowsAllowedToClose.add(window);
+      window.close();
+    }
+  },
+  reportFailure: async (error, intent, recoveryErrors) => {
+    diagnosticLog(`${intent}-error`, [error.message, ...recoveryErrors.map((failure) => failure.message)].join(' '));
+    const title = intent === 'install-update' ? '暂时无法安全安装更新' : '暂时无法安全退出';
+    dialog.showErrorBox(title, `${error.message || '操作未能完成。'}${recoveryErrors.length ? `\n恢复时发生错误：${recoveryErrors.map((failure) => failure.message).join('；')}` : '\n已保留当前窗口，请稍后重试。'}`);
+  },
+});
+
+function setCancelPreparedUpdateForExit(callback) {
+  if (typeof callback !== 'function') throw new TypeError('更新撤销入口必须是函数。');
+  cancelPreparedUpdateForExit = callback;
+}
+
+function requestUpdateInstallation({ install, cancelPreparedInstall } = {}) {
+  if (typeof install !== 'function') return Promise.reject(new Error('更新安装入口不可用。'));
+  return exitCoordinator.request({
+    intent: 'install-update', cancelPreparedInstall,
+    install: async () => {
+      allowQuit = true;
+      try { return await install(); } catch (error) { allowQuit = false; throw error; }
+    },
+  });
+}
+
+module.exports = { requestUpdateInstallation, setCancelPreparedUpdateForExit };
 
 async function startServer() {
   if (serverStopPromise) await serverStopPromise;
@@ -854,6 +914,10 @@ function hardenWindow(window) {
   window.webContents.on('render-process-gone', (_event, details) => {
     diagnosticLog('renderer-process-gone', JSON.stringify(details));
     if (details.reason === 'clean-exit' || allowQuit || rendererCrashShutdownPromise) return;
+    if (exitCoordinator.state.pending && exitCoordinator.state.intent === 'install-update') {
+      exitCoordinator.cancel('阅读器异常退出，已取消安装更新。');
+      return;
+    }
     shuttingDown = true;
     dialog.showErrorBox('谷子学术阅读器异常退出', `阅读器渲染进程已停止（${details.reason || '未知原因'}）。\n\n诊断日志：${path.join(app.getPath('logs'), 'my-scholar-electron.log')}`);
     rendererCrashShutdownPromise = stopServer()
@@ -912,29 +976,18 @@ async function createWindow() {
     log: diagnosticLog,
   });
   await mainWindow.loadURL(url);
+  diagnosticLog('window-ready', `pid=${process.pid} version=${app.getVersion()}`);
   console.log('My Scholar desktop window ready');
-  let closeAfterFlush = false;
-  let closeFlushPromise = null;
   mainWindow.on('close', (event) => {
-    if (closeAfterFlush || shuttingDown) return;
+    if (windowsAllowedToClose.has(guardedWindow) || allowQuit) return;
     event.preventDefault();
-    if (closeFlushPromise) return;
-    const closingWindow = mainWindow;
-    closeFlushPromise = flushRendererState(closingWindow)
-      .then(() => {
-        closeAfterFlush = true;
-        if (!closingWindow.isDestroyed()) closingWindow.close();
-      })
-      .catch((error) => {
-        diagnosticLog('window-close-flush-error', error.message || String(error));
-        if (!closingWindow.isDestroyed()) dialog.showMessageBox(closingWindow, { type: 'warning', title: '改动尚未保存', message: error.message || '设置或笔记尚未保存，请稍后重试。' });
-      })
-      .finally(() => { closeFlushPromise = null; });
+    exitCoordinator.request({ intent: 'close' }).catch((error) => diagnosticLog('window-close-error', error.message || String(error)));
   });
   mainWindow.on('closed', () => {
     pluginGuard?.dispose();
     pluginGuard = null;
     mainWindow = null;
+    shuttingDown = false;
     stopServer().catch((error) => diagnosticLog('stop-after-window-close-error', error.message || String(error)));
   });
 }
@@ -955,6 +1008,28 @@ app.whenReady().then(async () => {
     if (installation.action === 'quit') app.quit();
     return;
   }
+  let adapter = null;
+  if (updateConfig.enabled) {
+    try {
+      const options = { app, cacheDirectory: path.join(app.getPath('userData'), 'updates', UPDATE_CHANNEL), publicKey: updateConfig.publicKey };
+      adapter = process.platform === 'darwin'
+        ? require('./mac-updater.cjs').createMacUpdater(options)
+        : require('./windows-updater.cjs').createWindowsUpdater(options);
+    } catch (error) {
+      updateConfig.enabled = false;
+      updateConfig.reason = `无法初始化更新服务：${error.message}`;
+      diagnosticLog('updater-initialization-error', error.message);
+    }
+  }
+  updateController = createUpdateController({
+    config: updateConfig, currentVersion: app.getVersion(), platform: process.platform, arch: process.arch,
+    systemVersion: process.platform === 'darwin' ? process.getSystemVersion() : os.release(),
+    adapter, requestInstallation: requestUpdateInstallation,
+  });
+  updateController.onState((state) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('my-scholar:update-state', state);
+  });
+  setCancelPreparedUpdateForExit(() => updateController.cancelPreparedUpdateForExit());
   await prepareDesktopStorage();
   if (process.platform === 'darwin' && app.dock) {
     try {
@@ -992,31 +1067,16 @@ app.on('activate', () => {
 });
 
 app.on('before-quit', (event) => {
-  if (!allowQuit && libraryMigrationPromise) {
-    event.preventDefault();
-    if (shuttingDown) return;
-    shuttingDown = true;
-    libraryMigrationPromise
-      .catch(() => {})
-      .then(() => flushRendererState())
-      .then(() => stopServer())
-      .then(() => { allowQuit = true; app.quit(); })
-      .catch(reportSafeQuitFailure);
-    return;
-  }
-  if (allowQuit || !pythonServer || pythonServer.exitCode !== null || pythonServer.signalCode) {
+  if (allowQuit) {
     shuttingDown = true;
     return;
   }
   event.preventDefault();
-  if (shuttingDown) return;
-  shuttingDown = true;
-  flushRendererState()
-    .then(() => stopServer())
-    .then(() => { allowQuit = true; app.quit(); })
-    .catch(reportSafeQuitFailure);
+  exitCoordinator.request({ intent: 'quit' }).catch((error) => diagnosticLog('quit-error', error.message || String(error)));
 });
 app.on('window-all-closed', () => {
   stopServer().catch((error) => diagnosticLog('stop-after-all-windows-closed-error', error.message || String(error)));
   if (process.platform !== 'darwin') app.quit();
 });
+
+app.on('will-quit', () => { Promise.resolve(updateController?.dispose()).catch((error) => diagnosticLog('updater-dispose-error', error.message)); });

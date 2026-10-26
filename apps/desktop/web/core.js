@@ -41,6 +41,7 @@
   const persistentStateFailures = new Map();
   let persistentStateDrainPromise = null;
   let persistentStateLoadError = null;
+  let persistentStateWritesPaused = false;
 
   const ready = (async () => {
     if (browserDemo) await browserDemo.ready;
@@ -75,7 +76,7 @@
       }
     })().finally(() => {
       persistentStateDrainPromise = null;
-      if (persistentStatePending.size) void drainPersistentStateWrites();
+      if (persistentStatePending.size && !persistentStateWritesPaused) void drainPersistentStateWrites();
     });
     return persistentStateDrainPromise;
   }
@@ -101,7 +102,7 @@
     persistentStateValues.set(key, text);
     persistentStateFailures.delete(key);
     persistentStatePending.set(key, { type: 'set', value: text });
-    void drainPersistentStateWrites();
+    if (!persistentStateWritesPaused) void drainPersistentStateWrites();
   }
 
   function persistentStateRemove(key) {
@@ -111,7 +112,14 @@
     persistentStateValues.delete(key);
     persistentStateFailures.delete(key);
     persistentStatePending.set(key, { type: 'remove' });
-    void drainPersistentStateWrites();
+    if (!persistentStateWritesPaused) void drainPersistentStateWrites();
+  }
+
+  function pausePersistentStateWrites() { persistentStateWritesPaused = true; }
+
+  function resumePersistentStateWrites() {
+    persistentStateWritesPaused = false;
+    if (persistentStatePending.size) void drainPersistentStateWrites();
   }
 
   async function flushPersistentStateWrites() {
@@ -151,6 +159,8 @@
     persistentStateGet,
     persistentStateSet,
     persistentStateRemove,
+    pausePersistentStateWrites,
+    resumePersistentStateWrites,
     flushPersistentStateWrites,
   });
   if (typeof module === 'object' && module.exports) module.exports = api;

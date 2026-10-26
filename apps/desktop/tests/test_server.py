@@ -3184,6 +3184,52 @@ class MigrationRequestGateTest(unittest.TestCase):
         self.assertTrue(server_module._migration_request_enter(mutation=False))
         server_module._migration_request_leave(mutation=False)
 
+    def test_component_install_blocks_migration_until_thread_completes(self) -> None:
+        store = MagicMock()
+        store.list.return_value = []
+        library = MagicMock()
+        library.snapshot.return_value = {"items": {}}
+        running = threading.Event()
+        release = threading.Event()
+
+        def install() -> None:
+            running.set()
+            release.wait(timeout=2.0)
+
+        worker = threading.Thread(target=install)
+        worker.start()
+        self.assertTrue(running.wait(timeout=1.0))
+        try:
+            with (
+                tempfile.TemporaryDirectory(prefix="my-scholar-component-gate-") as temp,
+                patch.object(server_module, "STORE", store),
+                patch.object(server_module, "LIBRARY", library),
+                patch.object(server_module, "JOBS_ROOT", Path(temp)),
+                patch.object(server_module, "CONVERSION_QUEUE", queue.Queue()),
+                patch.object(server_module, "REFLOW_QUEUE", queue.Queue()),
+                patch.object(server_module, "METADATA_QUEUE", queue.Queue()),
+                patch.object(server_module, "METADATA_PENDING", {}),
+                patch.object(server_module, "ANNOTATION_STYLE_RECOVERY_REQUIRED", False),
+                patch.object(server_module, "PARSING_INSTALL_THREAD", worker),
+            ):
+                busy = server_module._quiesce_library_requests(timeout=0.2)
+                self.assertFalse(busy["ready"])
+                self.assertTrue(busy["component_install_pending"])
+                self.assertIn("版面引擎", busy["reason"])
+                self.assertFalse(server_module.MIGRATION_QUIESCING)
+                self.assertTrue(server_module._migration_request_enter(mutation=True))
+                server_module._migration_request_leave(mutation=True)
+                release.set()
+                worker.join(timeout=1.0)
+                self.assertFalse(worker.is_alive())
+                ready = server_module._quiesce_library_requests(timeout=0.2)
+                self.assertTrue(ready["ready"])
+                self.assertFalse(ready["component_install_pending"])
+                self.assertFalse(server_module._migration_request_enter(mutation=True))
+        finally:
+            release.set()
+            worker.join(timeout=1.0)
+
     def test_status_failure_reopens_requests(self) -> None:
         with patch.object(server_module, "_library_migration_status", side_effect=OSError("status failed")):
             with self.assertRaisesRegex(OSError, "status failed"):

@@ -9,7 +9,7 @@ const builder = path.join(appRoot, 'node_modules/electron-builder/out/cli/cli.js
 
 function builderArguments(target) {
   if (!['dir', 'dist'].includes(target)) throw new Error(`Unknown Windows build target: ${target}`);
-  return [builder, '--projectDir', appRoot, '--config', path.join(__dirname, 'electron-builder.win.json'),
+  return [builder, '--projectDir', appRoot, '--config', path.join(__dirname, 'builder-config.cjs'),
     '--win', '--x64', '--publish=never', ...(target === 'dir' ? ['--dir'] : [])];
 }
 
@@ -36,14 +36,23 @@ function main(target = process.argv[2] || 'dist') {
   if (target === 'check') {
     JSON.parse(fs.readFileSync(path.join(__dirname, 'electron-builder.win.json'), 'utf8'));
     JSON.parse(fs.readFileSync(path.join(__dirname, 'runtime-dependencies.json'), 'utf8'));
+    require('./builder-config.cjs').createWindowsBuildConfig();
     return;
   }
   if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Build Windows x64 packages on a native Windows x64 host.');
   if (!fs.existsSync(builder)) throw new Error('Missing locked electron-builder; run npm ci in apps/desktop first.');
+  const env = { ...process.env, CSC_IDENTITY_AUTO_DISCOVERY: 'false' };
+  if ((env.GUZI_WINDOWS_BUILD_MODE || 'internal') !== 'release') {
+    for (const key of ['CSC_LINK', 'CSC_KEY_PASSWORD', 'WIN_CSC_LINK', 'WIN_CSC_KEY_PASSWORD']) delete env[key];
+  }
+  // Validate before preparing runtime downloads; certificates are never discovered.
+  require('./builder-config.cjs').createWindowsBuildConfig(env);
   const python = buildPython();
   run(process.execPath, [path.join(appRoot, 'scripts/build-mcp.cjs')]);
   run(python.command, [...python.args, path.join(appRoot, 'scripts/prepare-windows-release.py')]);
-  if (target !== 'prepare') run(process.execPath, builderArguments(target));
+  if (target !== 'prepare') {
+    run(process.execPath, builderArguments(target), { env });
+  }
 }
 
 module.exports = { builderArguments, buildPython, appRoot };

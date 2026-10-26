@@ -12,6 +12,8 @@
     persistentStateGet,
     persistentStateRemove,
     persistentStateSet,
+    pausePersistentStateWrites,
+    resumePersistentStateWrites,
   } = window.MyScholarCore;
   const browserDemo = window.MyScholarDemo?.enabled ? window.MyScholarDemo : null;
   let demoResetting = false;
@@ -42,11 +44,24 @@
     await window.MyScholarCore.ready;
   }
   if (browserDemo?.invalidated) { showBrowserDemoInvalidation(); return; }
-  const request = (url, options = {}) => {
+  const request = async (url, options = {}) => {
     if (demoResetting) return Promise.reject(new Error('正在重置测试数据。'));
     if (browserDemo?.invalidated) return Promise.reject(new Error('测试数据已重置，请刷新后继续。'));
-    return browserDemo ? browserDemo.fetch(url, options) : fetch(url, options);
+    const { closeSave = false, ...fetchOptions } = options;
+    if (request.closeGate) await waitForCloseResume(closeSave);
+    const operation = browserDemo ? browserDemo.fetch(url, fetchOptions) : fetch(url, fetchOptions);
+    const pendingWrite = !closeSave && !['GET', 'HEAD'].includes(String(options.method || 'GET').toUpperCase());
+    if (pendingWrite) request.inFlightWrites.add(operation);
+    let response;
+    try { response = await operation; }
+    finally { if (pendingWrite) request.inFlightWrites.delete(operation); }
+    await waitForCloseResume(closeSave);
+    return response;
   };
+  request.inFlightWrites = new Set();
+  async function waitForCloseResume(closeSave = false) {
+    while (request.closeGate && !(closeSave && request.closeGate.allowSave)) await request.closeGate.changed;
+  }
 
   const appearanceDefaults = Object.freeze({ app_font: 'system', reader_font: 'academic', accent: 'amber' });
   const appearanceOptions = Object.freeze({
@@ -128,9 +143,6 @@
     $$('[data-format="italic"], [data-note-format="italic"]').forEach((button) => { button.title = `斜体（${primaryShortcutLabel('I')}）`; });
     const shortcutDescription = $('#shortcut-description');
     if (shortcutDescription) shortcutDescription.textContent = `点击字段后按下组合键；为避免误触，快捷键需要包含 ${shortcutModifierDescription}。`;
-    const updateHint = $('#app-update-install-hint');
-    if (updateHint && isMacPlatform) updateHint.textContent = '当前 macOS 发布包使用 ad-hoc 签名且未经过 Apple 公证，只提供主动检查和浏览器下载；首次打开可能需要在 Finder 中右键“打开”，不会在应用内自动替换。';
-    else if (updateHint && appPlatform === 'win32') updateHint.textContent = 'Windows 预览版请从 GitHub 预发布页面下载新版本并手动安装，暂不支持应用内检查更新。';
   }
   applyPlatformCopy();
   const openTabsStorageKey = 'my-scholar-open-documents';
@@ -355,6 +367,7 @@
   const api = async (url, options = {}) => {
     const response = await request(url, options);
     const payload = await response.json().catch(() => ({}));
+    await waitForCloseResume(options.closeSave === true);
     if (!response.ok) {
       const errorBody = payload?.error && typeof payload.error === 'object' ? payload.error : {};
       const error = new Error(String(errorBody.message || payload.error || payload.message || `请求失败（${response.status}）`));
@@ -4316,7 +4329,8 @@
     return anchor;
   }
 
-  function captureCurrentReadingLocation({ mount = readerMount } = {}) {
+  function captureCurrentReadingLocation({ mount = readerMount, forClose = false } = {}) {
+    if (request.closeGate && !forClose) return false;
     const doc = frameDocument();
     const frame = $('#html-preview');
     if (!$('#reader-view')?.classList.contains('active-view') || !frame || frame.clientWidth < 1 || frame.clientHeight < 1
@@ -8764,6 +8778,7 @@
     const contentType = response.headers.get('Content-Type') || '';
     if (!response.ok || !response.body || !contentType.includes('text/event-stream')) {
       const payload = await response.json().catch(() => ({}));
+      await waitForCloseResume();
       if (!response.ok) throw new Error(payload.error || `请求失败（${response.status}）`);
       const context = payload.context || payload.result?.context;
       if (context && onMetadata) onMetadata(context);
@@ -8777,6 +8792,7 @@
     try {
       for (;;) {
         const { value, done } = await reader.read();
+        await waitForCloseResume();
         if (done) break;
         receivedBytes += value.byteLength;
         if (receivedBytes > aiStreamMaxBytes) throw new Error('模型流式响应超过安全上限。');
@@ -10040,6 +10056,7 @@
   }
 
   function scheduleChatSessionPersist(jobId) {
+    if (request.closeGate) return;
     if (!jobId || chatPersistTimers.has(jobId)) return;
     chatPersistTimers.set(jobId, window.setTimeout(() => persistChatSession(jobId), 180));
   }
@@ -11949,13 +11966,18 @@
     }
   }
 
-  function queueArticleNotesSave(snapshot, { announce = true } = {}) {
+  function queueArticleNotesSave(snapshot, { announce = true, draftOnly = false } = {}) {
     if (!snapshot?.jobId) return Promise.resolve(false);
     if (announce) setArticleNotesStatus('正在保存…', snapshot);
     const run = async () => {
       try {
+        const currentDraft = articleNoteDrafts.get(snapshot.jobId);
+        if (draftOnly && !currentDraft) return true;
+        if (currentDraft && (draftOnly || currentDraft.revision > snapshot.revision)) snapshot = { ...currentDraft };
         if (articleNoteConflicts.has(snapshot.jobId)) throw new Error('外部笔记已更新，请先合并。当前草稿已保留。');
-        const saved = await api(`/api/jobs/${snapshot.jobId}/notes`, jsonOptions({ markdown: snapshot.markdown, expected_revision: articleNoteServerRevisions.get(snapshot.jobId) ?? snapshot.baseRevision }, 'PUT'));
+        const expectedRevision = articleNoteServerRevisions.get(snapshot.jobId) ?? snapshot.baseRevision;
+        if (!expectedRevision) throw new Error('笔记版本尚未确认，请重新打开文献后合并草稿。');
+        const saved = await api(`/api/jobs/${snapshot.jobId}/notes`, { ...jsonOptions({ markdown: snapshot.markdown, expected_revision: expectedRevision }, 'PUT'), closeSave: true });
         articleNoteServerRevisions.set(snapshot.jobId, saved.revision);
         const newer = articleNoteDrafts.get(snapshot.jobId);
         if (newer) { newer.baseRevision = saved.revision; persistArticleNoteDrafts(); }
@@ -11967,7 +11989,7 @@
         if (error.status === 409) {
           articleNoteConflicts.set(snapshot.jobId, { markdown: '', revision: null });
           try {
-            const latest = await api(`/api/jobs/${snapshot.jobId}/notes`);
+            const latest = await api(`/api/jobs/${snapshot.jobId}/notes`, { closeSave: true });
             articleNoteConflicts.set(snapshot.jobId, latest);
           } catch (_error) {}
           renderArticleNoteConflict(snapshot.jobId);
@@ -12013,13 +12035,25 @@
     } catch (error) { showToast(error.message, true); }
   });
 
-  function flushPendingArticleNotes(jobId = null) {
+  async function flushPendingArticleNotes(jobId = null, { isCurrent = () => true } = {}) {
     const snapshot = pendingNotesSnapshot;
-    if (!snapshot || (jobId && snapshot.jobId !== String(jobId))) return notesSaveQueue;
-    window.clearTimeout(notesTimer);
-    notesTimer = null;
-    pendingNotesSnapshot = null;
-    return queueArticleNotesSave(snapshot, { announce: false });
+    if (snapshot && (!jobId || snapshot.jobId === String(jobId))) {
+      window.clearTimeout(notesTimer);
+      notesTimer = null;
+      pendingNotesSnapshot = null;
+      queueArticleNotesSave(snapshot, { announce: false, draftOnly: true });
+    }
+    await notesSaveQueue;
+    if (!isCurrent()) return false;
+    const drafts = [...articleNoteDrafts.values()].filter((draft) => !jobId || draft.jobId === String(jobId));
+    let saved = true;
+    for (const draft of drafts) {
+      if (!isCurrent()) return false;
+      if (articleNoteConflicts.has(draft.jobId)) { saved = false; continue; }
+      if (!await queueArticleNotesSave(draft, { announce: false, draftOnly: true })) saved = false;
+    }
+    return saved && ![...articleNoteDrafts.keys()].some((id) => !jobId || id === String(jobId))
+      && ![...articleNoteConflicts.keys()].some((id) => !jobId || id === String(jobId));
   }
 
   function saveNotes({ announce = true } = {}) {
@@ -12114,6 +12148,7 @@
 
   $('#save-notes-button').addEventListener('click', () => saveNotes());
   $('#notes-editor').addEventListener('input', (event) => {
+    if (request.closeGate) return;
     const editor = event.currentTarget;
     if (editor.contentEditable !== 'true') return;
     bumpArticleNotesRevision(editor);
@@ -12297,7 +12332,7 @@
     }
   });
   window.addEventListener('pagehide', () => {
-    if (demoResetting || browserDemo?.invalidated) return;
+    if (request.closeGate || demoResetting || browserDemo?.invalidated) return;
     captureCurrentReadingLocation();
     window.clearTimeout(notesTimer);
     articleNoteDrafts.forEach((draft, jobId) => {
@@ -12402,7 +12437,7 @@
   function updateStatusClass(stateName) {
     const card = $('#update-status-card');
     if (!card) return;
-    card.classList.remove('is-idle', 'is-checking', 'is-current', 'is-available', 'is-error');
+    card.classList.remove('is-idle', 'is-checking', 'is-current', 'is-available', 'is-error', 'is-ready', 'is-downloading', 'is-saving', 'is-installing', 'is-disabled', 'is-ahead');
     card.classList.add(`is-${stateName}`);
   }
 
@@ -12421,7 +12456,7 @@
     const platformName = { darwin: 'macOS', win32: 'Windows', linux: 'Linux' }[platform] || platform;
     const arch = platform === 'darwin' && info.arch === 'arm64' ? 'Apple Silicon' : info.arch || '未知架构';
     if ($('#app-platform-arch')) $('#app-platform-arch').textContent = `${platformName} · ${arch}`;
-    if ($('#app-update-channel')) $('#app-update-channel').textContent = localTestBuild ? '本地测试版' : info.channel === 'beta' ? '测试版' : info.channel === 'internal' ? '开源发布版' : String(info.channel || '稳定版');
+    if ($('#app-update-channel')) $('#app-update-channel').textContent = localTestBuild ? '本地测试版' : info.channel === 'beta' ? '测试版' : info.channel === 'internal' ? '内部构建' : info.channel === 'stable' ? '稳定版' : String(info.channel || '未配置');
     if (localTestBuild) {
       $('#check-updates')?.setAttribute('disabled', '');
       if ($('#update-status-title')) $('#update-status-title').textContent = '本地测试版';
@@ -12441,6 +12476,7 @@
       if (!context?.ok) throw new Error(context?.error || '无法读取应用版本。');
       onboarding.setStartupContext(context);
       renderAppInfo(context);
+      if (typeof desktop.getUpdateState === 'function') renderUpdateResult(await desktop.getUpdateState());
       onboarding.renderOnboardingStorage(context.storage);
       return context;
     } catch (error) {
@@ -12450,71 +12486,53 @@
   }
 
   function renderUpdateResult(result) {
-    const title = $('#update-status-title');
-    const detail = $('#update-status-detail');
-    const checked = $('#update-checked-time');
-    const download = $('#download-update');
+    const status = result.status || 'error';
+    updateStatusClass(result.error && status !== 'disabled' ? 'error' : status);
+    const titles = {
+      idle: '尚未检查更新', checking: '正在检查新版本', current: '当前已是最新版本', ahead: '当前版本高于更新通道版本',
+      available: `发现新版本 v${result.version}`, downloading: '正在下载更新', ready: `v${result.version} 已准备就绪`,
+      saving: '正在确认改动已保存', installing: '正在安装更新', disabled: '应用内更新未启用', error: '暂时无法更新',
+    };
+    const details = {
+      idle: '仅在你点击时检查更新。', checking: '正在连接 GitHub 更新服务。', current: '可以继续使用当前版本。',
+      ahead: '当前更新通道没有更高的版本。', available: '下载完成后可确认保存、安装并重新启动。',
+      downloading: '你可以继续阅读；下载完成后由你决定何时安装。', ready: '安装前会保存笔记、设置和阅读记录。普通退出不会安装。',
+      saving: '保存失败或取消时会停止安装。', installing: '应用即将退出，完成后会自动重新启动。',
+    };
+    $('#update-status-title').textContent = titles[status] || titles.error;
+    $('#update-status-detail').textContent = result.error || details[status] || '请稍后重试。';
+    $('#update-checked-time').textContent = result.checkedAt ? `检查于 ${formatUpdateTime(result.checkedAt)}` : '';
+    const check = $('#check-updates'); check.disabled = !result.canCheck; check.textContent = status === 'checking' ? '正在检查…' : '检查更新';
+    const download = $('#download-update'); download.hidden = !result.canDownload; download.disabled = !result.canDownload;
+    download.textContent = result.error ? '重新下载' : '下载更新';
+    const install = $('#install-update'); install.hidden = !result.canInstall; install.disabled = !result.canInstall;
+    $('#update-download-progress').hidden = status !== 'downloading';
+    const percent = Math.min(100, Math.max(0, Number(result.progress?.percent) || 0));
+    $('#update-progress-bar').value = percent;
+    $('#update-progress-text').textContent = `${percent.toFixed(0)}%`;
     const release = $('#update-release-details');
-    if (checked) checked.textContent = result.checkedAt ? `检查于 ${formatUpdateTime(result.checkedAt)}` : '';
-    if (result.status === 'available') {
-      updateStatusClass('available');
-      if (title) title.textContent = `发现新版本 v${result.version}`;
-      if (detail) detail.textContent = '当前测试包不会自动替换应用；请下载后手动安装。';
-      if (download) download.hidden = false;
-      if (release) release.hidden = false;
-      if ($('#update-release-version')) $('#update-release-version').textContent = `谷子学术 v${result.version}`;
-      if ($('#update-release-date')) $('#update-release-date').textContent = result.publishedAt ? `发布于 ${formatUpdateTime(result.publishedAt)}` : '';
-      if ($('#update-release-notes')) $('#update-release-notes').textContent = result.notes || '此版本没有附加更新说明。';
-      if ($('#update-release-sha')) $('#update-release-sha').textContent = result.sha256 ? `SHA-256 · ${result.sha256}` : '';
-      return;
-    }
-    updateStatusClass('current');
-    if (title) title.textContent = result.status === 'ahead' ? '当前是较新的测试版本' : '当前已是最新版本';
-    if (detail) detail.textContent = `更新服务最新版本为 v${result.version}。`;
-    if (download) download.hidden = true;
-    if (release) release.hidden = true;
+    release.hidden = !result.version || ['idle', 'disabled', 'current', 'ahead'].includes(status);
+    $('#update-release-version').textContent = result.version ? `谷子学术 v${result.version}` : '';
+    $('#update-release-date').textContent = result.publishedAt ? `发布于 ${formatUpdateTime(result.publishedAt)}` : '';
+    $('#update-release-notes').textContent = result.notes || '此版本没有附加更新说明。';
   }
 
-  $('#check-updates')?.addEventListener('click', async () => {
+  async function runUpdateAction(method) {
     const desktop = window.myScholarDesktop;
-    const button = $('#check-updates');
-    if (localTestBuild || typeof desktop?.checkForUpdates !== 'function') return;
-    button.disabled = true;
-    button.textContent = '正在检查…';
-    updateStatusClass('checking');
-    if ($('#update-status-title')) $('#update-status-title').textContent = '正在检查新版本';
-    if ($('#update-status-detail')) $('#update-status-detail').textContent = '正在连接谷子学术更新服务。';
+    if (typeof desktop?.[method] !== 'function') return;
     try {
-      const result = await desktop.checkForUpdates();
-      if (!result?.ok) throw new Error(result?.error || '暂时无法检查更新。');
+      const result = await desktop[method]();
       renderUpdateResult(result);
+      if (result.ok === false) showToast(result.error || '更新操作失败，请重试。', true);
     } catch (error) {
-      updateStatusClass('error');
-      if ($('#update-status-title')) $('#update-status-title').textContent = '暂时无法检查更新';
-      if ($('#update-status-detail')) $('#update-status-detail').textContent = error.message || '请确认网络连接后重试。';
-      if ($('#update-checked-time')) $('#update-checked-time').textContent = '';
-      $('#download-update').hidden = true;
-    } finally {
-      button.disabled = localTestBuild;
-      button.textContent = '检查更新';
+      const state = await desktop.getUpdateState().catch(() => ({ status: 'error', canCheck: true }));
+      renderUpdateResult({ ...state, error: error.message });
     }
-  });
-
-  $('#download-update')?.addEventListener('click', async () => {
-    const desktop = window.myScholarDesktop;
-    const button = $('#download-update');
-    if (typeof desktop?.openUpdateDownload !== 'function') return;
-    button.disabled = true;
-    try {
-      const result = await desktop.openUpdateDownload();
-      if (!result?.ok) throw new Error(result?.error || '无法打开下载地址。');
-      showToast('已在浏览器中打开新版本下载页面。');
-    } catch (error) {
-      showToast(error.message || '无法打开下载地址。', true);
-    } finally {
-      button.disabled = false;
-    }
-  });
+  }
+  $('#check-updates')?.addEventListener('click', () => runUpdateAction('checkForUpdates'));
+  $('#download-update')?.addEventListener('click', () => runUpdateAction('downloadUpdate'));
+  $('#install-update')?.addEventListener('click', () => runUpdateAction('installUpdate'));
+  window.myScholarDesktop?.onUpdateState?.(renderUpdateResult);
 
   function readAIStatusHistory() {
     return aiStatusHistoryRecords;
@@ -13730,7 +13748,7 @@
     setSettingsSaveStatus('正在保存…', 'saving');
     const operation = (async () => {
       try {
-        const response = await api('/api/settings', jsonOptions(submitted));
+        const response = await api('/api/settings', { ...jsonOptions(submitted), closeSave: true });
         applyAnnotationActionSync(response?.settings?.annotation_style_sync);
         settingsSavedRevision = Math.max(settingsSavedRevision, revision);
         if (revision === settingsSaveRevision) {
@@ -13749,7 +13767,7 @@
         } else {
           setSettingsSaveStatus('正在等待保存…', 'pending');
         }
-        await checkHealth();
+        if (!request.closeGate) void checkHealth();
         return true;
       } catch (error) {
         if (revision === settingsSaveRevision) setSettingsSaveStatus('保存失败', 'error');
@@ -13762,14 +13780,15 @@
       return await operation;
     } finally {
       settingsSaveInFlight = null;
-      if (settingsSaveRequested) {
+      if (settingsSaveRequested && !request.closeGate) {
         settingsSaveRequested = false;
         void persistSettings();
       }
     }
   }
-  async function flushPendingSettings() {
+  async function flushPendingSettings({ isCurrent = () => true } = {}) {
     while (settingsSavedRevision < settingsSaveRevision) {
+      if (!isCurrent()) return false;
       const targetRevision = settingsSaveRevision;
       if (!await persistSettings()) return false;
       if (settingsSavedRevision < targetRevision && !settingsSaveInFlight && !settingsSaveRequested) return false;
@@ -13777,6 +13796,7 @@
     return true;
   }
   function queueSettingsSave(immediate = false) {
+    if (request.closeGate) return;
     settingsRenderedKey = null;
     settingsSaveRevision += 1;
     settingsExitFlushedRevision = -1;
@@ -13790,6 +13810,7 @@
     settingsSaveTimer = window.setTimeout(() => { settingsSaveTimer = null; void persistSettings(); }, immediate ? 0 : 600);
   }
   function flushSettingsOnExit() {
+    if (request.closeGate) return;
     if (settingsExitFlushedRevision === settingsSaveRevision || settingsSavedRevision >= settingsSaveRevision) return;
     const validation = validateShortcutInputs();
     if (demoResetting || browserDemo?.invalidated || !validation.valid || (!browserDemo && !validateAISettingsControls())) return;
@@ -13822,13 +13843,76 @@
     captureCurrentReadingLocation();
     flushSettingsOnExit();
   });
-  window.__myScholarFlushBeforeClose = async () => {
+  function freezeForClose() {
+    if (request.closeGate) return request.closeGate;
+    let wake;
+    const surfaces = [...new Set([document, frameDocument()].filter(Boolean))].map((doc) => ({ doc, inert: doc.body?.inert }));
+    const gate = { allowSave: true, surfaces, pendingWrites: [...request.inFlightWrites], changed: new Promise((resolve) => { wake = resolve; }) };
+    gate.wake = () => {
+      wake();
+      gate.changed = new Promise((resolve) => { wake = resolve; });
+    };
+    gate.blockInput = (event) => {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    };
+    request.closeGate = gate;
+    for (const { doc } of gate.surfaces) {
+      if (doc.body) doc.body.inert = true;
+      for (const type of ['beforeinput', 'input', 'change', 'click', 'submit', 'keydown', 'paste', 'drop']) doc.defaultView.addEventListener(type, gate.blockInput, true);
+    }
+    window.clearTimeout(notesTimer);
+    notesTimer = null;
+    window.clearTimeout(settingsSaveTimer);
+    settingsSaveTimer = null;
+    pausePersistentStateWrites();
+    return gate;
+  }
+  window.__myScholarResumeAfterClose = () => {
+    const gate = request.closeGate;
+    if (!gate) return true;
+    request.closeGate = null;
+    for (const { doc, inert } of gate.surfaces) {
+      if (doc.body) doc.body.inert = inert;
+      for (const type of ['beforeinput', 'input', 'change', 'click', 'submit', 'keydown', 'paste', 'drop']) doc.defaultView.removeEventListener(type, gate.blockInput, true);
+    }
+    resumePersistentStateWrites();
+    gate.wake();
+    if (pendingNotesSnapshot) notesTimer = window.setTimeout(() => { void flushPendingArticleNotes(); }, 1200);
+    if (settingsSavedRevision < settingsSaveRevision) settingsSaveTimer = window.setTimeout(() => { void persistSettings(); }, 600);
+    return true;
+  };
+  window.__myScholarFlushBeforeClose = async ({ intent = 'close', discard = false } = {}) => {
     if (browserDemo?.invalidated) return false;
-    captureCurrentReadingLocation();
-    await flushPendingArticleNotes();
-    await flushPendingSettings();
-    flushPendingChatSessions();
-    return flushPersistentStateWrites();
+    if (!['close', 'quit', 'install-update'].includes(intent)) return false;
+    const gate = freezeForClose();
+    if (gate.operation) return gate.operation;
+    gate.allowSave = !discard;
+    gate.wake();
+    gate.operation = (async () => {
+      let saved = true;
+      const isCurrent = () => request.closeGate === gate;
+      try {
+        captureCurrentReadingLocation({ forClose: true });
+        const pendingWrites = await Promise.allSettled(gate.pendingWrites);
+        if (!isCurrent()) return false;
+        if (!discard && pendingWrites.some((result) => result.status !== 'fulfilled' || result.value?.ok !== true)) saved = false;
+        if (!discard) {
+          if (await flushPendingArticleNotes(null, { isCurrent }) !== true) saved = false;
+          if (!isCurrent()) return false;
+          if (await flushPendingSettings({ isCurrent }) !== true || settingsSavedRevision < settingsSaveRevision) saved = false;
+          if (!isCurrent()) return false;
+        }
+        if (flushPendingChatSessions() !== true) saved = false;
+      } catch (_error) { saved = false; }
+      try { if (await flushPersistentStateWrites() !== true) saved = false; }
+      catch (_error) { saved = false; }
+      if (!isCurrent()) return false;
+      gate.allowSave = false;
+      return saved;
+    })();
+    try { return await gate.operation; }
+    finally { gate.operation = null; }
   };
 
   $('#setting-app-font')?.addEventListener('change', previewAppearanceFromControls);

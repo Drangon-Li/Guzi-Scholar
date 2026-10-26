@@ -1,0 +1,72 @@
+name: macOS packages
+
+on:
+  pull_request:
+    paths:
+      - 'apps/desktop/**'
+      - '.github/workflows/macos.yml'
+      - 'package.json'
+      - 'package-lock.json'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: Build and verify macOS arm64
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+      MACOSX_DEPLOYMENT_TARGET: '12.0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Require native Apple Silicon
+        run: test "$(uname -m)" = arm64
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          architecture: arm64
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+          architecture: arm64
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          architecture: aarch64
+      - name: Select update channel from the application version
+        run: node -e 'const fs=require("fs"); const {versionChannel}=require("./apps/desktop/electron/update-service.cjs"); fs.appendFileSync(process.env.GITHUB_ENV, `GUZI_UPDATE_CHANNEL=${versionChannel(require("./apps/desktop/package.json").version)}\n`);'
+      - name: Install locked dependencies and prepare macOS runtime
+        run: |
+          python3 -m pip install --disable-pip-version-check certifi==2025.8.3
+          npm ci --prefix apps/desktop
+          npm --prefix apps/desktop run prepare:mac
+      - name: Build ad-hoc arm64 DMG and updater ZIP
+        run: node apps/desktop/scripts/build-mac-target.cjs all internal
+      - name: Verify packaged runtime and updater acceptance contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=(apps/desktop/dist/mac.noindex/mac-arm64/*.app)
+          test "${#app[@]}" -eq 1
+          node apps/desktop/tests/mac_release_test.js "${app[0]}"
+          node apps/desktop/tests/mac_release_acceptance.js --check
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guzi-scholar-macos-arm64
+          path: |
+            apps/desktop/dist/mac.noindex/*.dmg
+            apps/desktop/dist/mac.noindex/*-arm64-*.zip
+          if-no-files-found: error
+          retention-days: 14

@@ -27,10 +27,11 @@ jobs:
   windows:
     name: Build and verify Windows x64
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 120
     env:
       PYTHONUTF8: '1'
       PYTHONDONTWRITEBYTECODE: '1'
+      GUZI_WINDOWS_UPGRADE_EVIDENCE_DIR: ${{ runner.temp }}/guzi-windows-upgrade-evidence
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,6 +87,23 @@ jobs:
         run: npm run build:windows
       - name: Verify packaged runtime, install and uninstall
         run: npm run verify:windows:artifacts
+      - name: Exercise isolated NSIS 0.6.2 to 0.6.3 upgrade
+        shell: pwsh
+        timeout-minutes: 100
+        run: |
+          npm --prefix apps/desktop run test:windows:upgrade
+          exit $LASTEXITCODE
+      - name: Upload isolated Windows upgrade evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: guzi-windows-isolated-upgrade-evidence
+          path: |
+            ${{ env.GUZI_WINDOWS_UPGRADE_EVIDENCE_DIR }}/report.json
+            ${{ env.GUZI_WINDOWS_UPGRADE_EVIDENCE_DIR }}/events.jsonl
+            ${{ env.GUZI_WINDOWS_UPGRADE_EVIDENCE_DIR }}/*.log
+          if-no-files-found: warn
+          retention-days: 14
       - name: Record artifact checksums
         shell: pwsh
         run: |

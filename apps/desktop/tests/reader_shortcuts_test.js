@@ -254,7 +254,7 @@ for (const [platform, native, expected] of [['MacIntel', 'darwin', 'macOS · App
   if (native === 'win32') {
     assert(!elements.get('#shortcut-description').textContent.includes('Command'));
     assert(elements.get('#shortcut-description').textContent.includes('Windows'));
-    assert(elements.get('#app-update-install-hint').textContent.includes('暂不支持应用内检查更新'));
+    assert(!elements.get('#app-update-install-hint')?.textContent.includes('暂不支持应用内检查更新'));
     assert(!formatButtons.some((button) => button.title.includes('⌘')));
   }
   vm.runInContext(section('let localTestBuild =', 'async function loadAppInfo()'), h.context);
