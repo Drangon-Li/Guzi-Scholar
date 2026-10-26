@@ -47,10 +47,10 @@
   const request = async (url, options = {}) => {
     if (demoResetting) return Promise.reject(new Error('正在重置测试数据。'));
     if (browserDemo?.invalidated) return Promise.reject(new Error('测试数据已重置，请刷新后继续。'));
-    const { closeSave = false, ...fetchOptions } = options;
+    const { closeSave = false, closeBarrier = true, ...fetchOptions } = options;
     if (request.closeGate) await waitForCloseResume(closeSave);
     const operation = browserDemo ? browserDemo.fetch(url, fetchOptions) : fetch(url, fetchOptions);
-    const pendingWrite = !closeSave && !['GET', 'HEAD'].includes(String(options.method || 'GET').toUpperCase());
+    const pendingWrite = closeBarrier && !closeSave && !['GET', 'HEAD'].includes(String(options.method || 'GET').toUpperCase());
     if (pendingWrite) request.inFlightWrites.add(operation);
     let response;
     try { response = await operation; }
@@ -6561,10 +6561,13 @@
           padding-bottom:var(--reader-interlinear-bottom,0px)!important;
         }
         .reader-content .reader-interlinear-container > .reader-sentence-translation {
-          display:block; position:absolute; left:0; right:0; top:var(--reader-translation-top,0px);
-          margin:0!important; text-indent:var(--reader-translation-indent,0px)!important; pointer-events:none;
+          display:block; position:absolute; inset:0; margin:0!important; text-indent:0!important; pointer-events:none;
         }
-        .reader-interlinear-container .translation-text, .reader-interlinear-container .annotation-note-trigger { pointer-events:auto; }
+        .reader-interlinear-container > .reader-sentence-translation > .translation-text { display:contents; }
+        .reader-translation-line { display:block; position:absolute; top:0; left:0; right:0; text-indent:0; white-space:normal; overflow-wrap:anywhere; pointer-events:none; }
+        .reader-translation-run { pointer-events:auto; }
+        .reader-interlinear-gap { display:inline-block; width:0; vertical-align:top; padding:0; margin:0; border:0; }
+        .reader-interlinear-container .annotation-note-trigger { pointer-events:auto; }
         .reader-content .reader-sentence-translation .translation-text { font-size:inherit!important; line-height:inherit!important; }
         .translation-source-label { display:block; font:10px/1.4 system-ui,sans-serif; opacity:.75; margin-top:2px; user-select:none; }
         .reader-sentence-translation .translation-source-label { display:inline-block; margin:0 0 0 8px; }
@@ -8179,6 +8182,7 @@
   function playAnnotationDrawAnimation(annotation, doc = frameDocument()) {
     clearAnnotationDrawAnimation(doc);
     if (!doc || reducedMotionQuery.matches || !annotation?.id || isAIAnnotation(annotation)) return;
+    readerDocumentState(doc).interlinear?.flush();
     const marks = [...doc.querySelectorAll(`:is(mark, mrow)[data-annotation-id="${cssEscape(annotation.id)}"]`)];
     const rects = annotationDrawRects(marks);
     if (!rects.length || !doc.defaultView?.Element?.prototype.animate) return;
@@ -9250,7 +9254,7 @@
   }
 
   async function streamApiRequest(url, body, onDelta, signal = null, onMetadata = null) {
-    const response = await request(url, { ...jsonOptions({ ...body, stream: true }), ...(signal ? { signal } : {}) });
+    const response = await request(url, { ...jsonOptions({ ...body, stream: true }), closeBarrier: false, ...(signal ? { signal } : {}) });
     const contentType = response.headers.get('Content-Type') || '';
     if (!response.ok || !response.body || !contentType.includes('text/event-stream')) {
       const payload = await response.json().catch(() => ({}));
@@ -9356,7 +9360,7 @@
             current.listeners.forEach((listener) => listener(rendered));
           });
         }
-        return (await api(`/api/jobs/${jobId}/translate`, jsonOptions(requestBody))).result || {};
+        return (await api(`/api/jobs/${jobId}/translate`, { ...jsonOptions(requestBody), closeBarrier: false })).result || {};
       })().finally(() => requestTranslation.pending.delete(requestKey));
       requestTranslation.pending.set(requestKey, current);
     }
@@ -9428,105 +9432,192 @@
   function layoutInterlinearContainer(container) {
     const doc = container.ownerDocument;
     const view = doc.defaultView;
+    container.querySelectorAll('.reader-interlinear-gap').forEach((node) => node.remove());
+    container.querySelectorAll('.reader-translation-line, .reader-translation-run').forEach((node) => node.replaceWith(...node.childNodes));
     container.classList.remove('reader-interlinear-container');
     container.style.removeProperty('--reader-interlinear-line-height');
     container.style.removeProperty('--reader-interlinear-bottom');
     if (doc.documentElement.dataset.translationDisplay !== 'bilingual' || !container.clientWidth) return;
     const sources = [...container.querySelectorAll(':scope > .reader-source-sentence')];
     const translations = [...container.querySelectorAll(':scope > .reader-sentence-translation')];
+    sources.forEach((source) => source.normalize());
     if (!sources.length || sources.length !== translations.length) return;
     const computed = view.getComputedStyle(container);
     const fontSize = parseFloat(computed.fontSize);
     const sourceLeading = Math.max(1.35, Number(computed.getPropertyValue('--reader-line-height')) * .85 || 1.45);
     const gap = Math.max(2, fontSize * .12);
-    const horizontalGap = fontSize * .45;
+    const atomicSelector = 'math, .katex, .math-source-visual, sup, sub, img';
     container.classList.add('reader-interlinear-container');
     container.style.setProperty('--reader-interlinear-line-height', `${fontSize * sourceLeading}px`);
-
-    const measureRows = () => {
-      const rows = [];
-      sources.forEach((source, index) => {
-        const rects = [...source.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0);
-        const sourceRows = rects.map((rect) => {
-          let row = rows.find((candidate) => Math.abs(candidate.y - rect.top) < 2);
-          if (!row) { row = { y: rect.top, top: rect.top, bottom: rect.bottom, pairs: [] }; rows.push(row); }
-          row.bottom = Math.max(row.bottom, rect.bottom);
-          return row;
-        });
-        if (!rects.length) return;
-        source.querySelectorAll('math, .katex, .math-source-visual, sup, sub').forEach((node) => {
-          const rect = node.getBoundingClientRect();
-          const center = (rect.top + rect.bottom) / 2;
-          const closest = rects.reduce((best, candidate, i) => Math.abs((candidate.top + candidate.bottom) / 2 - center) < best.distance
-            ? { index: i, distance: Math.abs((candidate.top + candidate.bottom) / 2 - center) } : best, { index: 0, distance: Infinity });
-          sourceRows[closest.index].top = Math.min(sourceRows[closest.index].top, rect.top);
-          sourceRows[closest.index].bottom = Math.max(sourceRows[closest.index].bottom, rect.bottom);
-        });
-        let left = rects[0].left;
-        const text = textNodes(source, doc).find((node) => /\S/u.test(node.nodeValue));
-        const atomic = [...source.querySelectorAll('math, .katex, .math-source-visual, sup, sub, img')].find((node) => node.getBoundingClientRect().width > 0);
-        if (atomic && (!text || atomic.contains(text) || (atomic.compareDocumentPosition(text) & Node.DOCUMENT_POSITION_FOLLOWING))) {
-          left = atomic.getBoundingClientRect().left;
-        } else if (text) {
-          const range = doc.createRange();
-          const start = text.nodeValue.search(/\S/u);
-          range.setStart(text, start);
-          range.setEnd(text, start + 1);
-          left = range.getBoundingClientRect().left;
-        }
-        sourceRows[0].pairs.push({ source, translation: translations[index], left });
-      });
-      return rows;
-    };
-
-    // Chinese is one continuous sentence. Only its first line is indented to
-    // the English start; its own wrapping never slices or rewrites the text.
     const origin = container.getBoundingClientRect();
-    const placements = new Map();
-    let lineHeight = fontSize * sourceLeading;
-    for (const row of measureRows()) {
-      const occupied = [];
-      let depth = 0;
-      for (const { translation, left } of row.pairs) {
-        translation.style.setProperty('--reader-translation-top', '0px');
-        translation.style.setProperty('--reader-translation-indent', `${Math.max(0, left - origin.left - container.clientLeft)}px`);
-        const box = translation.getBoundingClientRect();
-        const range = doc.createRange();
-        range.selectNodeContents(translation.querySelector('.translation-text'));
-        const shapes = [...range.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0)
-          .map((rect) => ({ left: rect.left, right: rect.right, top: rect.top - box.top, bottom: rect.bottom - box.top }));
-        let offset = 0;
-        for (;;) {
-          let next = offset;
-          for (const shape of shapes) {
-            for (const previous of occupied) {
-              if (shape.left < previous.right + horizontalGap && shape.right + horizontalGap > previous.left
-                && shape.top + offset < previous.bottom + gap && shape.bottom + offset + gap > previous.top) {
-                next = Math.max(next, previous.bottom + gap - shape.top);
-              }
-            }
-          }
-          if (next === offset) break;
-          offset = next;
+    const rows = [];
+    const parts = sources.map((source, index) => {
+      const rects = [...source.getClientRects()].filter((rect) => rect.width > 0 && rect.height > 0);
+      const sourceRows = rects.map((rect) => {
+        let row = rows.find((candidate) => Math.abs(candidate.y - rect.top) < 2);
+        if (!row) { row = { y: rect.top, top: rect.top, bottom: rect.bottom, parts: [] }; rows.push(row); }
+        row.bottom = Math.max(row.bottom, rect.bottom);
+        return row;
+      });
+      const units = [];
+      const rowFor = (rect) => {
+        const center = (rect.top + rect.bottom) / 2;
+        const closest = rects.reduce((best, candidate, i) => Math.abs((candidate.top + candidate.bottom) / 2 - center) < best.distance
+          ? { index: i, distance: Math.abs((candidate.top + candidate.bottom) / 2 - center) } : best, { index: 0, distance: Infinity });
+        return sourceRows[closest.index];
+      };
+      const add = (rect, weight, node, offset, anchor) => {
+        const row = rowFor(rect);
+        if (!row) return;
+        row.top = Math.min(row.top, rect.top);
+        row.bottom = Math.max(row.bottom, rect.bottom);
+        row.anchor ||= { target: anchor, top: anchor.getBoundingClientRect().top };
+        let part = units.at(-1);
+        if (part?.row !== row) {
+          part = { row, source, translation: translations[index], weight: 0, left: rect.left, right: rect.right };
+          units.push(part);
+          row.parts.push(part);
         }
-        occupied.push(...shapes.map((shape) => ({ ...shape, top: shape.top + offset, bottom: shape.bottom + offset })));
-        placements.set(translation, { offset, height: box.height });
-        depth = Math.max(depth, offset + box.height);
+        part.weight += weight;
+        part.left = Math.min(part.left, rect.left);
+        part.right = Math.max(part.right, rect.right);
+        part.end = doc.createRange();
+        part.end.setStart(node, offset);
+        part.end.collapse(true);
+      };
+      const visit = (node) => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          const range = doc.createRange();
+          const at = (offset) => {
+            range.setStart(node, offset); range.setEnd(node, offset + 1);
+            return range.getBoundingClientRect();
+          };
+          for (let start = 0; start < node.length;) {
+            const row = rowFor(at(start));
+            let low = start + 1;
+            let high = node.length;
+            while (low < high) {
+              const middle = Math.floor((low + high) / 2);
+              if (rowFor(at(middle)) === row) low = middle + 1;
+              else high = middle;
+            }
+            const value = node.data.slice(start, low);
+            const visibleStart = start + value.search(/\S/u);
+            const visibleEnd = low - value.length + value.trimEnd().length;
+            if (visibleStart >= start && visibleEnd > visibleStart) {
+              range.setStart(node, visibleStart); range.setEnd(node, visibleEnd);
+              const rect = range.getBoundingClientRect();
+              const anchor = doc.createRange();
+              anchor.setStart(node, visibleStart); anchor.setEnd(node, visibleStart + 1);
+              add(rect, low - start, node, visibleEnd, anchor);
+            }
+            start = low;
+          }
+        } else if (node.nodeType === Node.ELEMENT_NODE && !node.matches('.annotation-note-trigger, .paragraph-translate-trigger')) {
+          if (node.matches(atomicSelector)) {
+            const rect = node.getBoundingClientRect();
+            if (rect.width && rect.height) add(rect, canonicalBlockText(node, doc).length || 1, node.parentNode, [...node.parentNode.childNodes].indexOf(node) + 1, node);
+          } else [...node.childNodes].forEach(visit);
+        }
+      };
+      [...source.childNodes].forEach(visit);
+      return units;
+    });
+    rows.sort((a, b) => a.y - b.y);
+
+    parts.forEach((units, index) => {
+      const body = translations[index].querySelector('.translation-text');
+      const text = canonicalBlockText(body, doc);
+      const total = units.reduce((sum, part) => sum + part.weight, 0);
+      const protectedRanges = [...body.querySelectorAll(atomicSelector)].filter((node) => !node.parentElement.closest(atomicSelector)).map((node) => {
+        const start = textOffset(body, node, 0, doc);
+        return { node, start, end: start + canonicalBlockText(node, doc).length };
+      });
+      const words = [...text.matchAll(/[A-Za-z0-9_]+(?:[.-][A-Za-z0-9_]+)*/gu)].map((match) => ({ start: match.index, end: match.index + match[0].length }));
+      let consumed = 0;
+      let previous = 0;
+      const cuts = units.map((part, i) => {
+        consumed += part.weight;
+        let end = i === units.length - 1 ? text.length : Math.round(text.length * consumed / total);
+        if (end < text.length) {
+          const punctuation = [...text.slice(Math.max(previous, end - 4), Math.min(text.length, end + 4)).matchAll(/[，。！？；：、\s]/gu)]
+            .map((match) => Math.max(previous, end - 4) + match.index + 1);
+          if (punctuation.length) end = punctuation.reduce((best, point) => Math.abs(point - end) < Math.abs(best - end) ? point : best);
+          for (const word of words) if (end > word.start && end < word.end) end = word.end;
+          if (/[\uDC00-\uDFFF]/u.test(text[end])) end += 1;
+          for (const atomic of protectedRanges) if (end > atomic.start && end < atomic.end) end = atomic.end;
+        }
+        end = Math.max(previous, end);
+        previous = end;
+        return { part, end };
+      });
+      const fragment = doc.createDocumentFragment();
+      for (let i = 0; i < cuts.length; i += 1) {
+        const { part, end } = cuts[i];
+        const start = cuts[i - 1]?.end || 0;
+        if (end <= start) continue;
+        const range = rangeAtOffsets(body, 0, end - start, doc);
+        range.setStart(body, 0);
+        if (end === text.length) range.setEnd(body, body.childNodes.length);
+        else for (const atomic of protectedRanges) if (end === atomic.end) range.setEndAfter(atomic.node);
+        let boundary = range.endContainer;
+        const completeEnd = range.endOffset === (boundary.nodeType === Node.TEXT_NODE ? boundary.length : boundary.childNodes.length);
+        if (boundary !== body && completeEnd) {
+          while (boundary.parentNode !== body && boundary === boundary.parentNode.lastChild) boundary = boundary.parentNode;
+          if (boundary.nextSibling?.matches?.('.annotation-note-trigger')) boundary = boundary.nextSibling;
+          range.setEndAfter(boundary);
+        }
+        const line = doc.createElement('span');
+        line.className = 'reader-translation-line';
+        const run = doc.createElement('span');
+        run.className = 'reader-translation-run';
+        run.append(range.extractContents());
+        line.append(run);
+        fragment.append(line);
+        part.line = line;
       }
-      if (depth) lineHeight = Math.max(lineHeight, row.bottom - row.top + depth + gap * 3);
+      body.replaceChildren(fragment);
+    });
+
+    for (const row of rows) {
+      let depth = 0;
+      row.parts.sort((a, b) => a.left - b.left);
+      let cursorLeft = Math.max(0, row.parts[0].left - origin.left - container.clientLeft);
+      let cursorTop = 0;
+      row.parts.forEach((part) => {
+        if (!part.line) return;
+        const lineHeight = parseFloat(view.getComputedStyle(part.line).lineHeight);
+        if (container.clientWidth - cursorLeft < fontSize * 1.6) { cursorLeft = 0; cursorTop += lineHeight; }
+        part.line.style.textIndent = `${cursorLeft}px`;
+        part.offset = cursorTop;
+        const box = part.line.getBoundingClientRect();
+        const lastText = textNodes(part.line, doc).at(-1);
+        const atomic = lastText?.parentElement.closest(atomicSelector);
+        const range = doc.createRange();
+        if (atomic) range.selectNode(atomic);
+        else { range.setStart(lastText, lastText.length - 1); range.setEnd(lastText, lastText.length); }
+        cursorLeft = range.getBoundingClientRect().right - origin.left - container.clientLeft + fontSize * .5;
+        cursorTop += Math.max(0, box.height - lineHeight);
+        depth = Math.max(depth, part.offset + box.height);
+      });
+      if (!depth) continue;
+      const spacer = doc.createElement('span');
+      spacer.className = 'reader-interlinear-gap';
+      spacer.setAttribute('aria-hidden', 'true');
+      spacer.style.height = `${Math.max(fontSize * sourceLeading, row.bottom - row.top) + depth + gap * 2}px`;
+      row.parts.at(-1).end.insertNode(spacer);
+      row.spacer = spacer;
     }
-    container.style.setProperty('--reader-interlinear-line-height', `${lineHeight}px`);
     const finalOrigin = container.getBoundingClientRect();
-    let bottom = finalOrigin.bottom;
-    for (const row of measureRows()) {
-      for (const { translation } of row.pairs) {
-        const placement = placements.get(translation);
-        const top = row.bottom + gap + placement.offset;
-        translation.style.setProperty('--reader-translation-top', `${top - finalOrigin.top - container.clientTop}px`);
-        bottom = Math.max(bottom, top + placement.height + gap);
+    for (const row of rows) {
+      if (!row.spacer) continue;
+      const shift = row.anchor.target.getBoundingClientRect().top - row.anchor.top;
+      for (const part of row.parts) if (part.line) {
+        part.line.style.top = `${row.bottom - origin.top + shift + gap + part.offset - container.clientTop}px`;
       }
     }
-    container.style.setProperty('--reader-interlinear-bottom', `${Math.max(0, bottom - finalOrigin.bottom)}px`);
+    const overflow = Math.max(0, ...parts.flat().filter((part) => part.line).map((part) => part.line.getBoundingClientRect().bottom + gap - finalOrigin.bottom));
+    container.style.setProperty('--reader-interlinear-bottom', `${overflow}px`);
   }
 
   function scheduleInterlinearTranslations(doc, block = null) {
@@ -9539,8 +9630,9 @@
       layout.schedule = () => scheduleInterlinearTranslations(doc);
       layout.observer = new doc.defaultView.ResizeObserver((entries) => {
         for (const entry of entries) {
-          if (layout.widths.get(entry.target) === entry.contentRect.width) continue;
+          const previous = layout.widths.get(entry.target);
           layout.widths.set(entry.target, entry.contentRect.width);
+          if (previous === undefined || previous === entry.contentRect.width) continue;
           scheduleInterlinearTranslations(doc, entry.target.closest('.reader-sentence-pairs'));
         }
       });
@@ -9557,7 +9649,8 @@
     if (!block) layout.dirty = null;
     else layout.dirty?.add(block);
     if (layout.frame) return;
-    layout.frame = doc.defaultView.requestAnimationFrame(() => {
+    layout.flush = () => {
+      doc.defaultView.cancelAnimationFrame(layout.frame);
       layout.frame = 0;
       const blocks = layout.dirty || doc.querySelectorAll('.reader-sentence-pairs');
       layout.dirty = new Set();
@@ -9570,7 +9663,8 @@
         }
       }
       if (doc === frameDocument()) positionReaderSentenceTooltip(doc);
-    });
+    };
+    layout.frame = doc.defaultView.requestAnimationFrame(layout.flush);
   }
 
   function disposeInterlinearTranslations(doc) {
@@ -9585,6 +9679,7 @@
   }
 
   function unwrapSentenceTranslations(block) {
+    block?.querySelectorAll('.reader-interlinear-gap').forEach((node) => node.remove());
     block?.querySelectorAll('.reader-sentence-translation').forEach((node) => node.remove());
     block?.querySelectorAll('.reader-source-sentence').forEach((node) => node.replaceWith(...node.childNodes));
     block?.classList.remove('reader-sentence-pairs');

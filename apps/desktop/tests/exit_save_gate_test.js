@@ -51,6 +51,7 @@ async function harness() {
     fetch: async (url, options) => {
       requests.push({ url, options });
       if (url === '/api/stream') return controls.streamResponse;
+      if (url.endsWith('/translate') && controls.translationResponse) return controls.translationResponse;
       if (url === '/api/background' && controls.backgroundResponse) return controls.backgroundResponse;
       const noteId = url.match(/^\/api\/jobs\/([^/]+)\/notes$/u)?.[1];
       if (noteId && options.method === 'PUT' && controls.blockNotes) await controls.blockNotes;
@@ -74,6 +75,12 @@ async function harness() {
     setArticleNotesStatus() {}, renderArticleNoteConflict() {},
     captureCurrentReadingLocation() { context.module.exports.persistentStateSet('reading', 'last-location'); },
     frameDocument: () => controls.readerDocument || null,
+    translationProfileId: () => 'profile', translationTargetLanguage: () => 'zh',
+    translationSourceHash: () => 'hash', translationSourceIdentity: (source) => source.text,
+    protectSpecialTokens: (text) => ({ text, tokens: [] }), SPECIAL_MATH_TOKEN_RE: /__MATH__/gu,
+    cachedTranslationForSource: () => null, translationCacheFor: () => [], setTranslationCacheFor() {},
+    repairFormulaTokens: (text) => text, restoreInlineMath: (text) => text,
+    restoreInlineMarkers: (text) => text, restoreSpecialTokens: (text) => text,
     serializableChatEnvelope: (value) => value,
     chatStorageKey: (id) => `chat:${id}`, chatTextEncoder: new TextEncoder(), chatPersistMaxBytes: 100000,
   });
@@ -92,13 +99,14 @@ async function harness() {
     section('const annotationStyleSyncs =', 'const jsonOptions ='),
     'const jsonOptions = (body, method = "POST") => ({ method, body: JSON.stringify(body) });',
     section('async function streamApiRequest(', 'async function requestTranslation('),
+    section('async function requestTranslation(', 'function preserveReaderHoverThroughTranslationLayout('),
     section('function persistArticleNoteDrafts(', 'function isArticleNoteSession('),
     section('function queueArticleNotesSave(', 'function renderArticleNoteConflict('),
     section('async function flushPendingArticleNotes(', 'function saveNotes('),
     section('function persistChatSession(', 'function setChatHistoryOpen('),
     section('let settingsSaveTimer =', "$('#settings-form').addEventListener('submit'"),
     section('function freezeForClose(', "$('#setting-app-font')?.addEventListener"),
-    'this.gateTest = { request, streamApiRequest, queueArticleNotesSave, flushPendingArticleNotes, queueSettingsSave, settingsDirty: () => settingsSaveRevision - settingsSavedRevision, drafts: articleNoteDrafts, conflicts: articleNoteConflicts, setPending: (draft) => { pendingNotesSnapshot = draft; retainArticleNoteDraft(draft); }, dirtySettings: () => { settingsSaveRevision += 1; }, pending: () => pendingNotesSnapshot };',
+    'this.gateTest = { request, streamApiRequest, requestTranslation, queueArticleNotesSave, flushPendingArticleNotes, queueSettingsSave, settingsDirty: () => settingsSaveRevision - settingsSavedRevision, drafts: articleNoteDrafts, conflicts: articleNoteConflicts, setPending: (draft) => { pendingNotesSnapshot = draft; retainArticleNoteDraft(draft); }, dirtySettings: () => { settingsSaveRevision += 1; }, pending: () => pendingNotesSnapshot };',
   ].join('\n'), context);
   function edit(draft) {
     const event = { prevented: false, preventDefault() { this.prevented = true; }, stopImmediatePropagation() {} };
@@ -257,6 +265,31 @@ const draft = (jobId, markdown = jobId) => ({ jobId, markdown, revision: 1, base
     assert.equal(await h.close(), false, 'A recovery draft without a known server revision cannot overwrite notes');
     assert.equal(h.requests.length, 0);
     assert.match(h.disk.get('drafts'), /old recovery/u);
+  }
+  for (const streaming of [false, true]) {
+    const h = await harness();
+    let finish;
+    h.controls.translationResponse = new Promise((resolve) => { finish = resolve; });
+    let translated = false;
+    const translation = h.api.requestTranslation('Source text.', 'block', [], {
+      jobId: 'A', ...(streaming ? { onDelta() {} } : {}),
+    }).then((result) => { translated = true; return result; });
+    await tick();
+    assert.equal(h.requests.length, 1);
+    assert.equal(h.requests[0].options.closeBarrier, undefined, 'The renderer-only barrier option must not reach fetch');
+    let timeout;
+    try {
+      const saved = await Promise.race([
+        h.close(),
+        new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Inference blocked exit')), 1000); }),
+      ]);
+      assert.equal(saved, true, `${streaming ? 'Streaming' : 'Non-streaming'} translation must not delay exit while waiting for response headers`);
+    } finally { clearTimeout(timeout); }
+    finish({ ok: true, headers: { get: () => 'application/json' }, json: async () => ({ result: { text: 'Translated text.' } }) });
+    await tick();
+    assert.equal(translated, false, 'Late inference responses must remain paused while the window is frozen');
+    h.resume();
+    assert.equal((await translation).text, 'Translated text.');
   }
   {
     const h = await harness();
