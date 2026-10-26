@@ -126,6 +126,33 @@ function staticCheck() {
     assert.equal(config.extraMetadata.updater.enabled, true);
     assert.equal(config.extraMetadata.main, 'electron/windows-release-probe-main.cjs');
     assert.equal(config.forceCodeSigning, false);
+    const { resolveUpdateConfig } = require('../electron/update-config.cjs');
+    const options = { metadata: { ...config.extraMetadata }, isPackaged: true, platform: 'win32', arch: 'x64' };
+    const internal = resolveUpdateConfig(options);
+    assert.equal(internal.enabled, false, 'Real internal builds must keep updates disabled');
+    assert.equal(internal.discoveryEnabled, false);
+    const fixtureSource = fs.readFileSync(path.join(__dirname, 'fixtures/windows-release-probe-main.cjs'), 'utf8');
+    const fixtureSetup = fixtureSource.slice(0, fixtureSource.indexOf('const root = probe.root;'));
+    assert.ok(fixtureSetup.includes('updateConfig.resolveUpdateConfig ='));
+    const setup = (metadata, environment = 'true') => {
+      const updateConfig = { resolveUpdateConfig };
+      require('node:vm').runInNewContext(fixtureSetup, {
+        process: { platform: 'win32', env: { GITHUB_ACTIONS: environment } }, URL,
+        require: (name) => name === 'electron' ? { app: { isPackaged: true } }
+          : name === '../package.json' ? metadata : name === './update-config.cjs' ? updateConfig : require(name),
+      });
+      return updateConfig.resolveUpdateConfig;
+    };
+    const fixtureResolver = setup(options.metadata);
+    const fixture = fixtureResolver(options);
+    assert.deepEqual({ ...fixture }, { ...internal, enabled: true, discoveryEnabled: false, reason: '' });
+    assert.throws(() => fixtureResolver({ ...options, metadata: { ...options.metadata } }), /only to the old release fixture/u);
+    assert.throws(() => setup(options.metadata, 'false'), /Ephemeral Windows/u);
+    assert.throws(() => setup({ ...options.metadata, windowsReleaseAcceptance: { ...options.metadata.windowsReleaseAcceptance, transportURL: 'https://github.com' } }), /staged loopback/u);
+    const candidateConfig = createWindowsBuildConfig({ GUZI_UPDATE_CHANNEL: context.channel });
+    assert.ok(!candidateConfig.extraMetadata.windowsReleaseAcceptance);
+    assert.ok(!candidateConfig.extraResources.some((resource) => resource.to === 'app/electron/windows-release-probe-main.cjs'));
+    assert.equal(resolveUpdateConfig({ ...options, metadata: { version: context.version, ...candidateConfig.extraMetadata } }).enabled, false);
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
   console.log('Windows original-candidate acceptance static contracts passed; no installed upgrade was performed.');
 }
@@ -364,7 +391,7 @@ async function main() {
     const targetMetadata = json(path.join(installed, 'resources/app/package.json'));
     assert.equal(targetMetadata.updater.channel, context.channel);
     assert.equal(targetMetadata.updater.enabled, true);
-    assert.ok(!targetMetadata.localTestBuild && !targetMetadata.windowsUpdateAcceptance);
+    assert.ok(!targetMetadata.localTestBuild && !targetMetadata.windowsUpdateAcceptance && !targetMetadata.windowsReleaseAcceptance);
     assert.ok(!fs.existsSync(path.join(installed, 'resources/app/electron/windows-release-probe-main.cjs')), 'Target cannot retain the old test entry');
     assert.equal(digest(installer), artifact.sha256, 'Original candidate must remain byte-identical');
     const registered = JSON.parse(powershell(`$ErrorActionPreference='Stop'; $install=Get-ItemProperty 'HKCU:\\Software\\${guid}'; $uninstall=Get-ItemProperty 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${guid}'; @{ InstallLocation=$install.InstallLocation; DisplayVersion=$uninstall.DisplayVersion } | ConvertTo-Json -Compress`));
