@@ -1,0 +1,222 @@
+name: Desktop release acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Run this workflow at this exact candidate tag
+        required: true
+        type: string
+      macos_report:
+        description: Optional genuine macOS report; requires the Windows report too
+        required: false
+        default: ''
+        type: string
+      windows_report:
+        description: Optional genuine Windows report; requires the macOS report too
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-acceptance-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.context.outputs.mode }}
+      commit: ${{ steps.context.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/tags/${{ inputs.release_tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Require the exact workflow tag and validate report mode
+        id: context
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          MACOS_REPORT: ${{ inputs.macos_report }}
+          WINDOWS_REPORT: ${{ inputs.windows_report }}
+        run: |
+          git fetch origin main:refs/remotes/origin/main --no-tags
+          node apps/desktop/scripts/release-pipeline.cjs preflight "$RELEASE_TAG" release-context.json
+          node <<'NODE'
+          const fs = require('node:fs');
+          const context = JSON.parse(fs.readFileSync('release-context.json', 'utf8'));
+          if (process.env.GITHUB_SHA !== context.commit || process.env.GITHUB_WORKFLOW_SHA !== context.commit || process.env.GITHUB_REF !== `refs/tags/${context.tag}`) throw new Error('Dispatch the acceptance workflow from the exact candidate tag');
+          const mac = process.env.MACOS_REPORT.trim();
+          const win = process.env.WINDOWS_REPORT.trim();
+          if (Boolean(mac) !== Boolean(win)) throw new Error('Provide both genuine reports, or leave both empty for native acceptance');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `mode=${mac ? 'external' : 'native'}\n`);
+          NODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: acceptance-context
+          path: release-context.json
+          if-no-files-found: error
+
+  macos:
+    needs: validate
+    if: needs.validate.outputs.mode == 'native'
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      # GitHub only returns draft releases to tokens with push access; this job only reads them.
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - name: Require native Apple Silicon
+        run: test "$(uname -m)" = arm64
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          architecture: arm64
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+          architecture: arm64
+      - name: Install locked test dependencies
+        run: |
+          python3 -m pip install --disable-pip-version-check certifi==2025.8.3
+          npm ci --prefix apps/desktop
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: acceptance-context
+      - name: Download and verify the unchanged draft candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+        run: node apps/desktop/scripts/release-pipeline.cjs download-candidate candidate release-context.json
+      - name: Exercise the original macOS candidate through a real upgrade
+        env:
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+        run: node apps/desktop/tests/mac_release_acceptance.js --candidate-directory candidate --release-context release-context.json --output acceptance/macos-acceptance.json
+      - name: Preserve macOS acceptance evidence, including failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-macos-acceptance
+          path: |
+            acceptance/macos-acceptance.json
+            acceptance/macos-events.jsonl
+            acceptance/macos-*.log
+            acceptance/macos-update-settings.png
+          if-no-files-found: warn
+
+  windows:
+    needs: validate
+    if: needs.validate.outputs.mode == 'native'
+    runs-on: windows-2022
+    timeout-minutes: 90
+    permissions:
+      # Reading the unpublished draft requires push access; no release mutation occurs here.
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          architecture: x64
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          architecture: x64
+      - name: Install locked dependencies and select fixture runtimes
+        run: |
+          npm ci --prefix apps/desktop
+          "MY_SCHOLAR_BUILD_PYTHON=$((Get-Command python).Source)" >> $env:GITHUB_ENV
+          "MY_SCHOLAR_JAVA_HOME=$env:JAVA_HOME" >> $env:GITHUB_ENV
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: acceptance-context
+      - name: Download and verify the unchanged draft candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+        run: node apps/desktop/scripts/release-pipeline.cjs download-candidate candidate release-context.json
+      - name: Exercise the original Windows candidate through a real upgrade
+        timeout-minutes: 65
+        env:
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+        run: node apps/desktop/tests/windows_release_acceptance.js --candidate-directory candidate --release-context release-context.json --output acceptance/windows-acceptance.json
+      - name: Preserve Windows acceptance evidence, including failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-windows-acceptance
+          path: |
+            acceptance/windows-acceptance.json
+            acceptance/windows-events.jsonl
+            acceptance/windows-transport.json
+            acceptance/windows-*.log
+          if-no-files-found: warn
+
+  record:
+    needs: [validate, macos, windows]
+    if: ${{ always() && !cancelled() && needs.validate.result == 'success' && (needs.validate.outputs.mode == 'external' || (needs.macos.result == 'success' && needs.windows.result == 'success')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      # Draft releases are only visible with push access; review is read-only.
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: acceptance-context
+      - name: Collect genuine external reports
+        if: needs.validate.outputs.mode == 'external'
+        env:
+          MACOS_REPORT: ${{ inputs.macos_report }}
+          WINDOWS_REPORT: ${{ inputs.windows_report }}
+        run: |
+          mkdir acceptance
+          node -e 'const fs=require("fs"); for (const [file,key] of [["macos","MACOS_REPORT"],["windows","WINDOWS_REPORT"]]) fs.writeFileSync(`acceptance/${file}-acceptance.json`, JSON.stringify(JSON.parse(process.env[key]),null,2));'
+      - name: Collect both successful native reports
+        if: needs.validate.outputs.mode == 'native'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: native-*-acceptance
+          merge-multiple: true
+          path: acceptance
+      - name: Revalidate every report against the remotely downloaded candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}
+        run: node apps/desktop/scripts/release-pipeline.cjs review release-context.json acceptance
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: guzi-release-acceptance
+          path: |
+            acceptance/macos-acceptance.json
+            acceptance/windows-acceptance.json
+          if-no-files-found: error

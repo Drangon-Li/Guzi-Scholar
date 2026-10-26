@@ -26,7 +26,15 @@ contextBridge.exposeInMainWorld('myScholarDesktop', Object.freeze({
   getMcpConfig: () => ipcRenderer.invoke('my-scholar:mcp-config'),
   selectStartupLibrary: (selectedPath) => ipcRenderer.invoke('my-scholar:select-startup-library', selectedPath),
   checkForUpdates: () => ipcRenderer.invoke('my-scholar:check-for-updates'),
-  openUpdateDownload: () => ipcRenderer.invoke('my-scholar:open-update-download'),
+  getUpdateState: () => ipcRenderer.invoke('my-scholar:get-update-state'),
+  downloadUpdate: () => ipcRenderer.invoke('my-scholar:download-update'),
+  installUpdate: () => ipcRenderer.invoke('my-scholar:install-update'),
+  onUpdateState: (callback) => {
+    if (typeof callback !== 'function') throw new TypeError('更新状态回调必须是函数。');
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('my-scholar:update-state', listener);
+    return () => ipcRenderer.removeListener('my-scholar:update-state', listener);
+  },
   state: Object.freeze({
     loadAll: () => rendererStateInvoke('my-scholar:state-load'),
     set: (key, value) => rendererStateInvoke('my-scholar:state-set', key, value),

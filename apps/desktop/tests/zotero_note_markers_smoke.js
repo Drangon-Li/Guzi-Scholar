@@ -1,5 +1,6 @@
 'use strict';
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const { launchManagedChromium } = require('./playwright.cjs');
 const baseURL = process.argv[2];
 if (!baseURL) throw new Error('Run through run_ui_tests.js --only=zotero-note-markers');
@@ -14,6 +15,7 @@ const fixtureHTML = '<!doctype html><html><body data-note-marker-fixture><main c
 (async () => {
   const session = await launchManagedChromium();
   let markdown = initial;
+  const revision = () => createHash('sha256').update(markdown).digest('hex');
   const saved = []; const errors = [];
   try {
     const page = await session.browser.newPage({ viewport: { width: 1450, height: 940 }, reducedMotion: 'reduce' });
@@ -23,8 +25,13 @@ const fixtureHTML = '<!doctype html><html><body data-note-marker-fixture><main c
     await page.route('**/api/jobs/*/auto-highlights', (route) => route.fulfill({ json: { result: { status: 'mock', highlights: [] } } }));
     await page.route('**/api/jobs/*/document.html*', (route) => route.fulfill({ contentType: 'text/html', body: fixtureHTML }));
     await page.route('**/api/jobs/*/notes', (route) => {
-      if (route.request().method() === 'PUT') { markdown = route.request().postDataJSON().markdown; saved.push(markdown); }
-      return route.fulfill({ json: { markdown } });
+      if (route.request().method() === 'PUT') {
+        const payload = route.request().postDataJSON();
+        assert.equal(payload.expected_revision, revision(), 'Editor must save against the current notes revision');
+        markdown = payload.markdown;
+        saved.push(markdown);
+      }
+      return route.fulfill({ json: { markdown, revision: revision() } });
     });
     const editor = page.locator('#notes-editor[contenteditable="true"]');
     const open = async () => {

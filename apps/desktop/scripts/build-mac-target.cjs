@@ -6,6 +6,7 @@ const path = require('path');
 
 const root = path.join(__dirname, '..');
 const LOCAL_TEST_BUILD = '20261022.5';
+const { prepareSparkle } = require('./prepare-sparkle.cjs');
 
 function preventBuildOutputIndexing(outputDirectory) {
   fs.mkdirSync(outputDirectory, { recursive: true });
@@ -14,7 +15,7 @@ function preventBuildOutputIndexing(outputDirectory) {
 
 function buildOptions(target, mode, environment = process.env) {
   const outputDirectory = path.join(root, 'dist', mode === 'local-test' ? `local-test-${LOCAL_TEST_BUILD}.noindex` : 'mac.noindex');
-  const args = ['--mac', target, '--arm64', '--publish=never'];
+  const args = ['--mac', ...(target === 'all' ? ['dmg', 'zip'] : [target]), '--arm64', '--publish=never'];
   const env = { ...environment };
   if (mode === 'internal') {
     args.push(
@@ -29,16 +30,51 @@ function buildOptions(target, mode, environment = process.env) {
     delete env.CSC_LINK;
     delete env.CSC_KEY_PASSWORD;
   }
-  return { args, env, outputDirectory };
+  const channel = mode === 'local-test' ? 'local-test' : String(environment.GUZI_UPDATE_CHANNEL || (mode === 'release' ? 'stable' : 'internal'));
+  if (!['stable', 'beta', 'internal', 'local-test'].includes(channel)) throw new Error('GUZI_UPDATE_CHANNEL must be stable or beta');
+  const enabled = ['stable', 'beta'].includes(channel);
+  const publicKey = String(environment.SPARKLE_PUBLIC_KEY || '').trim();
+  if (enabled && (!publicKey || Buffer.from(publicKey, 'base64').length !== 32 || Buffer.from(publicKey, 'base64').toString('base64') !== publicKey)) throw new Error('Updater-enabled builds require SPARKLE_PUBLIC_KEY (32-byte canonical base64 public key)');
+  const updater = enabled ? { enabled: true, channel, repository: 'Drangon-Li/Guzi-Scholar', publicKey, minimumSystemVersion: '12.0', frameworkVersion: '2.10.1' } : { enabled: false, channel };
+  const { build } = require('../package.json');
+  let configuration;
+  if (enabled) {
+    const productName = channel === 'beta' ? '谷子学术测试版' : build.productName;
+    configuration = {
+      ...build,
+      appId: channel === 'beta' ? 'com.guzi.scholar.beta' : build.appId,
+      productName,
+      artifactName: `Guzi-Scholar-\${version}-\${arch}-${channel}.\${ext}`,
+      extraMetadata: { ...build.extraMetadata, updater },
+      directories: { ...build.directories, output: outputDirectory },
+      extraResources: [...(build.extraResources || []), { from: 'build/updater/arm64/sparkle-bridge.node', to: 'sparkle-bridge.node' }],
+      extraFiles: [...(build.extraFiles || []), { from: 'build/updater/Sparkle-2.10.1/Sparkle.framework', to: 'Frameworks/Sparkle.framework' }],
+      mac: { ...build.mac, minimumSystemVersion: '12.0', extendInfo: { ...build.mac.extendInfo, CFBundleDisplayName: productName, CFBundleName: productName, SUPublicEDKey: publicKey, SUEnableAutomaticChecks: false, SUAutomaticallyUpdate: false, SUAllowsAutomaticUpdates: false } },
+      dmg: { ...build.dmg, title: `${productName} \${version}` },
+    };
+    if (mode === 'internal') {
+      configuration.mac.identity = '-';
+      configuration.mac.hardenedRuntime = false;
+      configuration.mac.notarize = false;
+      const artifactOverride = args.indexOf('--config.artifactName=Guzi-Scholar-${version}-${arch}-internal.${ext}');
+      if (artifactOverride >= 0) args.splice(artifactOverride, 1);
+    }
+    args.push('--config', path.join(root, 'build', 'updater', `mac-${channel}-builder.json`));
+  } else if (mode !== 'local-test') {
+    args.push('--config.extraMetadata.updater.enabled=false', `--config.extraMetadata.updater.channel=${channel}`);
+  }
+  return { args, env, outputDirectory, configuration, updater };
 }
 
-function main() {
+async function main() {
   const target = process.argv[2];
   const mode = process.argv[3];
-  if (!['check', 'dir', 'dmg'].includes(target) || !['internal', 'release', 'local-test'].includes(mode)) {
-    console.error('usage: node scripts/build-mac-target.cjs <check|dir|dmg> <internal|release|local-test>');
+  if (!['check', 'dir', 'dmg', 'zip', 'all'].includes(target) || !['internal', 'release', 'local-test'].includes(mode)) {
+    console.error('usage: node scripts/build-mac-target.cjs <check|dir|dmg|zip|all> <internal|release|local-test>');
     return 1;
   }
+
+  const { args, env, outputDirectory, configuration, updater } = buildOptions(target, mode);
 
   if (mode === 'release') {
     const identities = spawnSync(
@@ -74,8 +110,11 @@ function main() {
 
   if (target === 'check') return 0;
 
-  const { args, env, outputDirectory } = buildOptions(target, mode);
   preventBuildOutputIndexing(outputDirectory);
+  if (updater.enabled) {
+    await prepareSparkle({ architecture: 'arm64', environment: env });
+    fs.writeFileSync(path.join(root, 'build', 'updater', `mac-${updater.channel}-builder.json`), JSON.stringify(configuration));
+  }
 
   const builder = path.join(root, 'node_modules', '.bin', 'electron-builder');
   const result = spawnSync(builder, args, { cwd: root, env, stdio: 'inherit' });
@@ -85,4 +124,4 @@ function main() {
 }
 
 module.exports = { buildOptions, LOCAL_TEST_BUILD };
-if (require.main === module) process.exitCode = main();
+if (require.main === module) main().then((code) => { process.exitCode = code; }).catch((error) => { console.error(error.message); process.exitCode = 1; });

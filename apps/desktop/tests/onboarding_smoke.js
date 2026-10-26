@@ -21,14 +21,22 @@ let browserSession;
   await page.exposeFunction('__onboardingStateRemove', async (key) => { delete rendererState[key]; });
   await page.addInitScript(() => {
     window.__updateCheckCount = 0;
-    window.__openedUpdateDownloads = 0;
+    window.__downloadedUpdates = 0;
+    window.__updateInstallRequests = 0;
+    let updateState = { status: 'idle', currentVersion: '0.3.0', channel: 'stable', enabled: true, canCheck: true, canDownload: false, canInstall: false, error: '', progress: null };
+    const updateListeners = new Set();
+    const publishUpdate = (patch) => {
+      updateState = { ...updateState, ...patch };
+      for (const listener of updateListeners) listener({ ...updateState });
+      return { ok: true, ...updateState };
+    };
     Object.defineProperty(window, 'myScholarDesktop', {
       configurable: true,
       value: Object.freeze({
         platform: 'darwin',
         getStartupContext: async () => ({
           ok: true,
-          app: { name: '谷子学术', version: '0.3.0', platform: 'darwin', arch: 'arm64', channel: 'internal' },
+          app: { name: '谷子学术', version: '0.3.0', platform: 'darwin', arch: 'arm64', channel: 'stable' },
           storage: {
             state: 'conflict',
             adopted: false,
@@ -37,23 +45,23 @@ let browserSession;
           },
         }),
         selectStartupLibrary: async (selectedPath) => ({ ok: true, reloading: false, currentPath: selectedPath, items: 0, jobs: 0 }),
+        getUpdateState: async () => ({ ok: true, ...updateState }),
+        onUpdateState: (listener) => { updateListeners.add(listener); return () => updateListeners.delete(listener); },
         checkForUpdates: async () => {
           window.__updateCheckCount += 1;
-          if (window.__updateCheckCount === 1) return { ok: true, status: 'current', currentVersion: '0.3.0', version: '0.3.0', checkedAt: new Date().toISOString() };
-          return {
-            ok: true,
-            status: 'available',
-            currentVersion: '0.3.0',
-            version: '0.3.0',
-            publishedAt: '2026-08-07T00:00:00Z',
-            notes: '验证设置中的下载入口。',
-            sha256: 'a'.repeat(64),
-            checkedAt: new Date().toISOString(),
-          };
+          if (window.__updateCheckCount === 1) return publishUpdate({ status: 'current', version: '0.3.0', checkedAt: new Date().toISOString() });
+          return publishUpdate({
+            status: 'available', version: '0.3.1', canDownload: true,
+            publishedAt: '2026-08-07T00:00:00Z', notes: '验证设置中的下载与安装入口。', checkedAt: new Date().toISOString(),
+          });
         },
-        openUpdateDownload: async () => {
-          window.__openedUpdateDownloads += 1;
-          return { ok: true };
+        downloadUpdate: async () => {
+          window.__downloadedUpdates += 1;
+          return publishUpdate({ status: 'ready', canDownload: false, canInstall: true });
+        },
+        installUpdate: async () => {
+          window.__updateInstallRequests += 1;
+          return publishUpdate({ status: 'ready', error: '已取消安装，更新包仍保留。' });
         },
         state: Object.freeze({
           loadAll: () => window.__onboardingStateLoad(),
@@ -132,11 +140,16 @@ let browserSession;
   await page.waitForFunction(() => document.querySelector('#update-status-title')?.textContent.trim() === '当前已是最新版本');
   if (!await page.locator('#download-update').isHidden()) throw new Error('当前版本没有隐藏不必要的下载按钮');
   await page.locator('#check-updates').click();
-  await page.waitForFunction(() => document.querySelector('#update-status-title')?.textContent.trim() === '发现新版本 v0.3.0');
+  await page.waitForFunction(() => document.querySelector('#update-status-title')?.textContent.trim() === '发现新版本 v0.3.1');
   if (await page.locator('#download-update').isHidden()) throw new Error('发现新版本后没有提供下载入口');
-  if (await page.locator('#update-release-sha').textContent() !== `SHA-256 · ${'a'.repeat(64)}`) throw new Error('更新详情没有展示安装包校验值');
+  if (!await page.locator('#install-update').isHidden()) throw new Error('更新下载前不应提供安装入口');
   await page.locator('#download-update').click();
-  await page.waitForFunction(() => window.__openedUpdateDownloads === 1);
+  await page.waitForFunction(() => window.__downloadedUpdates === 1 && document.querySelector('#update-status-title')?.textContent.trim() === 'v0.3.1 已准备就绪');
+  if (!await page.locator('#download-update').isHidden()) throw new Error('下载完成后仍显示重复下载入口');
+  if (!await page.locator('#install-update').isVisible() || !await page.locator('#install-update').isEnabled()) throw new Error('下载完成后没有提供可用的安装入口');
+  await page.locator('#install-update').click();
+  await page.waitForFunction(() => window.__updateInstallRequests === 1 && document.querySelector('#update-status-detail')?.textContent.includes('已取消安装'));
+  if (!await page.locator('#install-update').isEnabled()) throw new Error('取消安装后没有保留重试入口');
   await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'dark' });
   await page.locator('a[href="#settings-reading"]').click();
   await page.locator('#replay-onboarding').click();
@@ -147,7 +160,7 @@ let browserSession;
   await page.waitForFunction(() => !document.querySelector('#onboarding-dialog').open);
   if (JSON.parse(rendererState['my-scholar-onboarding-v2']).action !== 'skipped') throw new Error('跳过引导没有保持“不再自动展示”的完成状态');
   if (errors.length) throw new Error(errors.join('\n'));
-  console.log(JSON.stringify({ firstLaunch: true, animatedSteps: 4, persistentCompletion: true, noRepeatAfterReload: true, settingsReplay: true, updateDownloadEntry: true, reducedMotion: true, darkMode: true, screenshot }));
+  console.log(JSON.stringify({ firstLaunch: true, animatedSteps: 4, persistentCompletion: true, noRepeatAfterReload: true, settingsReplay: true, updateDownloadEntry: true, updateReady: true, updateInstallEntry: true, cancelledInstallRetained: true, reducedMotion: true, darkMode: true, screenshot }));
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

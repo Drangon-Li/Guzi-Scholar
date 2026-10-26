@@ -1724,6 +1724,8 @@ def _library_migration_status() -> Dict[str, Any]:
     ]
     with METADATA_STATE_LOCK:
         metadata_pending = len(METADATA_PENDING)
+    with PARSING_PROVIDER_LOCK:
+        component_install_pending = PARSING_INSTALL_THREAD is not None and PARSING_INSTALL_THREAD.is_alive()
     conversion_pending = int(getattr(CONVERSION_QUEUE, "unfinished_tasks", 0)) + int(getattr(REFLOW_QUEUE, "unfinished_tasks", 0))
     metadata_queued = int(getattr(METADATA_QUEUE, "unfinished_tasks", 0))
     incoming = 0
@@ -1737,12 +1739,14 @@ def _library_migration_status() -> Dict[str, Any]:
         active_requests = MIGRATION_ACTIVE_REQUESTS
         active_mutations = MIGRATION_ACTIVE_MUTATIONS
         quiescing = MIGRATION_QUIESCING
-    ready = not ANNOTATION_STYLE_RECOVERY_REQUIRED and not busy_jobs and not conversion_pending and not metadata_queued and not metadata_pending and not incoming and not active_mutations
+    ready = not ANNOTATION_STYLE_RECOVERY_REQUIRED and not busy_jobs and not conversion_pending and not metadata_queued and not metadata_pending and not incoming and not active_mutations and not component_install_pending
     return {
         "ready": ready,
         "busy_jobs": busy_jobs,
         "conversion_pending": conversion_pending,
         "metadata_pending": max(metadata_pending, metadata_queued),
+        "component_install_pending": component_install_pending,
+        **({"reason": "版面引擎安装或导入正在进行中，请等待完成后再重试。"} if component_install_pending else {}),
         "incoming_uploads": incoming,
         "active_requests": active_requests,
         "active_mutations": active_mutations,

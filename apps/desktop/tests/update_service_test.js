@@ -1,135 +1,41 @@
 'use strict';
-
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-
-const {
-  checkForUpdate,
-  compareVersions,
-  resolveUpdateManifestURL,
-  validateUpdateManifest,
-} = require('../electron/update-service.cjs');
-
-const allowedOrigins = ['https://82.156.152.27', 'https://guzilab.com'];
-const manifest = {
-  schema: 1,
-  version: '0.1.1',
-  platform: 'darwin',
-  arch: 'arm64',
-  channel: 'beta',
-  published_at: '2026-08-06T00:00:00Z',
-  notes: '修复旧版文献库恢复。',
-  download_url: 'https://82.156.152.27/updates/macos/arm64/Guzi-Scholar-0.1.1.dmg',
-  sha256: 'a'.repeat(64),
-};
-
+const { REPOSITORY, compareVersions, parseVersion, versionChannel, assetURL, safeNetworkURL, validateReleaseManifest, findReleaseUpdate } = require('../electron/update-service.cjs');
+const { resolveUpdateConfig } = require('../electron/update-config.cjs');
+const digest = Buffer.alloc(64, 1).toString('base64');
+const tag = 'v0.6.3';
+const asset = { platform: 'darwin', arch: 'arm64', kind: 'sparkle', name: 'Guzi-Scholar-0.6.3-arm64-stable.zip', size: 100, sha256: 'a'.repeat(64), sha512: digest, ed_signature: digest, minimum_system_version: '12.0' };
+asset.url = assetURL(tag, asset.name);
+const manifest = { schema: 2, repository: REPOSITORY, version: '0.6.3', channel: 'stable', published_at: '2026-10-26T00:00:00Z', artifacts: [asset] };
+const release = { tag_name: tag, draft: false, prerelease: false, assets: [
+  { name: 'update-manifest.json', browser_download_url: assetURL(tag, 'update-manifest.json'), size: 900, state: 'uploaded' },
+  { name: asset.name, browser_download_url: asset.url, size: asset.size, state: 'uploaded' },
+] };
+const options = { channel: 'stable', platform: 'darwin', arch: 'arm64', release };
 async function main() {
-  const macManifestURL = 'https://raw.githubusercontent.com/Drangon-Li/Guzi-Scholar/main/release-manifests/macos-arm64.json';
-  assert.equal(resolveUpdateManifestURL({ env: {}, platform: 'darwin', arch: 'arm64' }), macManifestURL);
-  for (const [platform, arch] of [['win32', 'x64'], ['darwin', 'x64'], ['linux', 'x64']]) {
-    assert.equal(resolveUpdateManifestURL({ env: {}, platform, arch }), '');
-    assert.equal(resolveUpdateManifestURL({ env: { MY_SCHOLAR_UPDATE_MANIFEST_URL: ' https://guzilab.com/real-manifest.json ' }, platform, arch }), 'https://guzilab.com/real-manifest.json');
-  }
-  const unavailable = await checkForUpdate({
-    manifestURL: resolveUpdateManifestURL({ env: {}, platform: 'win32', arch: 'x64' }),
-    currentVersion: '0.1.0', platform: 'win32', arch: 'x64', channel: 'beta', allowedOrigins,
-    fetcher: () => assert.fail('An unconfigured Windows update must not fetch the macOS manifest'),
-  });
-  assert.equal(unavailable.status, 'unavailable');
-  assert.equal(unavailable.currentVersion, '0.1.0');
-  assert.equal(unavailable.downloadURL, undefined);
-  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
-  const handlerSource = mainSource.slice(mainSource.indexOf("ipcMain.handle('my-scholar:check-for-updates'"), mainSource.indexOf("ipcMain.handle('my-scholar:open-update-download'"));
-  let handler;
-  const context = vm.createContext({
-    ipcMain: { handle: (_name, callback) => { handler = callback; } },
-    requireMainWindowSender: () => {}, isolatedBuild: false, checkForUpdate,
-    UPDATE_MANIFEST_URL: '', UPDATE_ALLOWED_ORIGINS: allowedOrigins, UPDATE_CHANNEL: 'beta',
-    app: { getVersion: () => '0.1.0' }, process: { platform: 'win32', arch: 'x64' },
-    availableUpdate: { downloadURL: 'https://guzilab.com/stale-update.exe' }, diagnosticLog: () => {},
-  });
-  vm.runInContext(handlerSource, context);
-  const response = await handler({});
-  assert.equal(response.ok, false);
-  assert.equal(response.status, 'unavailable');
-  assert.match(response.error, /尚未配置更新服务/u);
-  assert.equal(context.availableUpdate, null, 'An unavailable check must clear any stale download');
-  assert.equal(compareVersions('0.1.1', '0.1.0'), 1);
-  assert.equal(compareVersions('0.1.0', '0.1.0'), 0);
-  assert.equal(compareVersions('0.1.0-beta.2', '0.1.0-beta.1'), 1);
-  assert.equal(compareVersions('0.1.0-beta.1', '0.1.0'), -1);
-
-  const validated = validateUpdateManifest(manifest, {
-    platform: 'darwin', arch: 'arm64', channel: 'beta', allowedOrigins: new Set(allowedOrigins),
-  });
-  assert.equal(validated.version, '0.1.1');
-  assert.equal(validated.downloadURL, manifest.download_url);
-  assert.throws(
-    () => validateUpdateManifest({ ...manifest, download_url: 'https://example.com/update.dmg' }, {
-      platform: 'darwin', arch: 'arm64', channel: 'beta', allowedOrigins: new Set(allowedOrigins),
-    }),
-    /受信任/,
-  );
-  assert.throws(
-    () => validateUpdateManifest({ ...manifest, arch: 'x64' }, {
-      platform: 'darwin', arch: 'arm64', channel: 'beta', allowedOrigins: new Set(allowedOrigins),
-    }),
-    /不匹配/,
-  );
-
-  const available = await checkForUpdate({
-    manifestURL: 'https://82.156.152.27/updates/macos/arm64/beta.json',
-    currentVersion: '0.1.0',
-    platform: 'darwin',
-    arch: 'arm64',
-    channel: 'beta',
-    allowedOrigins,
-    fetcher: async () => manifest,
-  });
-  assert.equal(available.status, 'available');
-  assert.equal(available.version, '0.1.1');
-
-  const windowsAvailable = await checkForUpdate({
-    manifestURL: resolveUpdateManifestURL({ env: { MY_SCHOLAR_UPDATE_MANIFEST_URL: 'https://guzilab.com/windows.json' }, platform: 'win32', arch: 'x64' }),
-    currentVersion: '0.1.0', platform: 'win32', arch: 'x64', channel: 'beta', allowedOrigins,
-    fetcher: async (endpoint) => {
-      assert.equal(endpoint.toString(), 'https://guzilab.com/windows.json');
-      return { ...manifest, platform: 'win32', arch: 'x64', download_url: 'https://guzilab.com/Guzi-Scholar-0.1.1-x64.exe' };
-    },
-  });
-  assert.equal(windowsAvailable.status, 'available');
-  assert.equal(windowsAvailable.platform, 'win32');
-  await assert.rejects(checkForUpdate({
-    manifestURL: 'https://guzilab.com/windows.json', currentVersion: '0.1.0',
-    platform: 'win32', arch: 'x64', channel: 'beta', allowedOrigins, fetcher: async () => manifest,
-  }), /不匹配/u);
-
-  const current = await checkForUpdate({
-    manifestURL: 'https://82.156.152.27/updates/macos/arm64/beta.json',
-    currentVersion: '0.1.0',
-    platform: 'darwin',
-    arch: 'arm64',
-    channel: 'beta',
-    allowedOrigins,
-    fetcher: async () => ({ ...manifest, version: '0.1.0', download_url: '', sha256: '' }),
-  });
-  assert.equal(current.status, 'current');
-
-  await assert.rejects(
-    checkForUpdate({
-      manifestURL: 'https://82.156.152.27/updates/macos/arm64/beta.json',
-      currentVersion: '0.1.0',
-      platform: 'darwin', arch: 'arm64', channel: 'beta', allowedOrigins,
-      fetcher: async () => ({ ...manifest, sha256: '' }),
-    }),
-    /缺少下载地址或文件校验值/,
-  );
-  console.log('update service tests passed');
+  for (const [left, right, expected] of [['1.2.3', '1.2.2', 1], ['1.2.3-beta.10', '1.2.3-beta.2', 1], ['1.2.3', '1.2.3-beta.9', 1], ['1.2.3-beta.1', '1.2.3-beta.1', 0], ['1.2.3-beta.2', '1.2.3', -1]]) assert.equal(compareVersions(left, right), expected);
+  for (const value of ['01.2.3', '1.2.3-beta.01', '1.2', '1.2.3/../../']) assert.throws(() => parseVersion(value));
+  assert.throws(() => versionChannel('1.2.3-alpha.1'));
+  for (const url of ['http://github.com/x', 'https://github.com.evil.example/x', 'https://u:p@github.com/x', 'https://127.0.0.1/x']) assert.throws(() => safeNetworkURL(url));
+  const found = validateReleaseManifest(manifest, options);
+  assert.equal(found.downloadURL, asset.url); assert.equal(found.edSignature, digest); assert.equal(found.size, 100);
+  for (const patch of [{ channel: 'beta' }, { repository: 'old/Guzi-Scholar' }, { version: '0.6.4' }, { schema: 1 }, { artifacts: [asset, asset] }]) assert.throws(() => validateReleaseManifest({ ...manifest, ...patch }, options));
+  for (const patch of [{ size: 99 }, { sha512: '' }, { ed_signature: '' }, { url: 'https://evil.example/a.zip' }, { minimum_system_version: '' }]) assert.throws(() => validateReleaseManifest({ ...manifest, artifacts: [{ ...asset, ...patch }] }, options));
+  for (const patch of [{ draft: true }, { prerelease: true }, { assets: release.assets.slice(0, 1) }]) assert.throws(() => validateReleaseManifest(manifest, { ...options, release: { ...release, ...patch } }));
+  const calls = [];
+  const result = await findReleaseUpdate({ ...options, currentVersion: '0.6.2', fetcher: async (url) => { calls.push(url); return url.includes('/releases/latest') ? release : manifest; } });
+  assert.equal(result.status, 'available'); assert.equal(calls.length, 2);
+  assert.equal((await findReleaseUpdate({ ...options, currentVersion: '0.6.3', fetcher: async () => release })).status, 'current');
+  await assert.rejects(findReleaseUpdate({ ...options, currentVersion: '0.6.2', fetcher: async () => ({ ...release, draft: true }) }));
+  await assert.rejects(findReleaseUpdate({ ...options, currentVersion: '0.6.2-beta.1', fetcher: async () => release }));
+  assert.equal((await findReleaseUpdate({ ...options, channel: 'beta', currentVersion: '0.6.3-beta.1', fetcher: async () => [release, { ...release, tag_name: 'v0.6.4-beta.1', draft: true, prerelease: true }] })).status, 'current');
+  const metadata = { version: '0.6.2', updater: { enabled: true, channel: 'stable', repository: REPOSITORY, publicKey: Buffer.alloc(32).toString('base64') } };
+  const configOptions = { metadata, isPackaged: true, platform: 'darwin', arch: 'arm64' };
+  assert.equal(resolveUpdateConfig(configOptions).enabled, true);
+  assert.equal(resolveUpdateConfig({ ...configOptions, isPackaged: false }).enabled, false);
+  assert.equal(resolveUpdateConfig({ ...configOptions, metadata: { ...metadata, localTestBuild: 'probe' } }).enabled, false);
+  assert.equal(resolveUpdateConfig({ ...configOptions, metadata: { ...metadata, updater: { ...metadata.updater, channel: 'beta' } } }).enabled, false);
+  assert.equal(resolveUpdateConfig({ ...configOptions, arch: 'x64' }).enabled, false);
+  console.log('Release discovery, identity, integrity, channel and build policy tests passed');
 }
-
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+main().catch((error) => { console.error(error); process.exitCode = 1; });

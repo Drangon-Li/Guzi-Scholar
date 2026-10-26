@@ -520,14 +520,14 @@
             <div id="update-status-card" class="update-status-card is-idle" role="status" aria-live="polite">
               <span class="update-status-dot" aria-hidden="true"></span>
               <div class="update-status-copy"><strong id="update-status-title">尚未检查更新</strong><small id="update-status-detail">仅在你点击时连接谷子学术更新服务，不会在后台自动下载。</small><time id="update-checked-time"></time></div>
-              <div class="update-status-actions"><button id="check-updates" class="secondary-button" type="button">检查更新</button><button id="download-update" class="primary-button compact-button" type="button" hidden>下载新版本</button></div>
+              <div class="update-status-actions"><button id="check-updates" class="secondary-button" type="button">检查更新</button><button id="download-update" class="primary-button compact-button" type="button" hidden>下载更新</button><button id="install-update" class="primary-button compact-button" type="button" hidden>安装并重新启动</button></div>
+              <div id="update-download-progress" class="update-download-progress" hidden><progress id="update-progress-bar" max="100" value="0" aria-label="更新下载进度"></progress><span id="update-progress-text"></span></div>
             </div>
             <div id="update-release-details" class="update-release-details" hidden>
               <div><strong id="update-release-version">新版本</strong><small id="update-release-date"></small></div>
               <p id="update-release-notes"></p>
-              <code id="update-release-sha" title="安装包 SHA-256"></code>
             </div>
-            <small id="app-update-install-hint" class="settings-gateway-hint">当前发布包只提供主动检查和浏览器下载；下载后请手动安装新版本，不会在应用内自动替换。</small>
+            <small id="app-update-install-hint" class="settings-gateway-hint">下载完成后，由你确认保存并安装。普通退出不会安装更新，文献库与配置会保留。</small>
           </section>
         </form>
       </div>
