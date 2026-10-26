@@ -5,11 +5,12 @@ const primaryModifier = process.platform === 'darwin' ? 'Meta' : 'Control';
 const requestedJobId = process.argv[3] || '';
 let browser;
 let browserSession;
+let page;
 
 (async () => {
   browserSession = await launchManagedChromium();
   browser = browserSession.browser;
-  const page = await browser.newPage({ viewport: { width: 1500, height: 980 } });
+  page = await browser.newPage({ viewport: { width: 1500, height: 980 } });
   await page.addInitScript(() => {
     window.__myScholarCopiedImageTypes = [];
     window.__myScholarCopiedText = '';
@@ -126,15 +127,30 @@ let browserSession;
     if (annotation.block_id !== 'block-2-1-paragraph') continue;
     await page.evaluate(async ({ id, annotationId }) => fetch(`/api/jobs/${id}/annotations/${annotationId}`, { method: 'DELETE' }), { id: jobId, annotationId: annotation.id });
   }
+  await page.evaluate(() => {
+    const status = document.querySelector('#highlight-ai-status');
+    const batch = window.__initialHighlightBatch = { writes: [] };
+    batch.observer = new MutationObserver(() => { batch.writes.push(status.textContent); });
+    batch.observer.observe(status, { childList: true, characterData: true, subtree: true });
+  });
   await firstCard.dblclick();
   await page.locator('#reader-view.active-view').waitFor();
   const frame = page.frameLocator('#html-preview');
   await frame.locator('.pdf-page').first().waitFor();
-  await page.waitForFunction((highlights) => {
-    const doc = document.querySelector('#html-preview')?.contentDocument;
-    const rendered = highlights.every(({ block_id: blockId }) => doc?.querySelector(`[data-block-id="${CSS.escape(blockId)}"] mark.my-scholar-ai-suggestion[data-annotation-source="ai"]`));
-    return rendered && document.querySelector('#highlight-ai-status')?.textContent.includes('点击可采纳或忽略');
-  }, initialHighlights);
+  try {
+    await page.waitForFunction(() => window.__initialHighlightBatch.writes.includes('AI 建议，仅供参考 · 点击可采纳或忽略'));
+  } catch (error) {
+    const diagnostics = await page.evaluate(async ({ id, highlights }) => {
+      const payload = await (await fetch(`/api/jobs/${id}/annotations`)).json();
+      const doc = document.querySelector('#html-preview')?.contentDocument;
+      return { status: document.querySelector('#highlight-ai-status')?.textContent, writes: window.__initialHighlightBatch.writes,
+        aiAnnotations: (payload.annotations || []).filter((annotation) => annotation.source === 'ai').map(({ id: annotationId, block_id: blockId }) => ({ annotationId, blockId })),
+        blocks: highlights.map(({ block_id: blockId }) => ({ blockId, found: Boolean(doc?.querySelector(`[data-block-id="${CSS.escape(blockId)}"]`)), marks: doc?.querySelectorAll(`[data-block-id="${CSS.escape(blockId)}"] mark[data-annotation-source="ai"]`).length || 0 })) };
+    }, { id: jobId, highlights: initialHighlights });
+    throw new Error(`Initial AI highlight batch did not finish: ${JSON.stringify(diagnostics)}`, { cause: error });
+  } finally {
+    await page.evaluate(() => window.__initialHighlightBatch.observer.disconnect());
+  }
   if (await frame.locator('figcaption[data-translate-block-id] .paragraph-translate-trigger').count()) throw new Error('Figure/table captions still exposed redundant translation buttons');
 
   const boldTranslationBlock = frame.locator('[data-block-id="block-2-3-paragraph"]');
@@ -1641,9 +1657,11 @@ let browserSession;
   process.exitCode = 1;
 }).finally(async () => {
   try {
+    if (page && !page.isClosed()) await page.evaluate(() => window.__initialHighlightBatch?.observer.disconnect());
+  } finally {
     await browserSession?.close();
-  } catch (closeError) {
-    console.error(`Failed to close browser: ${closeError.message}`);
-    process.exitCode = 1;
   }
+}).catch((closeError) => {
+  console.error(`Failed to close browser: ${closeError.message}`);
+  process.exitCode = 1;
 });
