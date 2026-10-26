@@ -8164,7 +8164,6 @@
     const drawing = doc && readerDocumentState(doc).annotationDraw;
     if (!drawing) return;
     readerDocumentState(doc).annotationDraw = null;
-    window.clearTimeout(drawing.timer);
     drawing.animations.forEach((animation) => animation.cancel());
     drawing.marks.forEach((mark) => delete mark.dataset.annotationDrawing);
     drawing.layer.remove();
@@ -8188,8 +8187,10 @@
     const layer = doc.createElement('div');
     layer.className = 'annotation-draw-layer';
     layer.setAttribute('aria-hidden', 'true');
-    const cleanup = () => clearAnnotationDrawAnimation(doc);
-    const drawing = { layer, marks, animations: [], cleanup, timer: null };
+    const cleanup = () => {
+      if (readerDocumentState(doc).annotationDraw === drawing) clearAnnotationDrawAnimation(doc);
+    };
+    const drawing = { layer, marks, animations: [], cleanup };
     readerDocumentState(doc).annotationDraw = drawing;
     const totalWidth = rects.reduce((sum, rect) => sum + rect.width, 0);
     let elapsed = 0;
@@ -8226,7 +8227,9 @@
       });
       drawing.resizeObserver.observe(content);
     }
-    drawing.timer = window.setTimeout(cleanup, 420);
+    // The animation timeline can start after this task, so a wall-clock timer
+    // can cancel the last stroke before it has finished drawing.
+    Promise.all(drawing.animations.map((animation) => animation.finished)).then(cleanup, cleanup);
   }
 
   function renderFrameAnnotations({ preserveHover = false } = {}) {

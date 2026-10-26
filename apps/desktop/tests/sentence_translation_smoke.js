@@ -449,14 +449,71 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18
       doc.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     }, { start: selectionStart, end: selectionEnd });
     await page.locator('#selection-popover:not([hidden])').waitFor();
+    await page.evaluate(() => {
+      const doc = document.querySelector('#html-preview').contentDocument;
+      const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
+      const audit = window.__annotationDrawAudit = { events: [] };
+      const record = (event, layer = doc.querySelector('.annotation-draw-layer'), detail = {}) => {
+        const marks = [...doc.querySelectorAll('mark[data-annotation-id="sentence-annotation-1"]')];
+        audit.events.push({ event, time: performance.now(), reducedMotion: motion.matches,
+          rects: marks.flatMap((mark) => [...mark.getClientRects()].map((rect) => ({ left: rect.left, top: rect.top, width: rect.width, height: rect.height }))),
+          markCount: marks.length, drawing: marks.map((mark) => mark.dataset.annotationDrawing || ''),
+          layerConnected: Boolean(layer?.isConnected), ariaHidden: layer?.getAttribute('aria-hidden'), strokes: layer?.querySelectorAll('.annotation-draw-stroke').length || 0,
+          animations: layer ? [...layer.querySelectorAll('.annotation-draw-stroke')].flatMap((stroke) => stroke.getAnimations().map((animation) => ({ state: animation.playState, time: animation.currentTime, duration: animation.effect.getTiming().duration }))) : [],
+          ...detail });
+      };
+      const observer = new MutationObserver((records) => {
+        for (const mutation of records) for (const [kind, nodes] of [['layer-added', mutation.addedNodes], ['layer-removed', mutation.removedNodes]]) {
+          for (const node of nodes) if (node.nodeType === Node.ELEMENT_NODE && node.matches('.annotation-draw-layer')) {
+            record(kind, node);
+            if (kind === 'layer-added') {
+              const animations = [...node.querySelectorAll('.annotation-draw-stroke')].flatMap((stroke) => stroke.getAnimations());
+              animations.forEach((animation, stroke) => animation.finished.then(
+                () => record('stroke-finished', node, { stroke }),
+                (error) => record('stroke-cancelled', node, { stroke, reason: error.name }),
+              ));
+            }
+          }
+        }
+      });
+      observer.observe(doc.body, { childList: true, subtree: true });
+      const changed = () => record('motion-change');
+      const scrolled = () => record('scroll');
+      const resized = () => record('resize');
+      motion.addEventListener('change', changed);
+      doc.addEventListener('scroll', scrolled, true);
+      doc.defaultView.addEventListener('resize', resized);
+      audit.stop = () => {
+        observer.disconnect(); motion.removeEventListener('change', changed);
+        doc.removeEventListener('scroll', scrolled, true); doc.defaultView.removeEventListener('resize', resized);
+      };
+      record('before-motion-change');
+    });
     await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await page.waitForFunction(() => !window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await Promise.all([
-      frame().locator('.annotation-draw-layer').waitFor(),
       page.waitForResponse((response) => response.url().endsWith('/annotations') && response.request().method() === 'POST'),
       page.locator('#selection-highlight').click(),
     ]);
-    assert.equal(await frame().locator('.annotation-draw-layer').getAttribute('aria-hidden'), 'true');
-    assert(await frame().locator('.annotation-draw-stroke').count() >= 2, 'A cross-sentence highlight draws each source line');
+    await page.waitForFunction(() => window.__annotationDrawAudit.events.some((event) => event.event === 'layer-removed'));
+    diagnostics.annotationDraw = await page.evaluate(() => { window.__annotationDrawAudit.stop(); return window.__annotationDrawAudit.events; });
+    console.log(JSON.stringify({ annotationDraw: diagnostics.annotationDraw }));
+    const drawCreated = diagnostics.annotationDraw.filter((event) => event.event === 'layer-added');
+    const drawRemoved = diagnostics.annotationDraw.filter((event) => event.event === 'layer-removed');
+    const drawFinished = diagnostics.annotationDraw.filter((event) => event.event === 'stroke-finished');
+    const drawCancelled = diagnostics.annotationDraw.filter((event) => event.event === 'stroke-cancelled');
+    assert.equal(drawCreated.length, 1, 'One newly saved annotation must create one drawing layer');
+    assert.equal(drawCreated[0].ariaHidden, 'true');
+    assert(drawCreated[0].strokes >= 2, 'A cross-sentence highlight draws each source line');
+    assert.equal(drawCreated[0].animations.length, drawCreated[0].strokes, 'Every stroke must have a real Web Animation');
+    assert.equal(drawCreated[0].reducedMotion, false);
+    assert.deepEqual(drawCancelled, [], 'Layout or media changes must not cancel the annotation drawing');
+    assert.equal(drawFinished.length, drawCreated[0].strokes, 'Every stroke must finish before drawing cleanup');
+    assert.equal(new Set(drawFinished.map((event) => event.stroke)).size, drawCreated[0].strokes);
+    assert.equal(drawRemoved.length, 1);
+    assert.deepEqual(drawRemoved[0].rects, drawCreated[0].rects, 'Source mark geometry must remain stable throughout drawing');
+    assert.equal(drawRemoved[0].markCount, 2, 'Animation cleanup must preserve both source annotation marks');
     await frame().locator('.annotation-draw-layer').waitFor({ state: 'detached' });
     assert.equal(await frame().locator('[data-annotation-drawing="true"]').count(), 0);
     await page.emulateMedia({ reducedMotion: 'reduce' });
@@ -635,6 +692,7 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18
     assert.deepEqual(diagnostics.routeErrors, [], `Route errors: ${JSON.stringify(diagnostics.routeErrors)}`);
     console.log(JSON.stringify({ passed: true, cases: ['paragraph-batch-and-sentence-order', 'translation-font-80-percent', 'continuous-English-flow', 'complete-Chinese-sentence-layout', 'sentence-start-X-alignment', 'nonoverlapping-Chinese-natural-wrap', 'responsive-width-and-font-reflow', 'translated-hover-cache', 'canonical-cross-sentence-selection', 'source-only-highlight', 'atomic-formulas-and-citations', 'math-before-later-sup-token-order', 'leading-fraction-whole-box-alignment', 'lazy-image-load-realignment', 'translated-glyph-hit-targets', 'list-sentence-pairs', 'original-translation-bilingual-modes', 'engine-switch-retains-and-prompts', 'history-survives-reload', 'failed-refresh-retains', 'successful-refresh-replaces'], translationRequests: requests.length }));
   } catch (error) {
+    diagnostics.annotationDraw = await session.browser.contexts()[0]?.pages()[0]?.evaluate(() => { window.__annotationDrawAudit?.stop(); return window.__annotationDrawAudit?.events; }).catch(() => null);
     diagnostics.selectionState = await session.browser.contexts()[0]?.pages()[0]?.evaluate(() => {
       const frameDocument = document.querySelector('#html-preview')?.contentDocument;
       const selection = frameDocument?.getSelection();

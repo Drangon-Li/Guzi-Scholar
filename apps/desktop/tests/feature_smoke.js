@@ -106,14 +106,14 @@ let browserSession;
     contentType: 'application/json',
     body: JSON.stringify({ result: { text: '该文献提供了当前段落所采用的基线方法。', evidence_level: 'abstract', sources: [{ provider: 'crossref-doi', label: 'Crossref DOI' }] } }),
   }));
+  const initialHighlights = [
+    { block_id: 'block-1-4-paragraph', quote: 'In this paper, we present OneLLM, an MLLM that aligns eight modalities to language using a unified framework.', reason: '概括论文的统一多模态目标。', category: 'research_goal' },
+    { block_id: 'block-2-3-paragraph', quote: 'OneLLM consists of lightweight modality tokenizers, a universal encoder, a universal projection module (UPM), and an LLM.', reason: '列出方法的核心组成。', category: 'method' },
+    { block_id: 'block-2-8-paragraph', quote: 'OneLLM is the first MLLM that integrates eight distinct modalities within a single model.', reason: '说明论文主张的创新点。', category: 'innovation' },
+    { block_id: 'block-2-9-paragraph', quote: 'OneLLM finetuned on this dataset achieves superior performance on multimodal tasks', reason: '总结论文报告的实验结论。', category: 'conclusion' },
+  ];
   await page.route('**/api/jobs/*/auto-highlights', async (route) => {
-    const highlights = [
-      { block_id: 'block-1-4-paragraph', quote: 'In this paper, we present OneLLM, an MLLM that aligns eight modalities to language using a unified framework.', reason: '概括论文的统一多模态目标。', category: 'research_goal' },
-      { block_id: 'block-2-3-paragraph', quote: 'OneLLM consists of lightweight modality tokenizers, a universal encoder, a universal projection module (UPM), and an LLM.', reason: '列出方法的核心组成。', category: 'method' },
-      { block_id: 'block-2-8-paragraph', quote: 'OneLLM is the first MLLM that integrates eight distinct modalities within a single model.', reason: '说明论文主张的创新点。', category: 'innovation' },
-      { block_id: 'block-2-9-paragraph', quote: 'OneLLM finetuned on this dataset achieves superior performance on multimodal tasks', reason: '总结论文报告的实验结论。', category: 'conclusion' },
-    ];
-    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ result: { status: 'mock', highlights } }) });
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ result: { status: 'mock', highlights: initialHighlights } }) });
   });
   await page.goto(baseURL, { waitUntil: 'networkidle' });
   const firstCard = requestedJobId
@@ -130,6 +130,11 @@ let browserSession;
   await page.locator('#reader-view.active-view').waitFor();
   const frame = page.frameLocator('#html-preview');
   await frame.locator('.pdf-page').first().waitFor();
+  await page.waitForFunction((highlights) => {
+    const doc = document.querySelector('#html-preview')?.contentDocument;
+    const rendered = highlights.every(({ block_id: blockId }) => doc?.querySelector(`[data-block-id="${CSS.escape(blockId)}"] mark.my-scholar-ai-suggestion[data-annotation-source="ai"]`));
+    return rendered && document.querySelector('#highlight-ai-status')?.textContent.includes('点击可采纳或忽略');
+  }, initialHighlights);
   if (await frame.locator('figcaption[data-translate-block-id] .paragraph-translate-trigger').count()) throw new Error('Figure/table captions still exposed redundant translation buttons');
 
   const boldTranslationBlock = frame.locator('[data-block-id="block-2-3-paragraph"]');
