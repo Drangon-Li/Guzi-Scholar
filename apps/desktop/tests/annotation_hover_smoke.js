@@ -60,7 +60,8 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
         const body = request.postDataJSON(); requests.push(body);
         if (!body.block_id && body.text === texts.delayed) await delayed;
         if (body.block_id && gateFullTranslation) await new Promise((resolve) => fullTranslationWaiters.set(body.block_id, resolve));
-        payload = { result: { ...body, text: !body.block_id && body.text === texts.delayed ? '过期句译不应出现在另一句的卡片。' : '这是模拟句译结果。', profile_id: 'hover-fixture' } };
+        const text = !body.block_id && body.text === texts.delayed ? '过期句译不应出现在另一句的卡片。' : '这是模拟句译结果。';
+        payload = { result: { ...body, text, ...(body.segments ? { segments: body.segments.map(({ id }) => ({ id, text })) } : {}), profile_id: 'hover-fixture' } };
       } else if (pathname.endsWith('/translations')) payload = { translations: [] };
       else if (pathname.endsWith('/annotations')) payload = { annotations: pathname.includes(ids[0]) ? annotations : [] };
       else if (pathname.endsWith('/media-layout')) payload = { media_layout: { version: 1, items: {} } };
@@ -122,7 +123,7 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     async function idle() {
       const box = await page.locator('#html-preview').boundingBox();
       await page.mouse.move(box.x + 8, box.y + 8);
-      await page.waitForTimeout(450);
+      await page.locator('#selection-popover:not([hidden])').waitFor({ state: 'detached' });
     }
     async function toggleHover() {
       await page.locator('#full-translate-scope-button').click();
@@ -262,7 +263,7 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     });
     await mark('first-note').evaluate((node) => {
       const doc = node.ownerDocument;
-      doc.defaultView.hoverReferences = { mark: node, card: doc.defaultView.parent.document.querySelector('#selection-popover:not([hidden])'), range: [...doc.defaultView.CSS.highlights.get('my-scholar-sentence-hover')][0] };
+      doc.defaultView.hoverReferences = { annotationId: node.dataset.annotationId, quote: node.textContent, card: doc.defaultView.parent.document.querySelector('#selection-popover:not([hidden])'), sentence: [...doc.defaultView.CSS.highlights.get('my-scholar-sentence-hover')][0].toString() };
       doc.defaultView.hoverLayoutScrolls = 0;
       doc.defaultView.hoverLayoutObserver = new MutationObserver((records) => {
         if (!records.some((record) => [...record.addedNodes].some((item) => item.nodeType === 1 && item.matches('.my-scholar-translation:not(.is-pending):not(.is-error)')))) return;
@@ -274,11 +275,14 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     const [translatedBlock, releaseBlock] = fullTranslationWaiters.entries().next().value;
     fullTranslationWaiters.delete(translatedBlock);
     releaseBlock();
-    await frame.locator(`.my-scholar-translation[data-for="${translatedBlock}"]:not(.is-pending):not(.is-error)`).waitFor();
+    const completedTranslations = frame.locator(`.my-scholar-translation[data-for="${translatedBlock}"]:not(.is-pending):not(.is-error)`);
+    await completedTranslations.first().waitFor();
+    assert.equal(await completedTranslations.count(), requests.find((body) => body.block_id === translatedBlock).segments.length, 'Every requested sentence renders a translation');
+    assert((await completedTranslations.allTextContents()).every((text) => text.includes('这是模拟句译结果')), 'Every displayed sentence uses the translated fixture response');
     assert.deepEqual(await mark('first-note').evaluate((node) => {
       const doc = node.ownerDocument; const saved = doc.defaultView.hoverReferences;
-      return { mark: saved.mark === node, card: saved.card === doc.defaultView.parent.document.querySelector('#selection-popover:not([hidden])'), range: saved.range === [...doc.defaultView.CSS.highlights.get('my-scholar-sentence-hover')][0] };
-    }), { mark: true, card: true, range: true }, 'An arriving full-document paragraph preserves the card, source annotation and sentence range');
+      return { annotationId: saved.annotationId === node.dataset.annotationId, quote: saved.quote === node.textContent, card: saved.card === doc.defaultView.parent.document.querySelector('#selection-popover:not([hidden])'), sentence: saved.sentence === [...(doc.defaultView.CSS.highlights.get('my-scholar-sentence-hover') || [])][0]?.toString() };
+    }), { annotationId: true, quote: true, card: true, sentence: true }, 'An arriving full-document paragraph preserves the card, source annotation and highlighted sentence');
     assert(await frame.locator('body').evaluate((node) => node.ownerDocument.defaultView.hoverLayoutScrolls > 0), 'Translation layout emitted the simulated scroll event');
     await frame.locator('body').evaluate(async (node) => {
       node.ownerDocument.defaultView.hoverLayoutObserver.disconnect();

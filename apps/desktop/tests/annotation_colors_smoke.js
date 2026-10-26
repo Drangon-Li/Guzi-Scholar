@@ -122,6 +122,7 @@ function documentHTML(legacy) {
     };
     const assertColors = async (annotations, theme, label) => {
       await page.emulateMedia({ colorScheme: theme });
+      await frame.locator('[data-annotation-drawing="true"]').first().waitFor({ state: 'detached' });
       for (const annotation of annotations) {
         const fragments = await frame.locator(`mark[data-annotation-id="${annotation.id}"]`).evaluateAll((marks, annotation) => marks.map((mark) => {
           const doc = mark.ownerDocument;

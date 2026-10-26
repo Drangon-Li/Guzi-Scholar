@@ -320,6 +320,15 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
     }
   }
 
+  for (const escape of [listeners.get('keydown'), popover.events.get('keydown')]) {
+    t.clearReaderSentenceHover(doc);
+    context.state.selection = { origin: 'selection', quote: 'Dragged text' };
+    popover.hidden = false;
+    escape({ key: 'Escape', defaultPrevented: false });
+    assert.equal(popover.hidden, true, 'Escape closes the native selection toolbar in both the reader and toolbar');
+    assert.equal(context.state.selection, null, 'Dismissed selection actions cannot remain active');
+  }
+
   assert.doesNotMatch(functionSource('paintReaderSentenceTooltip'), /className = 'reader-sentence-tooltip'/u, 'The pure translation hover card has been removed');
   assert.match(functionSource('showSelection'), /origin: 'selection'/u);
   assert.match(source, /else if \(!translationLayoutPending \|\| state\.selection\?\.origin !== 'sentence-hover'\) clearSelectionPopover/u);

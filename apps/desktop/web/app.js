@@ -3930,8 +3930,9 @@
     return sides.every((side) => side >= 0) || sides.every((side) => side <= 0);
   }
 
-  function rebuildReaderSentencePairs(doc = frameDocument()) {
-    clearReaderSentenceHover(readerSentenceState.doc || doc);
+  function rebuildReaderSentencePairs(doc = frameDocument(), { preserveHover = false } = {}) {
+    const activePair = preserveHover && readerSentenceState.doc === doc ? readerSentenceState.activePair : null;
+    if (!activePair) clearReaderSentenceHover(readerSentenceState.doc || doc);
     readerSentenceState.doc = doc || null;
     readerSentenceState.pairs = [];
     if (!doc) return;
@@ -3946,6 +3947,21 @@
       });
     });
     readerDocumentState(doc).sentences = readerSentenceState.pairs;
+    if (activePair) {
+      const index = readerSentenceState.pairs.findIndex((pair) => pair.id === activePair.id && pair.sentenceId === activePair.sentenceId);
+      if (index < 0) { clearReaderSentenceHover(doc); return; }
+      // Pending hover responses retain this object while translation replaces its DOM range.
+      Object.assign(activePair, readerSentenceState.pairs[index]);
+      readerSentenceState.pairs[index] = activePair;
+      if (state.selection?.origin === 'sentence-hover') {
+        const selection = readerSentenceSelection(activePair, doc);
+        if (!selection || selection.quote !== state.selection.quote) { clearReaderSentenceHover(doc); return; }
+        Object.assign(state.selection, selection);
+        const highlight = readerHighlightForRanges(doc, [activePair.sourceRange]);
+        if (highlight) readerHighlightRegistry(doc)?.set(readerSentenceHighlightName, highlight);
+        positionReaderSentenceTooltip(doc);
+      }
+    }
   }
 
   function activateReaderSentencePairs(doc) {
@@ -4158,13 +4174,6 @@
       }
       if (notePopoverHover.pinned) { clearReaderSentenceHover(doc); return; }
       const point = { x: event.clientX, y: event.clientY };
-      if (readerSentenceHoverProtectedAtPoint(doc, point)) {
-        window.clearTimeout(readerSentenceState.closeTimer);
-        if (readerSentenceState.pointerFrame) doc.defaultView.cancelAnimationFrame(readerSentenceState.pointerFrame);
-        readerSentenceState.pointerFrame = 0;
-        readerSentenceState.pendingPoint = null;
-        return;
-      }
       const noteTrigger = event.target?.closest?.('.annotation-note-trigger');
       if (noteTrigger) { scheduleNoteHoverOpen(noteTrigger); return; }
       let noteAnnotation = null;
@@ -4178,6 +4187,14 @@
           }
           mark = mark.parentElement?.closest(':is(mark, mrow)[data-annotation-id]');
         }
+      }
+      const differentNote = noteAnnotation && noteAnnotation.id !== readerSentenceState.annotation?.id;
+      if (!differentNote && readerSentenceHoverProtectedAtPoint(doc, point)) {
+        window.clearTimeout(readerSentenceState.closeTimer);
+        if (readerSentenceState.pointerFrame) doc.defaultView.cancelAnimationFrame(readerSentenceState.pointerFrame);
+        readerSentenceState.pointerFrame = 0;
+        readerSentenceState.pendingPoint = null;
+        return;
       }
       cancelNoteHoverOpen();
       scheduleNoteHoverClose();
@@ -4225,6 +4242,7 @@
     doc.addEventListener('keydown', (event) => {
       if (doc !== frameDocument() || event.key !== 'Escape') return;
       dismissHover();
+      clearSelectionPopover({ clearState: true, immediate: true });
       if (!event.defaultPrevented) closeInlineAnnotation(doc);
     });
     doc.defaultView?.addEventListener('blur', () => {
@@ -5161,7 +5179,7 @@
     setReaderSentenceHover(null);
   });
   $('#selection-popover')?.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') clearReaderSentenceHover();
+    if (event.key === 'Escape') clearSelectionPopover({ clearState: true, immediate: true });
   });
 
   function positionSelectionPopover() {
@@ -8197,7 +8215,7 @@
     drawing.timer = window.setTimeout(cleanup, 420);
   }
 
-  function renderFrameAnnotations() {
+  function renderFrameAnnotations({ preserveHover = false } = {}) {
     const doc = frameDocument(); if (!doc?.querySelector('.reader-content')) return;
     const documentState = readerDocumentState(doc);
     const annotationsKey = JSON.stringify([state.annotations, state.aiHighlights, state.highlightColor]);
@@ -8236,7 +8254,7 @@
     documentState.unresolvedAnnotationIds = unresolvedIds;
     documentState.unresolvedAnnotations = unresolvedIds.size;
     updateAnnotationAnchorStatus(unresolvedIds.size);
-    rebuildReaderSentencePairs(doc);
+    rebuildReaderSentencePairs(doc, { preserveHover });
     if (readerSearchState.open && doc === frameDocument()) refreshReaderSearch();
   }
 
@@ -9484,7 +9502,7 @@
         syncTranslationBlockVisibility(block, aligned);
         delete documentState.annotationsKey;
         if (!batch && doc === frameDocument()) {
-          renderFrameAnnotations();
+          renderFrameAnnotations({ preserveHover: true });
           refreshReaderSearch();
         }
         return aligned;

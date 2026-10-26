@@ -33,7 +33,7 @@ let browserSession;
     contentType: 'application/json',
     body: JSON.stringify({ ok: true, service: 'my-scholar', version: '0.1', shell: 'reference', ai: { services: { translation: { enabled: true, configured: true, model: 'translation-smoke', profile_id: 'translation-smoke-profile' }, chat: { enabled: true, configured: true, model: 'chat-smoke', profile_id: 'chat-smoke-profile' } } } }),
   }));
-  await page.route('**/api/jobs/*/translations', async (route) => {
+  await page.route(/\/api\/jobs\/[^/]+\/translations(?:\?.*)?$/u, async (route) => {
     const match = new URL(route.request().url()).pathname.match(/^\/api\/jobs\/([^/]+)\/translations$/u);
     const records = match ? translationRecords.get(match[1]) || [] : [];
     await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ translations: records }) });
@@ -91,6 +91,13 @@ let browserSession;
   }
 
   let frame = await openFirstDocument();
+  async function translateParagraph(id) {
+    await frame.locator(`[data-block-id="${id}"] .paragraph-translate-trigger`).click();
+    await page.waitForFunction((block) => {
+      const trigger = document.querySelector('#html-preview')?.contentDocument?.querySelector(`[data-block-id="${CSS.escape(block)}"] .paragraph-translate-trigger`);
+      return trigger && !trigger.disabled;
+    }, id);
+  }
   const translationSpacingFixture = await frame.locator('.reader-content').evaluate((root) => {
     const pages = [...root.querySelectorAll('.pdf-page')];
     let referenceGap = null;
@@ -126,7 +133,7 @@ let browserSession;
   if (!/[\u3400-\u9fff]/u.test((await titleTranslation.textContent()) || '')) throw new Error('Paper title did not receive its Chinese translation');
   if (await frame.locator('.paper-metadata .paragraph-translate-trigger').count()) throw new Error('Author or affiliation metadata exposed a translation control');
   if (await frame.locator('.paper-metadata + .my-scholar-translation').count()) throw new Error('Cached translation was rendered under author or affiliation metadata');
-  await frame.locator(`[data-block-id="${blockId}"] .paragraph-translate-trigger`).click();
+  await translateParagraph(blockId);
   const translation = frame.locator(`.my-scholar-translation[data-for="${blockId}"]:not(.is-pending):not(.is-error)`);
   await translation.waitFor();
   const translatedText = (await translation.locator('.translation-text').textContent() || '').trim();
@@ -178,6 +185,9 @@ let browserSession;
   }));
   if (!hoverState.custom || hoverState.customRanges !== 1 || hoverState.translatedRanges || hoverState.fallback || !hoverState.tooltip) throw new Error(`Sentence hover did not show a source-only background with its tooltip (${JSON.stringify(hoverState)})`);
 
+  // Leave the toolbar's protected travel corridor before testing translation-only hover.
+  await page.mouse.move(0, 0);
+  await page.locator('#selection-popover:not([hidden])').waitFor({ state: 'detached' });
   const reverseHoverState = await frame.locator(`.my-scholar-translation[data-for="${blockId}"]`).evaluate((translation) => {
     const doc = translation.ownerDocument;
     const walker = doc.createTreeWalker(translation, NodeFilter.SHOW_TEXT);
@@ -248,7 +258,7 @@ let browserSession;
     token.innerHTML = '[I<sub>CLS</sub>]';
     block.replaceChildren(document.createTextNode('The special token '), token, document.createTextNode(' remains unchanged during translation.'), trigger);
   });
-  await frame.locator(`[data-block-id="${blockId}"] .paragraph-translate-trigger`).click();
+  await translateParagraph(blockId);
   const tokenTranslation = frame.locator(`.my-scholar-translation[data-for="${blockId}"]:not(.is-pending):not(.is-error)`);
   await tokenTranslation.waitFor();
   const tokenTranslationText = (await tokenTranslation.locator('.translation-text').textContent() || '').trim();
@@ -264,7 +274,7 @@ let browserSession;
     marker.innerHTML = '<span class="inline-legend-line" aria-hidden="true"></span><span class="inline-legend-shape" aria-hidden="true"></span>';
     block.replaceChildren(document.createTextNode('Legend. '), marker, document.createTextNode(' indicates the blue baseline in this translated paragraph.'), trigger);
   });
-  await frame.locator(`[data-block-id="${blockId}"] .paragraph-translate-trigger`).click();
+  await translateParagraph(blockId);
   const markerTranslation = frame.locator(`.my-scholar-translation[data-for="${blockId}"]:not(.is-pending):not(.is-error)`);
   await markerTranslation.waitFor();
   if (!(await markerTranslation.locator('.translation-text .inline-legend-marker-circle.inline-legend-marker-blue').count())) throw new Error('Translated paragraph lost its inline marker shape or tone');
@@ -285,7 +295,7 @@ let browserSession;
     block.replaceChildren(...fragment.childNodes, trigger);
     return expected;
   });
-  await frame.locator(`[data-block-id="${blockId}"] .paragraph-translate-trigger`).click();
+  await translateParagraph(blockId);
   const formatTranslation = frame.locator(`.my-scholar-translation[data-for="${blockId}"]:not(.is-pending):not(.is-error) .translation-text`);
   await formatTranslation.waitFor();
   const formatResult = await formatTranslation.evaluate((node) => ({
@@ -385,22 +395,27 @@ let browserSession;
   });
   const errorFixtureIds = [blockId, formulaBlockId === blockId ? boundaryBlockId : formulaBlockId];
   if (errorFixtureIds[0] === errorFixtureIds[1]) throw new Error('Error regression needs two distinct paragraph blocks');
+  const retainedTranslations = new Map();
+  async function assertRetainedFailure(id, scope) {
+    const failure = frame.locator(`[data-block-id="${id}"] .translation-retained-status`);
+    await failure.waitFor();
+    if ((await failure.textContent()).trim() !== '翻译失败：测试服务不可用 · 原译文已保留') throw new Error(`${scope} error prefix repeated (${await failure.textContent()})`);
+    const retained = frame.locator(`.my-scholar-translation[data-for="${id}"]:not(.is-pending):not(.is-error) .translation-text`);
+    if (await retained.textContent() !== retainedTranslations.get(id)) throw new Error(`${scope} failure replaced the saved translation`);
+  }
   for (const [index, id] of errorFixtureIds.entries()) {
+    retainedTranslations.set(id, await frame.locator(`.my-scholar-translation[data-for="${id}"] .translation-text`).textContent());
     await frame.locator(`[data-block-id="${id}"]`).evaluate((block, suffix) => {
       const trigger = block.querySelector('.paragraph-translate-trigger');
       block.replaceChildren(block.ownerDocument.createTextNode(`ERROR_FIXTURE_${suffix} This paragraph tests the translation error label.`), trigger);
     }, index ? 'PLAIN' : 'PREFIXED');
-    await frame.locator(`[data-block-id="${id}"] .paragraph-translate-trigger`).click();
-    const failure = frame.locator(`.my-scholar-translation.is-error[data-for="${id}"] .translation-text`);
-    await failure.waitFor();
-    if ((await failure.textContent()).trim() !== '翻译失败：测试服务不可用') throw new Error(`Paragraph error prefix repeated (${await failure.textContent()})`);
+    await translateParagraph(id);
+    await assertRetainedFailure(id, 'Paragraph');
   }
   await page.locator('#full-translate-button').click();
   await page.waitForFunction(() => window.__translationErrorFixtureRequests === 4 && document.querySelector('#translation-progress')?.hidden);
   for (const id of errorFixtureIds) {
-    const failure = frame.locator(`.my-scholar-translation.is-error[data-for="${id}"] .translation-text`);
-    await failure.waitFor();
-    if ((await failure.textContent()).trim() !== '翻译失败：测试服务不可用') throw new Error(`Full translation error prefix repeated (${await failure.textContent()})`);
+    await assertRetainedFailure(id, 'Full translation');
   }
 
   console.log(JSON.stringify({ blockId, titleBlockId, formulaBlockId, titleTranslated: true, metadataSkipped: true, inlineFormulaRendered: true, nestedStylesAndManyRunsRestored: true, errorPrefixNormalized: true, captionTranslations, listTranslations, translatedText, translationSpacing: { ...translationSpacing, sourceGapRatio, followingGapDelta }, specialTokenPreserved: tokenTranslationText.includes('[I_CLS]'), cacheRestored: true, fullTranslationPeakConcurrency, repeatedFullTranslationRequests: 0, placedAfterSource: true, progress, errors }));
