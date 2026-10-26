@@ -293,8 +293,8 @@ async function staticServer() {
       assert.equal(await page.locator('#annotation-anchor-status').evaluate((node) => !node.hidden), true, 'Missing translated source must report its unresolved annotation');
       const beforeTranslation = requests.filter((request) => request.endpoint === 'translate').length;
       await frame.locator('[data-block-id="paragraph-350"] > .paragraph-translate-trigger').click({ force: true });
-      await frame.locator('.my-scholar-translation[data-for="paragraph-350"]:not(.is-pending) mark[data-annotation-id="translation-evidence"]').waitFor();
-      assert.equal(await frame.locator('mark[data-annotation-id="translation-evidence"]').textContent(), insertedTranslation);
+      await frame.locator('.my-scholar-translation[data-for="paragraph-350"]:not(.is-pending) mark[data-annotation-id="translation-evidence"]').first().waitFor();
+      assert.equal((await frame.locator('mark[data-annotation-id="translation-evidence"]').allTextContents()).join(''), insertedTranslation);
       await page.waitForFunction(() => document.querySelector('#annotation-anchor-status').hidden);
       assert.equal(requests.filter((request) => request.endpoint === 'translate').length - beforeTranslation, 1, 'Translation control must have exactly one handler');
       await activate(ids[1]);

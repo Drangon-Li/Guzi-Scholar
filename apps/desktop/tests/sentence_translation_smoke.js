@@ -17,6 +17,7 @@ const paragraphId = 'block-1-2-paragraph';
 const richId = 'block-1-3-paragraph';
 const listId = 'block-1-4-list';
 const atomicId = 'block-1-5-paragraph';
+const flowingId = 'block-1-6-paragraph';
 const lazyFormulaPath = '/api/test-assets/sentence-inline-formula.svg';
 const sentences = [
   'First sentence explains the experimental setup.',
@@ -25,9 +26,21 @@ const sentences = [
 ];
 const sourceText = sentences.join(' ');
 const chineseSentences = [
-  '第一句介绍实验设置，并完整说明样本选择、数据准备、训练步骤与评价方式；这些内容组成一个连续译句，即使显示空间变窄，也应按照中文文本本身的长度自然换行，不能跟随英文的视觉行切成多个片段。',
+  '第一句介绍实验设置，并完整说明样本选择、数据准备、训练步骤与评价方式；这些内容组成一个连续译句，即使显示空间变窄，也应按照中文文本本身的长度自然换行，每一行英文下方显示对应的中文，放不下的中文继续在下一行显示。',
   '中间一句解释主要原理，说明方法如何在保留上下文的同时建立对应关系。',
   '最后一句给出研究结论，并概括实验观察所支持的主要发现。',
+];
+const flowingSentences = [
+  'We evaluate InternAgent-1.5 on scientific reasoning benchmarks such as GAIA, HLE, GPQA, and FrontierScience, and the system achieves leading performance that demonstrates strong foundational capabilities.',
+  'Beyond these benchmarks, we further assess two categories of discovery tasks.',
+  'In algorithm discovery tasks, InternAgent-1.5 autonomously designs competitive methods for core machine learning problems.',
+  'In empirical discovery tasks, it executes complete computational or wet lab experiments and produces scientific findings in earth, life, biological, and physical domains.',
+];
+const flowingChinese = [
+  '我们在GAIA、HLE、GPQA和FrontierScience等科学推理基准上评估InternAgent-1.5，该系统取得了领先性能，展现出强大的基础能力。',
+  '除这些基准之外，我们进一步评估两类发现任务。',
+  '在算法发现任务中，InternAgent-1.5自主设计用于核心机器学习问题的有竞争力的方法。',
+  '在实证发现任务中，它执行完整的计算实验或湿实验，并在地球、生命、生物和物理领域产生科学发现。',
 ];
 const jobs = [{ job_id: jobId, status: 'completed', source_filename: 'Sentence translation fixture.pdf', created_at: '2026-10-26T00:00:00Z', links: { html: `/api/jobs/${jobId}/document.html` }, manifest: { counts: { pages: 1, images: 0, tables: 0 } } }];
 const library = { folders: [], properties: [], views: [], display: { columns: [{ id: 'name', visible: true, order: 0 }] }, items: { [jobId]: { folder_ids: [], values: { reading_status: '未读', importance: 0 }, metadata: { status: 'complete', fields: { title: 'Sentence translation fixture' } } } } };
@@ -39,6 +52,7 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18
 <p data-block-id="${richId}" data-page="1">Inline formula <math alttext="x/y"><mfrac><mi>x</mi><mi>y</mi></mfrac></math> remains atomic. The second sentence preserves citation <sup><a href="#ref-143">143,144</a></sup> and formula <math alttext="10^4"><msup><mn>10</mn><mn>4</mn></msup></math> without splitting its exponent.</p>
 <ul data-block-id="${listId}" data-page="1"><li>First list item has two sentences. Its second sentence stays in the same item.</li><li>Second list item keeps its bullet without terminal punctuation</li></ul>
 <p data-block-id="${atomicId}" data-page="1"><math alttext="x/(wide+denominator)"><mfrac><mi>x</mi><mrow><mi>wide</mi><mo>+</mo><mi>denominator</mi></mrow></mfrac></math> normalizes the input <img class="math-source-inline" data-lazy-formula loading="lazy" alt="" style="height:24px;width:auto;max-width:none;vertical-align:middle"> before estimation. The next sentence reports the resulting estimate.</p>
+<p data-block-id="${flowingId}" data-page="1">${flowingSentences.join(' ')}</p>
 <section class="references"><p id="ref-143">[143] Synthetic reference.</p></section>
 </section></main></body></html>`;
 
@@ -128,9 +142,9 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18
         const label = activeProfile === 'sentence-profile-a' ? '旧引擎译文' : '新引擎译文';
         const translated = body.segments.map((segment, index) => {
           const tokens = segment.text.match(/__MY_SCHOLAR_[A-Z0-9_]+__/gu) || [];
-          const text = body.block_id === paragraphId ? chineseSentences[index]
+          const text = body.block_id === paragraphId ? chineseSentences[index] : body.block_id === flowingId ? flowingChinese[index]
             : `本句保留原文中的公式、引用和列表结构，完整呈现对应内容${tokens.length ? `：${tokens.join(' ')}` : ''}。`;
-          return { id: segment.id, text: `${label}${index + 1}：${text}` };
+          return { id: segment.id, text: body.block_id === flowingId ? text : `${label}${index + 1}：${text}` };
         });
         const result = {
           ...body, source_text: body.text, source_segments: body.segments, segments: translated,
@@ -203,6 +217,9 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18
       }
     }
     async function hoverSourceSentence(index) {
+      await source().nth(index).scrollIntoViewIfNeeded();
+      await settleLayout();
+      await page.mouse.move(12, 12);
       const character = await source().nth(index).evaluate((node) => {
         const doc = node.ownerDocument;
         const walker = doc.createTreeWalker(node, NodeFilter.SHOW_TEXT);
@@ -238,8 +255,8 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18
     async function settleLayout() {
       await paragraph().evaluate((node) => new Promise((resolve) => node.ownerDocument.defaultView.requestAnimationFrame(() => node.ownerDocument.defaultView.requestAnimationFrame(resolve))));
     }
-    async function measureSentenceLayout() {
-      return paragraph().evaluate((node) => {
+    async function measureSentenceLayout(target = paragraph()) {
+      return target.evaluate((node) => {
         const doc = node.ownerDocument;
         const block = node.getBoundingClientRect();
         const characters = (element) => {
@@ -287,7 +304,7 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18
             const hit = doc.elementFromPoint(block.left + (glyph.left + glyph.right) / 2, block.top + (glyph.top + glyph.bottom) / 2);
             return { text: glyph.text, ownSentence: hit?.closest('.reader-sentence-translation') === translation };
           });
-          return { first: glyphs[0], lines, hits, position: getComputedStyle(translation).position };
+          return { first: glyphs[0], lines, hits, fragments: [...text.querySelectorAll('.reader-translation-line')].map((line) => ({ text: line.textContent, glyphs: characters(line) })), position: getComputedStyle(translation).position };
         });
         return { sources, translations, width: block.width, height: block.height, sourceLines: lineTops.length, fontSize: parseFloat(getComputedStyle(node.querySelector('.reader-source-sentence')).fontSize) };
       });
@@ -295,12 +312,34 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18
     async function assertContinuousLayout(label, { expectWrappedTranslation = false } = {}) {
       await settleLayout();
       const bilingual = await measureSentenceLayout();
+      diagnostics.latestLayout = { label, bilingual };
+      const sourceRows = [];
+      for (const sentence of bilingual.sources) for (const glyph of sentence) {
+        let row = sourceRows.find((item) => item.id === glyph.line);
+        if (!row) { row = { id: glyph.line, top: glyph.top, bottom: glyph.bottom, translationBottom: 0 }; sourceRows.push(row); }
+        row.bottom = Math.max(row.bottom, glyph.bottom);
+      }
+      sourceRows.sort((a, b) => a.top - b.top);
       for (let index = 0; index < bilingual.translations.length; index += 1) {
         const translation = bilingual.translations[index];
-        assert.equal(translation.position, 'absolute', `${label}: a translated sentence must remain one positioned block`);
+        assert.equal(translation.position, 'absolute', `${label}: translated sentence identity must remain positioned over its paragraph`);
         for (const hit of translation.hits) assert(hit.ownSentence, `${label}: sentence ${index + 1} character ${hit.text} is blocked by another sentence's blank positioning layer`);
         assert(translation.first && bilingual.sources[index][0], `${label}: both sentences must expose visible text`);
-        assert(Math.abs(translation.first.left - bilingual.sources[index][0].left) <= 1, `${label}: sentence ${index + 1} begins at a different X coordinate`);
+        if (index === 0) assert(Math.abs(translation.first.left - bilingual.sources[index][0].left) <= 1, `${label}: the first Chinese row must align with the English row`);
+        const translatedRows = new Set();
+        for (const fragment of translation.fragments) {
+          const row = sourceRows.findLast((item) => item.top < fragment.glyphs[0]?.top);
+          assert(row, `${label}: Chinese fragment must follow an English line`);
+          translatedRows.add(row.id);
+          const next = sourceRows[sourceRows.indexOf(row) + 1];
+          for (const glyph of fragment.glyphs) {
+            assert(glyph.top >= row.bottom - 1, `${label}: Chinese overlaps its English source line`);
+            assert(!next || glyph.bottom < next.top, `${label}: Chinese extends into the next English line`);
+            row.translationBottom = Math.max(row.translationBottom, glyph.bottom);
+          }
+        }
+        assert.deepEqual([...translatedRows], [...new Set(bilingual.sources[index].map((glyph) => glyph.line))], `${label}: Chinese must be distributed below every English line belonging to its sentence`);
+        assert.equal(translation.fragments.map((fragment) => fragment.text).join(''), chineseSentences.map((text, i) => `旧引擎译文${i + 1}：${text}`)[index], `${label}: visual reflow must preserve every translated character exactly once`);
         for (const line of translation.lines) {
           assert(line.bottom <= bilingual.height + 1, `${label}: translated text extends below its paragraph`);
           assert(line.left >= -1 && line.right <= bilingual.width + 1, `${label}: translated text extends beyond its paragraph width`);
@@ -310,6 +349,10 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18
           const overlapHeight = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
           assert(overlapWidth <= 1 || overlapHeight <= 1, `${label}: translated sentences overlap`);
         }
+      }
+      for (let i = 0; i + 1 < sourceRows.length; i += 1) {
+        const row = sourceRows[i];
+        assert(sourceRows[i + 1].top - row.translationBottom < bilingual.fontSize * 1.5, `${label}: a short Chinese band must not inherit another band's excessive spacing`);
       }
       if (expectWrappedTranslation) assert(bilingual.translations[0].lines.length > 1, `${label}: the long Chinese sentence must wrap naturally`);
       await displayMode('original');
@@ -394,6 +437,22 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18
     assert.equal((await measureSentenceLayout()).sourceLines, defaultLayout.sourceLines, 'Restoring width and text size must restore English wrapping');
     await page.screenshot({ path: '/tmp/guzi-sentence-translation.png' });
 
+    phase = 'realistic-line-flow';
+    const flowing = frame().locator(`p[data-block-id="${flowingId}"]`);
+    await flowing.locator('.paragraph-translate-trigger').click();
+    await page.mouse.move(12, 12);
+    await flowing.locator('.reader-translation-line').first().waitFor();
+    await settleLayout();
+    const flowingLayout = await measureSentenceLayout(flowing);
+    assert.deepEqual(await flowing.locator('.translation-text').allTextContents(), flowingChinese);
+    for (const word of ['InternAgent-1.5', 'FrontierScience']) {
+      const fragments = await flowing.locator('.reader-translation-line').allTextContents();
+      assert.equal(fragments.filter((text) => text.includes(word)).length, flowingChinese.filter((text) => text.includes(word)).length, 'Visual row boundaries must preserve complete scientific names');
+    }
+    const flowingLines = new Set(flowingLayout.translations.flatMap((translation) => translation.lines.map((line) => Math.round(line.top))));
+    assert.equal(flowingLines.size, flowingLayout.sourceLines, 'Normal-length Chinese must occupy one Chinese line beneath each natural English line');
+    await flowing.screenshot({ path: '/tmp/guzi-v069-interlinear-realistic.png' });
+
     phase = 'explicit-aligned-hover';
     const requestsBeforeHover = requests.length;
     const hoverBox = await hoverSourceSentence(1);
@@ -401,7 +460,7 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18
     await page.locator('#selection-translation-result').filter({ hasText: '旧引擎译文2' }).waitFor();
     assert.equal(blockRequests().length, 1, 'Hovering an aligned source sentence must reuse its translation');
     assert.equal(requests.length, requestsBeforeHover, `Aligned hover added a request: ${JSON.stringify(requests.slice(requestsBeforeHover))}`);
-    assert.equal(requests.length, 1, `Unexpected translation before or during aligned hover: ${JSON.stringify(diagnostics)}`);
+    assert.equal(requests.length, 2, `Unexpected translation before or during aligned hover: ${JSON.stringify(diagnostics)}`);
     const copyBox = await page.locator('#selection-copy').boundingBox();
     for (let step = 1; step <= 12; step += 1) {
       const fraction = step / 12;
@@ -608,7 +667,7 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18
     diagnostics.atomicLayout = { beforeImage, afterImage };
     assert(Math.abs(afterImage.imageWidth - beforeImage.imageWidth) > 1, 'The delayed image must change its intrinsic inline width');
     assert(afterImage.lines !== beforeImage.lines || Math.abs(afterImage.source.left - beforeImage.source.left) > 1, 'The loaded image must actually change the English wrapping or sentence start');
-    assert(Math.abs(afterImage.translations[1].left - afterImage.source.left) <= 1, 'Chinese must realign with the moved source sentence after image load');
+    assert(afterImage.translations[1].left >= 0, 'Chinese must stay inside the paragraph after image load');
     assert(afterImage.translations[1].top >= afterImage.source.bottom - 1, 'The moved source sentence must remain above its translation after image load');
     assert(Math.abs(afterImage.translations[1].left - beforeImage.translations[1].left) > 1 || Math.abs(afterImage.translations[1].top - beforeImage.translations[1].top) > 1, 'Image load must update the positioned Chinese sentence');
     assert(Math.abs(afterImage.translations[0].left - afterImage.mathLeft) <= 1, 'Image reflow must retain the leading fraction alignment');
@@ -687,11 +746,81 @@ body{margin:0}.reader-content{max-width:720px;margin:32px auto;font-size:calc(18
     assert((await translated().first().getAttribute('title')).includes('fixture-engine-b'));
     assert.equal(records.filter((record) => record.block_id === paragraphId).length, 2, 'Successful translation under a new engine must preserve historical records');
     assert.equal(blockRequests().length, 3, 'Initial translation, failed refresh and successful refresh each use one batch');
+    phase = 'translated-annotation-reflow';
+    await translated().first().locator('.translation-text').evaluate((body) => {
+      const doc = body.ownerDocument;
+      const nodes = [];
+      const walker = doc.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+      let text;
+      while ((text = walker.nextNode())) nodes.push(text);
+      let offset = 0;
+      const point = (at) => {
+        offset = 0;
+        for (const node of nodes) {
+          if (at <= offset + node.length) return [node, at - offset];
+          offset += node.length;
+        }
+      };
+      const range = doc.createRange();
+      range.setStart(...point(4)); range.setEnd(...point(body.textContent.length - 4));
+      doc.getSelection().removeAllRanges(); doc.getSelection().addRange(range);
+      doc.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+    await page.locator('#selection-popover:not([hidden])').waitFor();
+    await page.locator('#selection-copy').click();
+    const expectedTranslatedText = `新引擎译文1：${chineseSentences[0]}`;
+    assert.equal(await page.evaluate(() => window.__copiedText), expectedTranslatedText.slice(4, -4), 'Copying across Chinese visual fragments must retain the original continuous text');
+    await page.locator('#selection-highlight').click();
+    await translated().locator('mark[data-annotation-id="sentence-annotation-2"]').first().waitFor();
+    await clearNativeSelection();
+    const markedBefore = await translated().locator('mark[data-annotation-id="sentence-annotation-2"]').count();
+    for (let i = 0; i < 8; i += 1) {
+      await paragraph().evaluate((node, width) => { node.closest('.reader-content').style.maxWidth = `${width}px`; }, i % 2 ? 720 : 420);
+      await settleLayout();
+    }
+    await paragraph().evaluate((node) => { node.closest('.reader-content').style.removeProperty('max-width'); });
+    await settleLayout();
+    assert.equal(await translated().first().locator('.translation-text').evaluate((body) => {
+      const clone = body.cloneNode(true);
+      clone.querySelectorAll('.annotation-note-trigger,.annotation-note-popover').forEach((control) => control.remove());
+      return clone.textContent;
+    }), expectedTranslatedText);
+    assert.equal(await translated().locator('mark[data-annotation-id="sentence-annotation-2"]').evaluateAll((nodes) => nodes.map((node) => node.textContent).join('')), expectedTranslatedText.slice(4, -4), 'Chinese marks must retain their exact quote after repeated line reflow');
+    assert.equal(await translated().locator('mark[data-annotation-id="sentence-annotation-2"]').evaluateAll((nodes) => nodes.filter((node) => !node.textContent).length), 0, 'Repeated reflow must not accumulate empty marks');
+    assert(await translated().locator('mark[data-annotation-id="sentence-annotation-2"]').count() <= markedBefore + 8, 'Reflow must not grow mark fragments on every pass');
+    assert.equal(annotations[1].quote, expectedTranslatedText.slice(4, -4));
+    assert.equal(annotations[1].surface, 'translation');
+    phase = 'translated-formula-annotation-reflow';
+    const richBody = rich.locator('.reader-sentence-translation').first().locator('.translation-text');
+    const richOriginal = await richBody.evaluate((body) => body.textContent);
+    await richBody.evaluate((body) => {
+      const doc = body.ownerDocument;
+      const range = doc.createRange();
+      range.setStart(body, 0); range.setEndAfter(body.querySelector('math'));
+      doc.getSelection().removeAllRanges(); doc.getSelection().addRange(range);
+      doc.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+    await page.locator('#selection-popover:not([hidden])').waitFor();
+    await page.locator('#selection-highlight').click();
+    await richBody.locator('mark[data-annotation-id="sentence-annotation-3"]').first().waitFor();
+    await clearNativeSelection();
+    for (let i = 0; i < 8; i += 1) {
+      await rich.evaluate((node, width) => { node.closest('.reader-content').style.maxWidth = `${width}px`; }, i % 2 ? 720 : 420);
+      await settleLayout();
+    }
+    assert.equal(await richBody.locator('math mfrac').count(), 1, 'Formula annotation reflow must preserve its whole MathML tree');
+    assert.equal(await richBody.locator('mark[data-annotation-id="sentence-annotation-3"]').evaluateAll((nodes) => nodes.filter((node) => !node.textContent).length), 0, 'Formula-ending annotations must not leave empty marks');
+    assert.equal(await richBody.evaluate((body) => {
+      const clone = body.cloneNode(true);
+      clone.querySelectorAll('button,.annotation-note-popover').forEach((control) => control.remove());
+      return clone.textContent;
+    }), richOriginal, 'Formula annotation reflow must preserve its original text');
     assert.deepEqual(errors, []);
     assert.deepEqual(unexpected, [], `Unexpected requests: ${JSON.stringify(unexpected)}`);
     assert.deepEqual(diagnostics.routeErrors, [], `Route errors: ${JSON.stringify(diagnostics.routeErrors)}`);
-    console.log(JSON.stringify({ passed: true, cases: ['paragraph-batch-and-sentence-order', 'translation-font-80-percent', 'continuous-English-flow', 'complete-Chinese-sentence-layout', 'sentence-start-X-alignment', 'nonoverlapping-Chinese-natural-wrap', 'responsive-width-and-font-reflow', 'translated-hover-cache', 'canonical-cross-sentence-selection', 'source-only-highlight', 'atomic-formulas-and-citations', 'math-before-later-sup-token-order', 'leading-fraction-whole-box-alignment', 'lazy-image-load-realignment', 'translated-glyph-hit-targets', 'list-sentence-pairs', 'original-translation-bilingual-modes', 'engine-switch-retains-and-prompts', 'history-survives-reload', 'failed-refresh-retains', 'successful-refresh-replaces'], translationRequests: requests.length }));
+    console.log(JSON.stringify({ passed: true, cases: ['paragraph-batch-and-sentence-order', 'translation-font-80-percent', 'continuous-English-flow', 'line-by-line-Chinese-layout', 'English-Chinese-row-start-alignment', 'nonoverlapping-Chinese-natural-wrap', 'responsive-width-and-font-reflow', 'realistic-one-English-one-Chinese-line', 'translated-copy-and-annotation-reflow', 'translated-hover-cache', 'canonical-cross-sentence-selection', 'source-only-highlight', 'atomic-formulas-and-citations', 'math-before-later-sup-token-order', 'leading-fraction-whole-box-alignment', 'lazy-image-load-realignment', 'translated-glyph-hit-targets', 'list-sentence-pairs', 'original-translation-bilingual-modes', 'engine-switch-retains-and-prompts', 'history-survives-reload', 'failed-refresh-retains', 'successful-refresh-replaces'], translationRequests: requests.length }));
   } catch (error) {
+    await session.browser.contexts()[0]?.pages()[0]?.screenshot({ path: '/tmp/guzi-v069-sentence-failure.png' }).catch(() => {});
     diagnostics.annotationDraw = await session.browser.contexts()[0]?.pages()[0]?.evaluate(() => { window.__annotationDrawAudit?.stop(); return window.__annotationDrawAudit?.events; }).catch(() => null);
     diagnostics.selectionState = await session.browser.contexts()[0]?.pages()[0]?.evaluate(() => {
       const frameDocument = document.querySelector('#html-preview')?.contentDocument;
