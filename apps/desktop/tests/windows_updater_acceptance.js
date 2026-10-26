@@ -33,6 +33,10 @@ function run(command, args, options = {}) {
   assert.equal(result.status, 0, `${command}: ${logFile || `${result.stdout || ''}\n${result.stderr || ''}`}`);
   return result.stdout;
 }
+function powershell(script) {
+  return run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; ${script}`]);
+}
 function requireWindows() {
   assert.equal(process.platform, 'win32', 'Real Windows x64 environment required; this harness cannot accept an upgrade on macOS/Linux.');
   assert.equal(process.arch, 'x64');
@@ -65,7 +69,10 @@ async function main() {
     const upload = job.steps.find((step) => step.with?.name === 'guzi-windows-isolated-upgrade-evidence');
     assert.equal(upload.if, 'always()');
     assert.deepEqual(upload.with.path.trim().split('\n'), ['report.json', 'events.jsonl', '*.log'].map((name) => `${evidence}/${name}`));
-    if (process.platform === 'win32') requireWindows();
+    if (process.platform === 'win32') {
+      requireWindows();
+      assert.equal(JSON.parse(powershell("'安装 路径' | ConvertTo-Json -Compress")), '安装 路径', 'PowerShell must preserve Unicode in redirected JSON');
+    }
     else assert.throws(() => requireWindows(), /Real Windows/u);
     console.log('Windows acceptance harness static checks passed; no installed upgrade was performed.');
     return;
@@ -137,7 +144,7 @@ async function main() {
   async function quit() { const pid = currentPID; send('quit'); await until(() => !alive(pid), 'ordinary quit', 30000); }
   const idle = () => until(async () => Boolean(await command('eval', { code: "fetch('/api/health').then(r => r.json()).then(x => x.storage.migration.ready)" })), 'backend idle');
   function isolatedProcesses() {
-    const rows = JSON.parse(run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress']));
+    const rows = JSON.parse(powershell('Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress'));
     for (const row of rows) if (row.ProcessId !== process.pid && (row.ExecutablePath?.toLowerCase().startsWith(`${root.toLowerCase()}${path.sep}`)
       || row.CommandLine?.toLowerCase().includes(root.toLowerCase()))) owned.add(row.ProcessId);
     let count;
@@ -188,7 +195,10 @@ async function main() {
     assert.equal(first.version, initialVersion);
     assert.equal(canonicalPath(first.executable), canonicalPath(executable));
     assert.equal(canonicalPath(first.userData), canonicalPath(path.join(root, 'user-data')));
-    note('isolated-installed-identity', { appId: report.appId, guid: report.guid, executable });
+    const firstProcess = isolatedProcesses().find((item) => item.ProcessId === currentPID);
+    assert.ok(firstProcess, 'Installed app must be observable through CIM');
+    assert.equal(canonicalPath(firstProcess.ExecutablePath), canonicalPath(executable), 'CIM must preserve the Unicode installation path');
+    note('isolated-installed-identity', { appId: report.appId, guid: report.guid, executable, cimExecutable: firstProcess.ExecutablePath });
     brokenBytes = true;
     await assert.rejects(command('download', {}, 180000), /checksum|sha|校验|完整性/iu);
     brokenBytes = false;
@@ -277,5 +287,5 @@ async function main() {
   if (cleanupFailure) throw cleanupFailure;
 }
 
-module.exports = { configFor, requireWindows, run, canonicalPath };
+module.exports = { configFor, requireWindows, run, canonicalPath, powershell };
 if (require.main === module) main().catch((error) => { console.error(error); process.exitCode = 1; });
