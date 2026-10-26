@@ -5,11 +5,12 @@ const primaryModifier = process.platform === 'darwin' ? 'Meta' : 'Control';
 const requestedJobId = process.argv[3] || '';
 let browser;
 let browserSession;
+let page;
 
 (async () => {
   browserSession = await launchManagedChromium();
   browser = browserSession.browser;
-  const page = await browser.newPage({ viewport: { width: 1500, height: 980 } });
+  page = await browser.newPage({ viewport: { width: 1500, height: 980 } });
   await page.addInitScript(() => {
     window.__myScholarCopiedImageTypes = [];
     window.__myScholarCopiedText = '';
@@ -106,14 +107,14 @@ let browserSession;
     contentType: 'application/json',
     body: JSON.stringify({ result: { text: '该文献提供了当前段落所采用的基线方法。', evidence_level: 'abstract', sources: [{ provider: 'crossref-doi', label: 'Crossref DOI' }] } }),
   }));
+  const initialHighlights = [
+    { block_id: 'block-1-4-paragraph', quote: 'In this paper, we present OneLLM, an MLLM that aligns eight modalities to language using a unified framework.', reason: '概括论文的统一多模态目标。', category: 'research_goal' },
+    { block_id: 'block-2-3-paragraph', quote: 'OneLLM consists of lightweight modality tokenizers, a universal encoder, a universal projection module (UPM), and an LLM.', reason: '列出方法的核心组成。', category: 'method' },
+    { block_id: 'block-2-8-paragraph', quote: 'OneLLM is the first MLLM that integrates eight distinct modalities within a single model.', reason: '说明论文主张的创新点。', category: 'innovation' },
+    { block_id: 'block-2-9-paragraph', quote: 'OneLLM finetuned on this dataset achieves superior performance on multimodal tasks', reason: '总结论文报告的实验结论。', category: 'conclusion' },
+  ];
   await page.route('**/api/jobs/*/auto-highlights', async (route) => {
-    const highlights = [
-      { block_id: 'block-1-4-paragraph', quote: 'In this paper, we present OneLLM, an MLLM that aligns eight modalities to language using a unified framework.', reason: '概括论文的统一多模态目标。', category: 'research_goal' },
-      { block_id: 'block-2-3-paragraph', quote: 'OneLLM consists of lightweight modality tokenizers, a universal encoder, a universal projection module (UPM), and an LLM.', reason: '列出方法的核心组成。', category: 'method' },
-      { block_id: 'block-2-8-paragraph', quote: 'OneLLM is the first MLLM that integrates eight distinct modalities within a single model.', reason: '说明论文主张的创新点。', category: 'innovation' },
-      { block_id: 'block-2-9-paragraph', quote: 'OneLLM finetuned on this dataset achieves superior performance on multimodal tasks', reason: '总结论文报告的实验结论。', category: 'conclusion' },
-    ];
-    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ result: { status: 'mock', highlights } }) });
+    await route.fulfill({ contentType: 'application/json', body: JSON.stringify({ result: { status: 'mock', highlights: initialHighlights } }) });
   });
   await page.goto(baseURL, { waitUntil: 'networkidle' });
   const firstCard = requestedJobId
@@ -126,10 +127,30 @@ let browserSession;
     if (annotation.block_id !== 'block-2-1-paragraph') continue;
     await page.evaluate(async ({ id, annotationId }) => fetch(`/api/jobs/${id}/annotations/${annotationId}`, { method: 'DELETE' }), { id: jobId, annotationId: annotation.id });
   }
+  await page.evaluate(() => {
+    const status = document.querySelector('#highlight-ai-status');
+    const batch = window.__initialHighlightBatch = { writes: [] };
+    batch.observer = new MutationObserver(() => { batch.writes.push(status.textContent); });
+    batch.observer.observe(status, { childList: true, characterData: true, subtree: true });
+  });
   await firstCard.dblclick();
   await page.locator('#reader-view.active-view').waitFor();
   const frame = page.frameLocator('#html-preview');
   await frame.locator('.pdf-page').first().waitFor();
+  try {
+    await page.waitForFunction(() => window.__initialHighlightBatch.writes.includes('AI 建议，仅供参考 · 点击可采纳或忽略'));
+  } catch (error) {
+    const diagnostics = await page.evaluate(async ({ id, highlights }) => {
+      const payload = await (await fetch(`/api/jobs/${id}/annotations`)).json();
+      const doc = document.querySelector('#html-preview')?.contentDocument;
+      return { status: document.querySelector('#highlight-ai-status')?.textContent, writes: window.__initialHighlightBatch.writes,
+        aiAnnotations: (payload.annotations || []).filter((annotation) => annotation.source === 'ai').map(({ id: annotationId, block_id: blockId }) => ({ annotationId, blockId })),
+        blocks: highlights.map(({ block_id: blockId }) => ({ blockId, found: Boolean(doc?.querySelector(`[data-block-id="${CSS.escape(blockId)}"]`)), marks: doc?.querySelectorAll(`[data-block-id="${CSS.escape(blockId)}"] mark[data-annotation-source="ai"]`).length || 0 })) };
+    }, { id: jobId, highlights: initialHighlights });
+    throw new Error(`Initial AI highlight batch did not finish: ${JSON.stringify(diagnostics)}`, { cause: error });
+  } finally {
+    await page.evaluate(() => window.__initialHighlightBatch.observer.disconnect());
+  }
   if (await frame.locator('figcaption[data-translate-block-id] .paragraph-translate-trigger').count()) throw new Error('Figure/table captions still exposed redundant translation buttons');
 
   const boldTranslationBlock = frame.locator('[data-block-id="block-2-3-paragraph"]');
@@ -1636,9 +1657,11 @@ let browserSession;
   process.exitCode = 1;
 }).finally(async () => {
   try {
+    if (page && !page.isClosed()) await page.evaluate(() => window.__initialHighlightBatch?.observer.disconnect());
+  } finally {
     await browserSession?.close();
-  } catch (closeError) {
-    console.error(`Failed to close browser: ${closeError.message}`);
-    process.exitCode = 1;
   }
+}).catch((closeError) => {
+  console.error(`Failed to close browser: ${closeError.message}`);
+  process.exitCode = 1;
 });
