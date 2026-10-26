@@ -31,7 +31,6 @@ jobs:
     env:
       PYTHONUTF8: '1'
       PYTHONDONTWRITEBYTECODE: '1'
-      GUZI_WINDOWS_UPGRADE_EVIDENCE_DIR: ${{ runner.temp }}/guzi-windows-upgrade-evidence
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -90,6 +89,8 @@ jobs:
       - name: Exercise isolated NSIS 0.6.2 to 0.6.3 upgrade
         shell: pwsh
         timeout-minutes: 100
+        env:
+          GUZI_WINDOWS_UPGRADE_EVIDENCE_DIR: ${{ runner.temp }}/guzi-windows-upgrade-evidence
         run: |
           npm --prefix apps/desktop run test:windows:upgrade
           exit $LASTEXITCODE
@@ -99,9 +100,9 @@ jobs:
         with:
           name: guzi-windows-isolated-upgrade-evidence
           path: |
-            ${{ env.GUZI_WINDOWS_UPGRADE_EVIDENCE_DIR }}/report.json
-            ${{ env.GUZI_WINDOWS_UPGRADE_EVIDENCE_DIR }}/events.jsonl
-            ${{ env.GUZI_WINDOWS_UPGRADE_EVIDENCE_DIR }}/*.log
+            ${{ runner.temp }}/guzi-windows-upgrade-evidence/report.json
+            ${{ runner.temp }}/guzi-windows-upgrade-evidence/events.jsonl
+            ${{ runner.temp }}/guzi-windows-upgrade-evidence/*.log
           if-no-files-found: warn
           retention-days: 14
       - name: Record artifact checksums

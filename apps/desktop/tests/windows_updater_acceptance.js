@@ -54,6 +54,16 @@ async function main() {
     assert.match(config.appId, /^com\.guzi\.scholar\.update-acceptance\./u);
     assert.equal(config.forceCodeSigning, false);
     assert.equal(config.extraMetadata.updater.enabled, false);
+    const workflow = require('js-yaml').load(fs.readFileSync(path.resolve(desktopRoot, '../../.github/workflows/windows.yml'), 'utf8'));
+    const job = workflow.jobs.windows;
+    assert.ok(Object.values(job.env).every((value) => !/\$\{\{\s*runner\./u.test(value)), 'The runner context is unavailable in job-level env');
+    const upgrade = job.steps.find((step) => step.run?.includes('run test:windows:upgrade'));
+    const evidence = '${{ runner.temp }}/guzi-windows-upgrade-evidence';
+    assert.equal(upgrade.env.GUZI_WINDOWS_UPGRADE_EVIDENCE_DIR, evidence);
+    assert.equal(upgrade.shell, 'pwsh');
+    const upload = job.steps.find((step) => step.with?.name === 'guzi-windows-isolated-upgrade-evidence');
+    assert.equal(upload.if, 'always()');
+    assert.deepEqual(upload.with.path.trim().split('\n'), ['report.json', 'events.jsonl', '*.log'].map((name) => `${evidence}/${name}`));
     if (process.platform === 'win32') requireWindows();
     else assert.throws(() => requireWindows(), /Real Windows/u);
     console.log('Windows acceptance harness static checks passed; no installed upgrade was performed.');
