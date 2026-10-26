@@ -18,18 +18,24 @@ function identity(tag, version) {
   return tag.includes('-beta.') ? 'beta' : 'stable';
 }
 
-function preflight(root, tag, repository = process.env.GITHUB_REPOSITORY || REPOSITORY, git = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()) {
-  assert(repository === REPOSITORY, 'Publishing is restricted to the canonical public repository');
+function validateVersions(root) {
   const rootMetadata = json(path.join(root, 'package.json'));
   assert(!rootMetadata.localTestBuild && !rootMetadata.build?.extraMetadata?.localTestBuild, 'Local test builds cannot enter the release pipeline');
   const version = rootMetadata.version;
-  const channel = identity(tag, version);
+  identity(`v${version}`, version);
   for (const file of ['apps/desktop/package.json', 'package-lock.json', 'apps/desktop/package-lock.json']) {
     const metadata = json(path.join(root, file));
     assert(!metadata.localTestBuild && !metadata.build?.extraMetadata?.localTestBuild, 'Local test builds cannot enter the release pipeline');
     assert(metadata.version === version, `Version mismatch: ${file}`);
     if (file.endsWith('lock.json')) assert(metadata.packages?.['']?.version === version, `Lock root version mismatch: ${file}`);
   }
+  return version;
+}
+
+function preflight(root, tag, repository = process.env.GITHUB_REPOSITORY || REPOSITORY, git = (args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()) {
+  assert(repository === REPOSITORY, 'Publishing is restricted to the canonical public repository');
+  const version = validateVersions(root);
+  const channel = identity(tag, version);
   const commit = git(['rev-parse', '--verify', `refs/tags/${tag}^{commit}`]);
   assert(/^[a-f0-9]{40}$/u.test(commit), 'Invalid tag commit');
   assert(git(['rev-parse', 'HEAD']) === commit, 'Checkout must exactly match the tag commit');
@@ -244,10 +250,12 @@ async function promote(api, context, reports, acceptanceRunID, publicKey = proce
   return api.request(`/releases/${release.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft: false, make_latest: context.channel === 'stable' ? 'true' : 'false', body: releaseNotes(context) }) });
 }
 
-module.exports = { REPOSITORY, identity, preflight, prepare, draft, review, promote, acceptance, verifiedAssets, GitHub, sha256, sha512, ACCEPTANCE_CHECKS, verifiedCandidate, downloadCandidate, releaseNotes };
+module.exports = { REPOSITORY, identity, validateVersions, preflight, prepare, draft, review, promote, acceptance, verifiedAssets, GitHub, sha256, sha512, ACCEPTANCE_CHECKS, verifiedCandidate, downloadCandidate, releaseNotes };
 async function main() {
   const [command, ...args] = process.argv.slice(2);
-  if (command === 'preflight') {
+  if (command === 'check-versions') {
+    console.log(`Release versions agree: ${validateVersions(path.resolve(args[0] || '.'))}`);
+  } else if (command === 'preflight') {
     const context = preflight(process.cwd(), args[0]);
     write(args[1], context);
     if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=${context.tag}\nversion=${context.version}\nchannel=${context.channel}\ncommit=${context.commit}\n`);
@@ -256,6 +264,6 @@ async function main() {
   else if (command === 'download-candidate') console.log(JSON.stringify(await downloadCandidate(new GitHub(process.env.GH_TOKEN), args[0], json(args[1]))));
   else if (command === 'review') console.log(JSON.stringify(await review(new GitHub(process.env.GH_TOKEN), json(args[0]), { darwin: json(path.join(args[1], 'macos-acceptance.json')), win32: json(path.join(args[1], 'windows-acceptance.json')) })));
   else if (command === 'promote') console.log(JSON.stringify(await promote(new GitHub(process.env.GH_TOKEN), json(args[0]), { darwin: json(path.join(args[1], 'macos-acceptance.json')), win32: json(path.join(args[1], 'windows-acceptance.json')) }, args[2])));
-  else throw new Error('Usage: release-pipeline.cjs preflight tag context | prepare directory context signature | draft directory context | download-candidate directory context | review context reports | promote context reports acceptance-run-id');
+  else throw new Error('Usage: release-pipeline.cjs check-versions [root] | preflight tag context | prepare directory context signature | draft directory context | download-candidate directory context | review context reports | promote context reports acceptance-run-id');
 }
 if (require.main === module) main().catch((error) => { console.error(error.message); process.exitCode = 1; });

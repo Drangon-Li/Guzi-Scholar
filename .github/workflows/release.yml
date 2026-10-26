@@ -51,6 +51,7 @@ jobs:
         run: |
           git fetch origin main:refs/remotes/origin/main --no-tags
           node apps/desktop/scripts/release-pipeline.cjs preflight "$RELEASE_TAG" release-context.json
+          node apps/desktop/tests/mac_release_test.js
           node apps/desktop/tests/release_pipeline_test.js
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -93,6 +94,7 @@ jobs:
         run: |
           python3 -m pip install --disable-pip-version-check certifi==2025.8.3
           npm ci --prefix apps/desktop
+          npm --prefix apps/desktop run check:release-contracts
           npm run desktop:check
           npm --prefix apps/desktop run prepare:mac
       - name: Build ad-hoc macOS arm64 DMG and Sparkle ZIP
@@ -155,6 +157,8 @@ jobs:
           java-version: '21'
       - name: Install locked dependencies
         run: npm ci --prefix apps/desktop
+      - name: Check release contracts before packaging
+        run: npm --prefix apps/desktop run check:release-contracts
       - name: Install Electron package test driver
         shell: pwsh
         run: |

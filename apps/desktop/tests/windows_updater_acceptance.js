@@ -60,15 +60,63 @@ async function main() {
     assert.equal(config.forceCodeSigning, false);
     assert.equal(config.extraMetadata.updater.enabled, false);
     const workflow = require('js-yaml').load(fs.readFileSync(path.resolve(desktopRoot, '../../.github/workflows/windows.yml'), 'utf8'));
-    const job = workflow.jobs.windows;
-    assert.ok(Object.values(job.env).every((value) => !/\$\{\{\s*runner\./u.test(value)), 'The runner context is unavailable in job-level env');
+    assert.deepEqual(workflow.on.push.branches, ['main']);
+    assert.ok(workflow.on.pull_request);
+    assert.ok(Object.hasOwn(workflow.on, 'workflow_dispatch'));
+    const packages = workflow.jobs.windows;
+    const job = workflow.jobs['windows-upgrade'];
+    for (const build of [packages, job]) {
+      assert.equal(build['runs-on'], 'windows-2022');
+      assert.equal(build.needs, undefined, 'Package and upgrade jobs must run independently');
+      assert.equal(build.if, undefined, 'Both Windows jobs must run for every workflow trigger');
+      assert.ok(!build['continue-on-error']);
+      assert.ok(Object.values(build.env).every((value) => !/\$\{\{\s*runner\./u.test(value)), 'The runner context is unavailable in job-level env');
+      assert.ok(!build.steps.some((step) => step.uses?.startsWith('actions/download-artifact@')), 'Each job must build its own runtime and packages');
+      const installIndex = build.steps.findIndex((step) => step.run === 'npm ci --prefix apps/desktop');
+      assert.ok(installIndex > 0);
+      const contractsIndex = build.steps.findIndex((step) => step.run === 'npm --prefix apps/desktop run check:release-contracts');
+      const packagingIndex = build.steps.findIndex((step) => /run (?:build:windows|test:windows:upgrade)/u.test(step.run || ''));
+      assert.ok(contractsIndex > installIndex && contractsIndex < packagingIndex, 'Release contracts must pass before building packages');
+      assert.ok(!build.steps[contractsIndex]['continue-on-error']);
+      const cacheConfigIndex = build.steps.findIndex((step) => step.env?.DOWNLOAD_CACHE_ROOT);
+      const cacheConfig = build.steps[cacheConfigIndex];
+      assert.ok(cacheConfigIndex > 0 && cacheConfigIndex < installIndex);
+      assert.equal(cacheConfig.env.DOWNLOAD_CACHE_ROOT, '${{ runner.temp }}/guzi-windows-download-cache');
+      assert.equal(cacheConfig.shell, 'pwsh');
+      for (const [variable, directory] of [['PIP_CACHE_DIR', 'pip'], ['ELECTRON_CACHE', 'electron'], ['ELECTRON_BUILDER_CACHE', 'electron-builder']]) {
+        assert.ok(cacheConfig.run.includes(`"${variable}=$env:DOWNLOAD_CACHE_ROOT/${directory}" >> $env:GITHUB_ENV`));
+      }
+      const cacheIndex = build.steps.findIndex((step) => step.uses?.startsWith('actions/cache@'));
+      const cache = build.steps[cacheIndex];
+      assert.ok(cacheIndex > cacheConfigIndex && cacheIndex < installIndex, 'Restore Electron downloads before npm ci');
+      assert.match(cache.uses, /^actions\/cache@[a-f0-9]{40}$/u);
+      assert.deepEqual(cache.with.path.trim().split('\n'), [
+        '${{ env.PIP_CACHE_DIR }}', '${{ env.ELECTRON_CACHE }}', '${{ env.ELECTRON_BUILDER_CACHE }}', 'apps/desktop/build/windows-downloads',
+      ], 'Only download caches may be restored; generated runtimes, apps and installers must be rebuilt');
+      for (const part of ['runner.os', 'runner.arch', 'steps.python.outputs.python-version', 'apps/desktop/package-lock.json',
+        'apps/desktop/requirements*.txt', 'platforms/windows/runtime-dependencies.json']) assert.ok(cache.with.key.includes(part));
+      assert.equal(build.steps.find((step) => step.id === 'python').with['python-version'], '3.11');
+    }
+    const summary = workflow.jobs['windows-status'];
+    assert.equal(summary.name, 'Build and verify Windows x64');
+    assert.equal(summary.if, 'always()');
+    assert.deepEqual(summary.needs, ['windows', 'windows-upgrade']);
+    assert.ok(!summary['continue-on-error']);
+    assert.ok([packages, job].every((build) => build.name !== summary.name));
+    const gate = summary.steps.find((step) => step.env?.PACKAGES_RESULT);
+    assert.equal(gate.env.PACKAGES_RESULT, '${{ needs.windows.result }}');
+    assert.equal(gate.env.UPGRADE_RESULT, '${{ needs.windows-upgrade.result }}');
+    assert.equal(gate.run.trim(), 'test "$PACKAGES_RESULT" = success\ntest "$UPGRADE_RESULT" = success');
+    assert.ok(!gate['continue-on-error']);
     const upgrade = job.steps.find((step) => step.run?.includes('run test:windows:upgrade'));
+    assert.ok(!packages.steps.some((step) => step.run?.includes('run test:windows:upgrade')));
     const evidence = '${{ runner.temp }}/guzi-windows-upgrade-evidence';
     assert.equal(upgrade.env.GUZI_WINDOWS_UPGRADE_EVIDENCE_DIR, evidence);
     assert.equal(upgrade.shell, 'pwsh');
     const upload = job.steps.find((step) => step.with?.name === 'guzi-windows-isolated-upgrade-evidence');
     assert.equal(upload.if, 'always()');
     assert.deepEqual(upload.with.path.trim().split('\n'), ['report.json', 'events.jsonl', '*.log'].map((name) => `${evidence}/${name}`));
+    assert.ok(!packages.steps.find((step) => step.with?.name === 'guzi-scholar-windows-x64').if, 'Only verified packages may be uploaded');
     if (process.platform === 'win32') {
       requireWindows();
       assert.equal(JSON.parse(powershell("'安装 路径' | ConvertTo-Json -Compress")), '安装 路径', 'PowerShell must preserve Unicode in redirected JSON');

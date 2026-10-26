@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { identity, preflight, prepare, draft, review, promote, acceptance, REPOSITORY, sha256, sha512, ACCEPTANCE_CHECKS, downloadCandidate, verifiedAssets } = require('../scripts/release-pipeline.cjs');
+const { identity, validateVersions, preflight, prepare, draft, review, promote, acceptance, REPOSITORY, sha256, sha512, ACCEPTANCE_CHECKS, downloadCandidate, verifiedAssets } = require('../scripts/release-pipeline.cjs');
 const { sign } = require('../scripts/release-sign-mac.cjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'guzi-release-test-'));
 const key = crypto.generateKeyPairSync('ed25519');
@@ -69,6 +69,21 @@ async function main() {
   const repo = path.join(root, 'repository');
   fs.mkdirSync(path.join(repo, 'apps/desktop'), { recursive: true });
   for (const file of ['package.json', 'apps/desktop/package.json', 'package-lock.json', 'apps/desktop/package-lock.json']) fs.writeFileSync(path.join(repo, file), JSON.stringify({ version: context.version, packages: { '': { version: context.version } } }));
+  assert.equal(validateVersions(repo), context.version, 'PR version validation requires neither Git metadata nor a release tag');
+  for (const file of ['package.json', 'apps/desktop/package.json', 'package-lock.json', 'apps/desktop/package-lock.json']) {
+    const filename = path.join(repo, file);
+    const original = fs.readFileSync(filename, 'utf8');
+    const metadata = JSON.parse(original);
+    fs.writeFileSync(filename, JSON.stringify({ ...metadata, version: '0.6.2' }));
+    assert.throws(() => validateVersions(repo), /Version mismatch/u);
+    if (file.endsWith('lock.json')) {
+      fs.writeFileSync(filename, JSON.stringify({ ...metadata, packages: { '': { version: '0.6.2' } } }));
+      assert.throws(() => validateVersions(repo), /Lock root version mismatch/u);
+    }
+    fs.writeFileSync(filename, JSON.stringify({ ...metadata, build: { extraMetadata: { localTestBuild: 'fixture' } } }));
+    assert.throws(() => validateVersions(repo), /Local test builds/u);
+    fs.writeFileSync(filename, original);
+  }
   const git = (args) => args[0] === 'rev-parse' ? context.commit : '';
   assert.deepEqual(preflight(repo, context.tag, REPOSITORY, git), context);
   assert.throws(() => preflight(repo, context.tag, 'old-owner/Guzi-Scholar', git), /canonical/u);
