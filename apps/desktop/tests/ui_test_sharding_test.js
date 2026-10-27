@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const vm = require('vm');
 const { spawnSync } = require('child_process');
+const { EventEmitter } = require('events');
 const { tests, selectTests } = require('./ui-test-plan.cjs');
 const { verifyReports, readReports } = require('../scripts/verify-ui-results.cjs');
 
@@ -92,7 +93,60 @@ async function exerciseRunner(args, reportPath, outcome = () => ({ status: 0, si
   return { calls, exitCode: context.process.exitCode, report: JSON.parse(fs.readFileSync(reportPath, 'utf8')) };
 }
 
+async function exerciseHealthProbe() {
+  const requests = [];
+  const timers = [];
+  let now = 0;
+  const context = {
+    Date: { now: () => now },
+    setTimeout(callback) { timers.push(callback); },
+    http: {
+      get(options, callback) {
+        const request = new EventEmitter();
+        request.destroyed = false;
+        request.destroy = (error) => {
+          request.destroyed = true;
+          if (error) request.emit('error', error);
+        };
+        requests.push({ request, options, callback });
+        return request;
+      },
+    },
+  };
+  const source = fs.readFileSync(path.join(__dirname, 'run_ui_tests.js'), 'utf8');
+  vm.runInNewContext(source.slice(source.indexOf('async function waitForHealth'), source.indexOf('// Each suite')), context);
+  const healthy = context.waitForHealth(8123, 1000);
+  requests[0].request.emit('timeout');
+  await Promise.resolve();
+  assert.equal(timers.length, 1, 'timeout and error must schedule only one retry');
+  timers.shift()();
+  await Promise.resolve();
+  assert.equal(requests.length, 2);
+  assert(requests[0].request.destroyed);
+  const response = new EventEmitter();
+  response.statusCode = 200;
+  response.resume = () => {};
+  requests[1].callback(response);
+  assert.equal(requests[1].request.destroyed, false, 'wait for the health response to finish');
+  response.emit('end');
+  await healthy;
+  requests[1].request.emit('error', new Error('late error'));
+  assert.equal(timers.length, 0, 'completed probes must not create background retries');
+  assert(requests[1].request.destroyed, 'release the health socket before starting a suite');
+  assert(requests.every(({ options }) => options.agent === false));
+
+  const unhealthy = context.waitForHealth(8123, 1000);
+  requests[2].request.emit('error', new Error('connection refused'));
+  await Promise.resolve();
+  assert.equal(timers.length, 1);
+  now = 1000;
+  timers.shift()();
+  await assert.rejects(unhealthy, /did not become healthy/);
+  assert.equal(requests.length, 3, 'the overall deadline must stop new probes');
+}
+
 async function main() {
+  await exerciseHealthProbe();
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ui-sharding-unit-'));
   try {
     const reportPath = path.join(directory, 'runner.json');
@@ -122,6 +176,10 @@ async function main() {
     assert.match(crashed.report.error, /suite launch failed/);
     reports[0] = crashed.report;
     assert.throws(() => verifyReports(reports, 4));
+    const spawnFailure = await exerciseRunner(['http://127.0.0.1:8123', '--only=features'], reportPath, () => ({ status: null, error: new Error('spawn EMFILE') }));
+    assert.equal(spawnFailure.exitCode, 1);
+    assert.equal(spawnFailure.report.complete, false);
+    assert.match(spawnFailure.report.error, /spawn EMFILE/);
     const preflight = await exerciseRunner(['--ci', '--shard=1/4'], reportPath, () => ({ status: 1 }));
     assert.equal(preflight.exitCode, 1);
     assert.equal(preflight.report.complete, false);

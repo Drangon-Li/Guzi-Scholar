@@ -50,23 +50,31 @@ function freePort() {
   });
 }
 
-function waitForHealth(port, timeoutMs = 60000) {
+async function waitForHealth(port, timeoutMs = 60000) {
   const deadline = Date.now() + timeoutMs;
-  return new Promise((resolve, reject) => {
-    const retry = () => {
-      if (Date.now() > deadline) reject(new Error(`server on port ${port} did not become healthy`));
-      else setTimeout(attempt, 250);
-    };
-    const attempt = () => {
-      const request = http.get({ host: '127.0.0.1', port, path: '/api/health', timeout: 2000 }, (response) => {
+  while (Date.now() < deadline) {
+    const healthy = await new Promise((resolve) => {
+      let finished = false;
+      const finish = (value) => {
+        if (finished) return;
+        finished = true;
+        request.destroy();
+        resolve(value);
+      };
+      const request = http.get({ host: '127.0.0.1', port, path: '/api/health', agent: false, timeout: Math.min(2000, deadline - Date.now()) }, (response) => {
         response.resume();
-        if (response.statusCode === 200) resolve(); else retry();
+        response.once('end', () => finish(response.statusCode === 200));
+        response.once('error', () => finish(false));
       });
-      request.on('error', retry);
-      request.on('timeout', () => { request.destroy(); retry(); });
-    };
-    attempt();
-  });
+      request.once('error', () => finish(false));
+      // destroy() also emits error; only that completion schedules the next probe.
+      request.once('timeout', () => request.destroy(new Error('health probe timed out')));
+    });
+    if (healthy) return;
+    const remaining = deadline - Date.now();
+    if (remaining > 0) await new Promise((resolve) => setTimeout(resolve, Math.min(250, remaining)));
+  }
+  throw new Error(`server on port ${port} did not become healthy`);
 }
 
 // Each suite gets its own seeded library and its own server process. The reader
@@ -102,6 +110,7 @@ async function runManaged(script) {
       stdio: 'inherit',
       windowsHide: true,
     });
+    if (result.error) throw result.error;
     const passed = result.status === 0 && !result.signal;
     if (!passed) process.stderr.write(fs.readFileSync(logPath, 'utf-8').slice(-4000));
     return { passed, status: result.status, signal: result.signal || null };
@@ -124,6 +133,7 @@ function runShared(script, baseURL) {
     stdio: 'inherit',
     windowsHide: true,
   });
+  if (result.error) throw result.error;
   return { passed: result.status === 0 && !result.signal, status: result.status, signal: result.signal || null };
 }
 
