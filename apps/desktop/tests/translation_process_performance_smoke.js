@@ -235,13 +235,15 @@ const note = { id: 'process-source-note', block_id: 'process-0', surface: 'paper
           metrics.longtaskDetails.push({ phase: metrics.phases.findLast((phase) => phase.startTime <= entry.startTime)?.phase, startTime: entry.startTime, duration: entry.duration, translatedParagraphs: content.querySelectorAll('.reader-sentence-pairs').length });
         }
       }).observe({ type: 'longtask', buffered: false });
+      // Reuse a live Range so sampling does not amplify every subsequent DOM mutation.
+      const measurement = doc.createRange();
       const rectangles = (root) => {
         const rects = [];
         const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
         let text;
         while ((text = walker.nextNode())) {
           if (text.parentElement.closest('button,.annotation-note-trigger,.translation-source-label')) continue;
-          const range = doc.createRange(); range.selectNodeContents(text);
+          const range = measurement; range.selectNodeContents(text);
           rects.push(...[...range.getClientRects()].filter((rect) => rect.width > .5 && rect.height > .5));
         }
         rects.push(...[...root.querySelectorAll('math,img')].map((node) => node.getBoundingClientRect()).filter((rect) => rect.width > .5 && rect.height > .5));
@@ -253,7 +255,7 @@ const note = { id: 'process-source-note', block_id: 'process-0', surface: 'paper
         while ((text = walker.nextNode())) {
           if (text.parentElement.closest('button,.annotation-note-trigger,.translation-source-label')) continue;
           const offset = text.data.search(/\S/u); if (offset < 0) continue;
-          const range = doc.createRange(); range.setStart(text, offset); range.setEnd(text, offset + 1);
+          const range = measurement; range.setStart(text, offset); range.setEnd(text, offset + 1);
           const rect = range.getBoundingClientRect(); if (rect.width && rect.height) return rect;
         }
         return null;
@@ -290,7 +292,7 @@ const note = { id: 'process-source-note', block_id: 'process-0', surface: 'paper
             let text;
             while ((text = walker.nextNode())) {
               if (!text.data.trim() || text.parentElement.closest('math,.katex,.math-source-visual,sup,sub,button')) continue;
-              const range = doc.createRange(); range.selectNodeContents(text);
+              const range = measurement; range.selectNodeContents(text);
               for (const rect of range.getClientRects()) {
                 if (rect.width <= .5 || rect.height <= .5) continue;
                 const row = sourceRows.findLastIndex((top) => top < rect.top);
@@ -328,6 +330,8 @@ const note = { id: 'process-source-note', block_id: 'process-0', surface: 'paper
     await page.waitForFunction(() => document.querySelector('#translation-progress-count')?.textContent.includes('/ 233'));
     await frame.locator('.reader-sentence-pairs').nth(15).waitFor({ state: 'attached' });
     if (!baseline) await checkReaderTheme('translated', colorScheme);
+    const interactionDeadline = Date.now() + 5000;
+    while (!inFlight && completed < count && Date.now() < interactionDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
     assert(inFlight > 0 && completed < count, 'Interaction must occur while delayed translation requests remain outstanding.');
     const scrolled = await frame.locator('[data-block-id="process-8"]').evaluate((node) => { node.scrollIntoView({ block: 'center', behavior: 'instant' }); return node.ownerDocument.scrollingElement.scrollTop; });
     assert(scrolled > 0, 'The reader must scroll during translation.');

@@ -13,13 +13,16 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
 function harness() {
   const state = { activeJob: null, translationRuns: new Map() };
   const active = new Map();
+  const mounts = new Map();
   const started = [];
   let peak = 0;
   const context = vm.createContext({
-    state, readerMount: {}, AbortController, FULL_TRANSLATION_CONCURRENCY: 3,
+    state, readerMount: null, AbortController, FULL_TRANSLATION_CONCURRENCY: 3,
+    window: { setTimeout: setImmediate }, performance: { now: () => 0 },
     translationScope: () => 'all', aiServiceEnabled: () => true,
-    frameDocument: () => ({}),
-    translatableBlocks: () => [{ dataset: { blockId: 'body' }, matches: () => false }],
+    frameDocument: () => context.readerMount.frame.contentDocument,
+    readerMountIsCurrent: (mount) => Boolean(mount && mounts.get(mount.jobId) === mount),
+    translationTarget: (_id, doc) => doc.block, translatableParagraph: () => true,
     hasUsableTranslation: () => false, paragraphTranslationSource: () => ({ text: 'A paragraph.' }),
     documentTitleFor: (id) => id, syncTranslationControls: () => {},
     updateTranslationProgress: () => {}, showToast: () => {}, setPanelStatus: () => {},
@@ -36,7 +39,15 @@ function harness() {
   vm.runInContext(`${slots}\n${runs}\nthis.run = runFullTranslation; this.cancel = cancelTranslationRun;`, context);
   return {
     state, active, started, peak: () => peak,
-    start(id) { state.activeJob = { job_id: id }; return context.run(); },
+    start(id) {
+      const block = { dataset: { blockId: 'body' }, matches: () => false };
+      const doc = { block, querySelectorAll: () => [block] };
+      const mount = { jobId: id, generation: 'base', frame: { contentDocument: doc } };
+      mounts.set(id, mount);
+      context.readerMount = mount;
+      state.activeJob = { job_id: id };
+      return context.run();
+    },
     cancel(id) { context.cancel(state.translationRuns.get(id)); },
   };
 }

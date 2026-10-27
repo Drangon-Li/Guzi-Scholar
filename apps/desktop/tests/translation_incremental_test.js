@@ -196,7 +196,87 @@ async function testReopenedTranslationRun() {
   }
 }
 
-testReopenedTranslationRun().then(() => console.log('translation incremental rendering tests passed')).catch((error) => {
+async function testFullTranslationPreparation() {
+  const slots = source.slice(source.indexOf('  const FULL_TRANSLATION_MAX_DOCUMENTS'), source.indexOf('  // One paragraph of a run.'));
+  const runs = source.slice(source.indexOf('  function fullTranslationSnapshot('), source.indexOf('  function stopFullTranslation('));
+  const usable = source.slice(source.indexOf('  function hasUsableTranslation('), source.indexOf('  const FULL_TRANSLATION_CONCURRENCY'));
+  for (const scenario of ['complete', 'stop', 'close', 'generation', 'background', 'cached', 'background cached']) {
+    const callbacks = [];
+    const extracted = [];
+    const requested = [];
+    const blocks = Array.from({ length: 20 }, (_value, index) => ({
+      dataset: { blockId: String(index) }, text: `Original paragraph ${index}.`, matches: () => false,
+    }));
+    const doc = { querySelectorAll: () => blocks, querySelector: () => null };
+    const mount = { jobId: 'paper', generation: 'base', frame: { contentDocument: doc } };
+    const mounts = new Map([['paper', mount]]);
+    const state = { activeJob: { job_id: 'paper' }, translationRuns: new Map() };
+    const context = vm.createContext({
+      state, readerMount: mount, AbortController, FULL_TRANSLATION_CONCURRENCY: 3,
+      window: { setTimeout: (callback) => callbacks.push(callback) }, performance: { now: () => 0 },
+      translationScope: () => 'all', aiServiceEnabled: () => true, frameDocument: () => context.readerMount.frame.contentDocument,
+      readerMountIsCurrent: (value) => Boolean(value && mounts.get(value.jobId) === value),
+      translationTarget: (id) => blocks[Number(id)], translatableParagraph: () => true,
+      paragraphSource: (block) => ({ text: block.text }), translationSourceHash: (value) => value.text,
+      cssEscape: (value) => value, translationTargetLanguage: () => '中文',
+      cachedTranslationForSource: (blockId, _source, _language, jobId) => {
+        assert.equal(jobId, 'paper', 'Preparation reads the cache belonging to its own document');
+        return Number(blockId) % 2 === 0 ? { text: 'Cached translation.' } : null;
+      },
+      paragraphTranslationSource: (block) => { extracted.push(block.dataset.blockId); return { text: block.text }; },
+      documentTitleFor: () => 'Paper', syncTranslationControls() {}, updateTranslationProgress() {},
+      showToast() {}, setPanelStatus() {}, releaseClosedDocumentCaches() {}, translationErrorMessage: (error) => error.message,
+      translateSnapshot: async (snapshot) => {
+        requested.push(snapshot.source.text);
+        blocks.forEach((block) => { block.text = 'Changed after translation started.'; });
+        return true;
+      },
+    });
+    vm.runInContext(`${usable}\n${slots}\n${runs}\nthis.run = runFullTranslation; this.cancel = cancelTranslationRun;`, context);
+    const pending = context.run({ refresh: !scenario.includes('cached') });
+    const run = state.translationRuns.get('paper');
+    assert.equal(run.running, true, `${scenario}: stop controls are available before preparation`);
+    assert.equal(extracted.length, 0, `${scenario}: source extraction yields before starting`);
+    const nextChunk = async () => { assert.ok(callbacks.length); callbacks.shift()(); await Promise.resolve(); };
+    await nextChunk();
+    assert.equal(extracted.length, scenario.includes('cached') ? 4 : 8, `${scenario}: one turn prepares at most eight candidates`);
+    assert.equal(requested.length, 0, `${scenario}: requests wait until every source is frozen`);
+    if (scenario === 'stop') context.cancel(run);
+    if (scenario === 'close') {
+      mounts.delete('paper');
+      run.mount = null;
+      run.document = null;
+    }
+    if (scenario === 'generation') mount.generation = 'next';
+    if (scenario.startsWith('background')) {
+      context.readerMount = { jobId: 'other', frame: { contentDocument: {
+        querySelector: () => assert.fail('Background preparation must not inspect the active reader'),
+      } } };
+      state.activeJob = { job_id: 'other' };
+    }
+    await nextChunk();
+    if (['stop', 'close', 'generation'].includes(scenario)) {
+      await pending;
+      assert.equal(extracted.length, 8, `${scenario}: invalidated preparation extracts no further source`);
+      assert.equal(requested.length, 0, `${scenario}: invalidated preparation sends no requests`);
+      assert.equal(run.stop, true);
+    } else {
+      await nextChunk();
+      await pending;
+      const expected = blocks.filter((block) => !scenario.includes('cached') || Number(block.dataset.blockId) % 2 !== 0)
+        .map((block) => `Original paragraph ${block.dataset.blockId}.`);
+      assert.deepEqual(requested, expected, `${scenario}: all requests use their frozen original source`);
+      assert.equal(run.done, 20);
+      assert.equal(run.total, 20);
+    }
+    assert.equal(run.running, false);
+    assert.equal(run.mount, null);
+    assert.equal(run.document, null);
+    assert.equal(callbacks.length, 0);
+  }
+}
+
+Promise.all([testReopenedTranslationRun(), testFullTranslationPreparation()]).then(() => console.log('translation incremental rendering tests passed')).catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });

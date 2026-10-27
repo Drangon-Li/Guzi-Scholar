@@ -6208,6 +6208,7 @@
 
   function syncTranslationBlockVisibility(block, node) {
     if (!block) return;
+    block.classList.toggle('has-paragraph-translation', Boolean(block.nextElementSibling?.classList.contains('my-scholar-translation')));
     const preserve = !block.matches('figcaption') && Boolean(block.closest('.pdf-equation, .equation, .display-math, .pdf-table, table'));
     block.classList.toggle('my-scholar-translation-original', !preserve);
     if (preserve) return;
@@ -6955,7 +6956,7 @@
           h1[data-translate-block-id],
           p[data-block-id],
           figcaption[data-translate-block-id]
-        ):has(+ .my-scholar-translation) {
+        ).has-paragraph-translation {
           margin-bottom:0!important;
         }
         .reader-content .pdf-page > .my-scholar-translation:last-child {
@@ -9137,6 +9138,7 @@
     const sourceLeading = Math.max(1.25, Number(computed.getPropertyValue('--reader-line-height')) * .78 || 1.34);
     const gap = Math.max(2, fontSize * .12);
     const atomicSelector = 'math, .katex, .math-source-visual, sup, sub, img';
+    const measurement = doc.createRange();
     container.classList.add('reader-interlinear-container');
     container.style.setProperty('--reader-interlinear-line-height', `${fontSize * sourceLeading}px`);
     const origin = container.getBoundingClientRect();
@@ -9156,12 +9158,20 @@
           ? { index: i, distance: Math.abs((candidate.top + candidate.bottom) / 2 - center) } : best, { index: 0, distance: Infinity });
         return sourceRows[closest.index];
       };
-      const add = (rect, node, offset, anchor) => {
+      const add = (rect, node, offset, anchor, anchorOffset = 0) => {
         const row = rowFor(rect);
         if (!row) return;
         row.top = Math.min(row.top, rect.top);
         row.bottom = Math.max(row.bottom, rect.bottom);
-        row.anchor ||= { target: anchor, top: anchor.getBoundingClientRect().top };
+        if (!row.anchor) {
+          let target = anchor;
+          if (anchor.nodeType === Node.TEXT_NODE) {
+            target = doc.createRange();
+            target.setStart(anchor, anchorOffset);
+            target.setEnd(anchor, anchorOffset + 1);
+          }
+          row.anchor = { target, top: target.getBoundingClientRect().top };
+        }
         let part = units.at(-1);
         if (part?.row !== row) {
           part = { row, left: rect.left, right: rect.right };
@@ -9170,13 +9180,13 @@
         }
         part.left = Math.min(part.left, rect.left);
         part.right = Math.max(part.right, rect.right);
-        part.end = doc.createRange();
+        part.end ||= doc.createRange();
         part.end.setStart(node, offset);
         part.end.collapse(true);
       };
       const visit = (node) => {
         if (node.nodeType === Node.TEXT_NODE) {
-          const range = doc.createRange();
+          const range = measurement;
           const at = (offset) => {
             range.setStart(node, offset); range.setEnd(node, offset + 1);
             return range.getBoundingClientRect();
@@ -9196,9 +9206,7 @@
             if (visibleStart >= start && visibleEnd > visibleStart) {
               range.setStart(node, visibleStart); range.setEnd(node, visibleEnd);
               const rect = range.getBoundingClientRect();
-              const anchor = doc.createRange();
-              anchor.setStart(node, visibleStart); anchor.setEnd(node, visibleStart + 1);
-              add(rect, node, visibleEnd, anchor);
+              add(rect, node, visibleEnd, node, visibleStart);
             }
             start = low;
           }
@@ -9267,7 +9275,7 @@
       const visit = (node) => {
         if (boundary) return;
         if (node.nodeType === Node.TEXT_NODE && node.length) {
-          const range = doc.createRange();
+          const range = measurement;
           const at = (offset) => {
             range.setStart(node, offset); range.setEnd(node, offset + 1);
             return range.getBoundingClientRect();
@@ -9289,7 +9297,7 @@
       };
       if (firstBox) [...run.childNodes].forEach(visit);
       if (boundary) {
-        const remainder = doc.createRange();
+        const remainder = measurement;
         remainder.selectNodeContents(run);
         remainder.setStart(boundary.node, boundary.offset);
         stream.remaining.append(remainder.extractContents());
@@ -9297,7 +9305,7 @@
         pruneEmptyMarks(stream.remaining);
       }
       const box = line.getBoundingClientRect();
-      const contents = doc.createRange();
+      const contents = measurement;
       contents.selectNodeContents(run);
       const occupied = [...contents.getClientRects()].filter((rect) => rect.width && rect.height);
       const occupiedRight = Math.max(left, ...occupied.map((rect) => rect.right - origin.left - container.clientLeft));
@@ -9725,18 +9733,18 @@
     if (run && state.activeJob?.job_id === run.jobId) paintTranslationPanel(run, options);
     refreshBackgroundTasks();
   }
-  function hasUsableTranslation(block) {
+  function hasUsableTranslation(block, doc = frameDocument(), jobId = state.activeJob?.job_id) {
     const blockId = block?.dataset.blockId || block?.dataset.translateBlockId || '';
     if (!blockId) return false;
     const source = paragraphSource(block);
     const sourceHash = translationSourceHash(source);
-    const rendered = frameDocument()?.querySelector(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`);
+    const rendered = doc?.querySelector(`.my-scholar-translation[data-for="${cssEscape(blockId)}"]`);
     if (rendered && !rendered.classList.contains('is-pending') && !rendered.classList.contains('is-error')) {
       if (rendered.dataset.sourceHash === sourceHash) return true;
       if (!source.formulas.length && !source.markers.length && !source.emphasis.length && !rendered.dataset.sourceHash) return true;
       return false;
     }
-    return Boolean(cachedTranslationForSource(blockId, source)?.text);
+    return Boolean(cachedTranslationForSource(blockId, source, translationTargetLanguage(), jobId)?.text);
   }
 
   const FULL_TRANSLATION_CONCURRENCY = 3;
@@ -9884,17 +9892,30 @@
     window.requestAnimationFrame(() => menu.querySelector('[aria-checked="true"]')?.focus({ preventScroll: true }));
   }
 
-  function fullTranslationSnapshot(doc, scope, refresh) {
-    const blocks = translatableBlocks(doc, scope);
-    const pendingBlocks = refresh ? blocks : blocks.filter((block) => !hasUsableTranslation(block));
-    return {
-      total: blocks.length,
-      snapshots: pendingBlocks.map((block) => ({
-        blockId: block.dataset.blockId || block.dataset.translateBlockId,
-        isTitle: block.matches('h1.paper-title, h1[data-translate-block-id]'),
-        source: paragraphTranslationSource(block),
-      })),
-    };
+  function fullTranslationSnapshot(doc, scope, refresh, preparation) {
+    if (!preparation.candidates) {
+      const boundary = scope === 'body' ? referencesBoundary(doc) : null;
+      preparation.candidates = [...doc.querySelectorAll('h1.paper-title[data-block-id], p[data-block-id], ul[data-block-id], ol[data-block-id], figcaption[data-translate-block-id]')]
+        .filter((block) => !boundary || Boolean(boundary.compareDocumentPosition(block) & Node.DOCUMENT_POSITION_PRECEDING))
+        .map((block) => block.dataset.blockId || block.dataset.translateBlockId);
+    }
+    const deadline = performance.now() + 8;
+    let processed = 0;
+    while (preparation.index < preparation.candidates.length && processed < 8) {
+      const blockId = preparation.candidates[preparation.index++];
+      const block = translationTarget(blockId, doc);
+      if (translatableParagraph(block)) {
+        preparation.total += 1;
+        if (refresh || !hasUsableTranslation(block, doc, preparation.jobId)) preparation.snapshots.push({
+          blockId,
+          isTitle: block.matches('h1.paper-title, h1[data-translate-block-id]'),
+          source: paragraphTranslationSource(block),
+        });
+      }
+      processed += 1;
+      if (performance.now() >= deadline) break;
+    }
+    return preparation.index >= preparation.candidates.length;
   }
 
   async function runFullTranslation({ refresh = false, scope = translationScope() } = {}) {
@@ -9909,13 +9930,26 @@
       return;
     }
     if (!frameDocument()) return;
-    // Keep DOM locals outside the async run so a queued task can release a closed paper.
-    const { total, snapshots } = fullTranslationSnapshot(frameDocument(), scope, refresh);
-    const run = { jobId, generation: readerMount.generation, mount: readerMount, document: frameDocument(), title: documentTitleFor(jobId), running: true, stop: false, phase: 'pending', wake: null, done: total - snapshots.length, total, failed: 0, detail: '', abortController: new AbortController() };
+    const run = { jobId, generation: readerMount.generation, mount: readerMount, document: frameDocument(), title: documentTitleFor(jobId), running: true, stop: false, phase: 'pending', wake: null, done: 0, total: 0, failed: 0, detail: '', abortController: new AbortController() };
     state.translationRuns.set(jobId, run);
     syncTranslationControls();
+    // Only IDs and extracted sources cross a yield; closing the reader releases its DOM.
+    const preparation = { jobId, candidates: null, index: 0, total: 0, snapshots: [] };
     let nextIndex = 0;
     try {
+      let prepared = false;
+      while (!prepared) {
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+        if (run.stop || run.abortController.signal.aborted) return;
+        if (!readerMountIsCurrent(run.mount) || run.mount.generation !== run.generation || run.mount.frame.contentDocument !== run.document) {
+          cancelTranslationRun(run);
+          return;
+        }
+        prepared = fullTranslationSnapshot(run.document, scope, refresh, preparation);
+      }
+      const { total, snapshots } = preparation;
+      run.total = total;
+      run.done = total - snapshots.length;
       await acquireTranslationSlot(run);
       updateTranslationProgress(run);
       const worker = async () => {
