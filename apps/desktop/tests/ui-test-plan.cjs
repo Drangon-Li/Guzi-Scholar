@@ -15,6 +15,7 @@ const tests = [
   ['zotero-note-markers', 'zotero_note_markers_smoke.js', { ci: true }],
   ['zotero-anchor-mapping', 'zotero_anchor_mapping_smoke.js', { ci: true }],
   ['translation', 'translation_smoke.js', { ci: true }],
+  ['translation-process-performance', 'translation_process_performance_smoke.js', { ci: true }],
   ['translation-controls', 'translation_controls_smoke.js', { ci: true }],
   ['math-typography', 'math_typography_smoke.js', { ci: true }],
   ['chat-math', 'chat_math_rendering_test.js', { ci: true }],

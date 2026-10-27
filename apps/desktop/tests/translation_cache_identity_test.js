@@ -21,7 +21,6 @@ const context = vm.createContext({
   state: { activeJob: { job_id: 'fixture' }, translationCache: [], annotations: [] },
   readerMount: {},
   readerMountMatches: () => true,
-  readerHoverTranslationEnabled: () => true,
   translationProfileId: () => profileId,
   translationTargetLanguage: () => targetLanguage,
   rememberDisplayedTranslation: () => {},
@@ -41,14 +40,13 @@ vm.runInContext([
   section('function protectInlineMath(', 'function translationTargetLanguage('),
   section('function cachedTranslation(', 'async function streamApiRequest('),
   section('async function requestTranslation(', 'function insertTranslation('),
-  section('function setReaderSentenceHover(', 'function installReaderSentenceHover('),
   section('function renderCachedTranslations(', 'async function loadTranslationCache('),
   section('function previewCaptionTranslation(', 'function attachQuickPreviewZoom('),
   section('function hasUsableTranslation(', 'const FULL_TRANSLATION_CONCURRENCY'),
   'this.request = requestTranslation; this.hash = hashText;',
   'this.identity = typeof translationSourceIdentity === "function" ? translationSourceIdentity : null;',
   'this.matches = typeof translationSourceMatches === "function" ? translationSourceMatches : null;',
-  'this.hover = setReaderSentenceHover; this.replay = renderCachedTranslations; this.preview = previewCaptionTranslation; this.usable = hasUsableTranslation;',
+  'this.replay = renderCachedTranslations; this.preview = previewCaptionTranslation; this.usable = hasUsableTranslation;',
 ].join('\n'), context);
 
 const archived = { block_id: 'archived-block', source_hash: 'archived-source', target_language: '中文', profile_id: 'archived-profile', text: '已有译文', updated_at: '2026-10-25T00:00:00Z' };
@@ -99,7 +97,7 @@ assert.deepEqual(Array.from(profileContext.filter([french]), (record) => record.
   assert.notEqual(requests[0].source_hash, requests[1].source_hash);
   await context.request(sentence, null, math('x'));
   assert.equal(requests.length, 2, 'Identical formula requests reuse the cache.');
-  assert.ok(context.identity, 'Hover requests share the structured source identity.');
+  assert.ok(context.identity, 'Translation requests share the structured source identity.');
   const variants = [
     { text: sentence, formulas: math('x') },
     { text: sentence, formulas: math('y') },
@@ -137,7 +135,7 @@ assert.deepEqual(Array.from(profileContext.filter([french]), (record) => record.
     translatableParagraph: () => true,
     paragraphSource: (node) => ({ formulas: [], markers: [], emphasis: [], ...node.source }),
     insertTranslation: (_id, text, options) => { inserted.push({ text, ...options }); return {}; },
-    rebuildReaderSentencePairs: () => {}, refreshReaderSearch: () => {}, applyTranslationVisibility: () => {},
+    refreshReaderSearch: () => {}, applyTranslationVisibility: () => {},
     document: { createElement: () => ({ children: [], append(...children) { this.children.push(...children); } }) },
     renderTranslationText: (text, formulas, _doc, markers, emphasis) => ({ text, formulas, markers, emphasis }),
   });
@@ -165,28 +163,18 @@ assert.deepEqual(Array.from(profileContext.filter([french]), (record) => record.
   assert.equal(context.usable(block), false, 'An outdated rendered translation must be replaced even when the matching cache exists.');
   context.frameDocument = () => doc;
 
-  const timers = [];
-  const tooltips = [];
-  const hoverDoc = { querySelector: () => null, querySelectorAll: () => [], getSelection: () => ({ toString: () => '' }), createElement: () => ({ append(source) { this.source = source; }, querySelectorAll: () => [] }) };
-  Object.assign(context, {
-    readerSentenceState: { doc: hoverDoc, pendingTranslations: new Map() },
-    window: { clearTimeout: () => {}, setTimeout: (callback) => { timers.push(callback); return timers.length; } },
-    clearReaderSentenceHover: () => {}, aiServiceEnabled: () => true,
-    paintReaderSentenceTooltip: (pair, text, options) => { if (text) tooltips.push({ pairId: pair.id, ...options }); },
-  });
   cache = [];
   const beforeConcurrent = requests.length;
-  const pending = [];
-  for (const [index, source] of variants.entries()) {
-    context.hover({ id: String(index), sourceRange: { cloneContents: () => source } });
-    pending.push(timers.pop()());
-  }
-  context.hover({ id: 'same-formula-again', sourceRange: { cloneContents: () => variants[0] } });
-  pending.push(timers.pop()());
-  await Promise.all(pending);
-  assert.equal(requests.length - beforeConcurrent, variants.length, 'Concurrent hover requests with different formulas or styles do not share a pending promise.');
-  assert.equal(context.readerSentenceState.pendingTranslations.size, variants.length);
-  assert.deepEqual(JSON.parse(JSON.stringify(tooltips.find(({ pairId }) => pairId === '1').formulas)), math('y'));
+  let releaseVariants;
+  requestGate = new Promise((resolve) => { releaseVariants = resolve; });
+  const pending = variants.map((source) => context.request(source.text, null, source.formulas || [], source));
+  pending.push(context.request(variants[0].text, null, variants[0].formulas || [], variants[0]));
+  assert.equal(requests.length - beforeConcurrent, variants.length, 'Concurrent requests with different formulas or styles retain separate source identities.');
+  releaseVariants();
+  const concurrentResults = await Promise.all(pending);
+  requestGate = null;
+  assert.deepEqual(JSON.parse(JSON.stringify(concurrentResults[1].formulas)), math('y'));
+  assert.equal(concurrentResults.at(-1).text, concurrentResults[0].text, 'Matching manual and paragraph consumers can share the same pending operation.');
 
   const legacy = { block_id: '', source_hash: context.hash(sentence), target_language: 'zh', profile_id: 'profile', text: sentence, formulas: [{ token, tex: 'x' }] };
   cache = [legacy];
@@ -205,7 +193,6 @@ assert.deepEqual(Array.from(profileContext.filter([french]), (record) => record.
   await context.request(plain, 'plain', []);
   assert.equal(requests.at(-1).source_hash, context.hash(plain), 'Plain text keeps its existing cache identity.');
   assert.equal(context.matches({ source_hash: 'old-source-hash', source_text: plain }, { text: plain }, true), true, 'Plain text keeps the legacy source_text replay fallback.');
-  assert.match(section('function setReaderSentenceHover(', 'function installReaderSentenceHover('), /translationSourceIdentity\(source\)/, 'Hover pending requests use the complete structured identity.');
   const consumers = app.replace(section('function hashText(', 'function paragraphSource('), '');
   assert.doesNotMatch(consumers, /cachedTranslation\(\w+, hashText\(source\.text\)/, 'Cache consumers must use the same source identity.');
 

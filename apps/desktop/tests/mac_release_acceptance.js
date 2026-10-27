@@ -109,6 +109,11 @@ async function until(predicate, label, timeout = 90000) {
   throw new Error(`Timed out: ${label}`);
 }
 
+function assertMainProcessHealthy(events) {
+  const errors = events.filter((event) => event.type === 'main-process-error');
+  assert.deepEqual(errors, [], 'Main process exceptions must fail release acceptance');
+}
+
 async function execute({ directory, contextFile, output }) {
   assertCIEnvironment();
   const context = json(contextFile);
@@ -124,6 +129,7 @@ async function execute({ directory, contextFile, output }) {
   const report = { schema: 1, ...context, platform: 'darwin', arch: 'arm64', artifact_sha256: source.candidate.sha256, from_version: fromVersion, to_version: context.version, environment: `GitHub-hosted disposable ${os.release()} arm64 VM; run ${process.env.GITHUB_RUN_ID}/${process.env.GITHUB_RUN_ATTEMPT}; production bundle ID and userData`, checks: {}, passed: false, evidence: { root, bundleID, installed, target_archive: source.candidate.assetName, target_ed_signature: source.candidate.edSignature, public_key: process.env.SPARKLE_PUBLIC_KEY, old_fixture: 'candidate-derived version downgrade; fixture only in old app', discovery: 'production release parser over mirrored candidate metadata', download: 'production checksum verifier over exact candidate ZIP served on loopback' } };
   const baselinePIDs = new Set(processes().map((item) => item.pid));
   const children = new Set();
+  const childExits = new Map();
   let currentPID, data, server, appLog, sequence = 0, installOwned = false;
   let active = { archive: source.archive, signature: source.candidate.edSignature };
   const events = () => fs.existsSync(eventPath) ? fs.readFileSync(eventPath, 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)) : [];
@@ -142,6 +148,7 @@ async function execute({ directory, contextFile, output }) {
     const child = spawn(executable(), [], { env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1' }, stdio: ['ignore', fd, fd] });
     fs.closeSync(fd);
     currentPID = child.pid;
+    child.once('exit', (code, signal) => childExits.set(child.pid, { code, signal }));
     children.add(currentPID);
     await until(() => events().some((event) => event.type === 'launched' && event.pid === currentPID), 'old app launch');
     await until(async () => { try { return (await command('status', {}, 3000)).ready; } catch (_) { return false; } }, 'production renderer save gate');
@@ -149,7 +156,10 @@ async function execute({ directory, contextFile, output }) {
   }
   async function quit() {
     writeJSON(path.join(root, 'command.json'), { id: `${Date.now()}-${++sequence}`, targetPID: currentPID, action: 'quit' });
-    await until(() => !alive(currentPID), 'ordinary quit', 30000);
+    await until(() => !alive(currentPID) && childExits.has(currentPID), 'ordinary quit', 30000);
+    assert.deepEqual(childExits.get(currentPID), { code: 0, signal: null }, 'Ordinary quit must exit successfully');
+    assertMainProcessHealthy(events());
+    assert(events().some((event) => event.type === 'will-quit' && event.pid === currentPID), 'Production will-quit must complete');
   }
   const waitIdle = () => until(async () => {
     const state = await command('eval', { code: "fetch('/api/health').then(response => response.json()).then(health => health.storage.migration)" });
@@ -269,7 +279,7 @@ async function execute({ directory, contextFile, output }) {
     const restarted = await launch();
     assert.equal(restarted.version, fromVersion);
     assert.equal(restarted.update.status, 'ready');
-    check('ordinary_quit', { version: restarted.version, cached_update: restarted.update.status });
+    check('ordinary_quit', { version: restarted.version, cached_update: restarted.update.status, clean_main_exit: true });
     for (const variant of ['bad_signature', 'corrupt_archive']) {
       const offset = events().length;
       const modified = { ...valid };
@@ -342,6 +352,8 @@ async function execute({ directory, contextFile, output }) {
     assert(openedData.split('\n').some((line) => line.startsWith(`n${data}/`)), 'Original target must open the production userData directory');
     check('data_preserved', hashes);
     verifyCandidateDirectory(directory, context, process.env.SPARKLE_PUBLIC_KEY);
+    assertMainProcessHealthy(events());
+    report.evidence.main_process_errors = events().filter((event) => event.type === 'main-process-error');
     for (const name of ACCEPTANCE_CHECKS) assert.equal(report.checks[name], true);
     report.passed = true;
     acceptance(report, context, source.manifest.artifacts.find((item) => item.platform === 'darwin'));
@@ -361,6 +373,8 @@ async function execute({ directory, contextFile, output }) {
 }
 
 function checkContract() {
+  assert.doesNotThrow(() => assertMainProcessHealthy([{ type: 'will-quit' }]));
+  assert.throws(() => assertMainProcessHealthy([{ type: 'main-process-error', origin: 'uncaughtException', error: 'ReferenceError: updater is not defined' }]), /Main process exceptions/u);
   assert.equal(previousVersion('0.6.3'), '0.6.2');
   assert.equal(previousVersion('0.6.3-beta.2'), '0.6.3-beta.1');
   assert.equal(previousVersion('0.6.3-beta.0'), '0.6.2-beta.0');
@@ -374,16 +388,12 @@ function checkContract() {
   try {
     const context = { schema: 1, repository: REPOSITORY, tag: 'v0.6.3', version: '0.6.3', channel: 'stable', commit: 'a'.repeat(40) };
     const archiveName = 'Guzi-Scholar-0.6.3-arm64-stable.zip';
-    const installer = 'Guzi-Scholar-0.6.3-windows-x64-setup.exe';
     const bytes = Buffer.from('Synthetic contract archive; never installed');
     const key = crypto.generateKeyPairSync('ed25519');
     const publicKey = key.publicKey.export({ type: 'spki', format: 'der' }).subarray(-32).toString('base64');
     const signature = crypto.sign(null, bytes, key.privateKey).toString('base64');
     fs.writeFileSync(path.join(directory, archiveName), bytes);
     fs.writeFileSync(path.join(directory, 'Guzi-Scholar-0.6.3-arm64-stable.dmg'), 'contract DMG');
-    fs.writeFileSync(path.join(directory, installer), bytes);
-    fs.writeFileSync(path.join(directory, `${installer}.blockmap`), 'contract blockmap');
-    fs.writeFileSync(path.join(directory, 'latest.yml'), `version: 0.6.3\npath: ${installer}\nsha512: ${crypto.createHash('sha512').update(bytes).digest('base64')}\nsize: ${bytes.length}\n`);
     prepare(directory, context, { name: archiveName, public_key: publicKey, ed_signature: signature });
     const source = verifyCandidateDirectory(directory, context, publicKey);
     assert.equal(source.candidate.sha256, digest(bytes));

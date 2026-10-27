@@ -1,19 +1,6 @@
 name: Windows packages
 
 on:
-  pull_request:
-    paths:
-      - 'apps/desktop/**'
-      - 'platforms/windows/**'
-      - '.github/workflows/windows.yml'
-      - 'package.json'
-  push:
-    branches: [main]
-    paths:
-      - 'apps/desktop/**'
-      - 'platforms/windows/**'
-      - '.github/workflows/windows.yml'
-      - 'package.json'
   workflow_dispatch:
 
 permissions:
@@ -82,7 +69,7 @@ jobs:
       - name: Check JavaScript
         run: npm --prefix apps/desktop run lint:js
       - name: Check runtime and package configuration
-        run: npm --prefix apps/desktop run test:runtime
+        run: npm --prefix apps/desktop run test:windows
       - name: Check graph
         run: npm --prefix apps/desktop run test:graph
       - name: Check MCP and plugins

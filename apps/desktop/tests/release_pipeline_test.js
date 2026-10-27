@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { identity, validateVersions, preflight, prepare, draft, review, promote, acceptance, REPOSITORY, sha256, sha512, ACCEPTANCE_CHECKS, downloadCandidate, verifiedAssets } = require('../scripts/release-pipeline.cjs');
+const { identity, validateVersions, preflight, prepare: prepareBundle, draft, review, promote, acceptance, REPOSITORY, sha256, sha512, ACCEPTANCE_CHECKS, downloadCandidate, verifiedAssets } = require('../scripts/release-pipeline.cjs');
 const { sign } = require('../scripts/release-sign-mac.cjs');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'guzi-release-test-'));
 const key = crypto.generateKeyPairSync('ed25519');
@@ -13,7 +13,8 @@ const publicKey = key.publicKey.export({ type: 'spki', format: 'der' }).subarray
 const context = { schema: 1, repository: REPOSITORY, tag: 'v0.6.3', version: '0.6.3', channel: 'stable', commit: 'a'.repeat(40) };
 const signing = (bytes) => crypto.sign(null, bytes, key.privateKey).toString('base64');
 let count = 0;
-function fixture(channel = 'stable') {
+const prepare = (directory, build, signature) => prepareBundle(directory, build, signature, { includeWindows: true });
+function fixture(channel = 'stable', includeWindows = true) {
   const directory = path.join(root, `candidate-${++count}`);
   fs.mkdirSync(directory);
   const build = channel === 'stable' ? { ...context } : { ...context, tag: 'v0.6.3-beta.1', version: '0.6.3-beta.1', channel: 'beta' };
@@ -22,10 +23,12 @@ function fixture(channel = 'stable') {
   const bytes = Buffer.from(`mac archive ${channel}`);
   fs.writeFileSync(path.join(directory, name), bytes);
   fs.writeFileSync(path.join(directory, `Guzi-Scholar-${build.version}-arm64-${channel}.dmg`), 'dmg candidate');
-  fs.writeFileSync(path.join(directory, win), 'NSIS candidate');
-  fs.writeFileSync(path.join(directory, `${win}.blockmap`), 'blockmap candidate');
-  const exe = fs.readFileSync(path.join(directory, win));
-  fs.writeFileSync(path.join(directory, channel === 'stable' ? 'latest.yml' : 'beta.yml'), `version: ${build.version}\nfiles:\n  - url: ${win}\n    sha512: ${sha512(exe)}\n    size: ${exe.length}\npath: ${win}\nsha512: ${sha512(exe)}\n`);
+  if (includeWindows) {
+    fs.writeFileSync(path.join(directory, win), 'NSIS candidate');
+    fs.writeFileSync(path.join(directory, `${win}.blockmap`), 'blockmap candidate');
+    const exe = fs.readFileSync(path.join(directory, win));
+    fs.writeFileSync(path.join(directory, channel === 'stable' ? 'latest.yml' : 'beta.yml'), `version: ${build.version}\nfiles:\n  - url: ${win}\n    sha512: ${sha512(exe)}\n    size: ${exe.length}\npath: ${win}\nsha512: ${sha512(exe)}\n`);
+  }
   const signature = { name, public_key: publicKey, ed_signature: signing(bytes) };
   return { directory, build, signature, name, win };
 }
@@ -91,6 +94,47 @@ async function main() {
   fs.writeFileSync(path.join(repo, 'apps/desktop/package-lock.json'), JSON.stringify({ version: '0.6.2' }));
   assert.throws(() => preflight(repo, context.tag, REPOSITORY, git), /Version mismatch/u);
 
+  const macOnly = fixture('stable', false);
+  const macManifest = prepareBundle(macOnly.directory, macOnly.build, macOnly.signature);
+  assert.deepEqual(macManifest.artifacts.map((artifact) => artifact.platform), ['darwin']);
+  const macProvenance = JSON.parse(fs.readFileSync(path.join(macOnly.directory, 'release-provenance.json')));
+  assert.deepEqual(Object.keys(macProvenance.signing), ['macos']);
+  const macAPI = new FakeAPI();
+  const macRelease = await draft(macAPI, macOnly.directory, context);
+  assert.doesNotMatch(macRelease.body, /Windows/u);
+  const macReports = reports(macManifest);
+  await assert.rejects(promote(macAPI, context, {}, '123', publicKey), /Acceptance report required: darwin/u);
+  assert.equal(macRelease.draft, true);
+  const macDownload = path.join(root, 'downloaded-mac-candidate');
+  assert.deepEqual(await downloadCandidate(macAPI, macDownload, context, publicKey), macManifest);
+  assert.doesNotThrow(() => require('./mac_release_acceptance.js').verifyCandidateDirectory(macDownload, context, publicKey));
+  for (const check of ACCEPTANCE_CHECKS) {
+    const invalid = structuredClone(macReports);
+    invalid.darwin.checks[check] = false;
+    await assert.rejects(promote(macAPI, context, invalid, '123', publicKey), /check failed/u);
+    assert.equal(macRelease.draft, true);
+  }
+  const invalidMacReport = structuredClone(macReports);
+  invalidMacReport.darwin.artifact_sha256 = '0'.repeat(64);
+  await assert.rejects(promote(macAPI, context, invalidMacReport, '123', publicKey), /candidate mismatch/u);
+  const invalidMacUpgrade = structuredClone(macReports);
+  invalidMacUpgrade.darwin.from_version = context.version;
+  await assert.rejects(promote(macAPI, context, invalidMacUpgrade, '123', publicKey), /real version upgrade/u);
+  await promote(macAPI, context, macReports, '123', publicKey);
+  assert.equal(macRelease.draft, false);
+  assert.match(macRelease.body, /通过 macOS 的升级验收/u);
+  assert.doesNotMatch(macRelease.body, /Windows/u);
+  const implicitWindows = fixture();
+  assert.throws(() => prepareBundle(implicitWindows.directory, context, implicitWindows.signature), /explicit includeWindows/u);
+  const missingWindows = fixture('stable', false);
+  assert.throws(() => prepare(missingWindows.directory, context, missingWindows.signature), /explicit includeWindows/u);
+  const macBeta = fixture('beta', false);
+  const macBetaManifest = prepareBundle(macBeta.directory, macBeta.build, macBeta.signature);
+  const macBetaAPI = new FakeAPI();
+  const macBetaRelease = await draft(macBetaAPI, macBeta.directory, macBeta.build);
+  await promote(macBetaAPI, macBeta.build, reports(macBetaManifest, macBeta.build), '456', publicKey);
+  assert.equal(macBetaRelease.make_latest, 'false');
+
   const candidate = fixture();
   const manifest = prepare(candidate.directory, candidate.build, candidate.signature);
   assert.deepEqual(Object.keys(manifest).sort(), ['schema', 'repository', 'version', 'channel', 'published_at', 'notes', 'artifacts'].sort());
@@ -140,7 +184,6 @@ async function main() {
   const checksumAsset = remoteAssets.find((asset) => asset.name === 'SHA256SUMS');
   assert.deepEqual(fs.readFileSync(path.join(downloaded, 'SHA256SUMS')), await api.download(checksumAsset), 'Native harnesses require the original remote SHA256SUMS bytes');
   assert.doesNotThrow(() => require('./mac_release_acceptance.js').verifyCandidateDirectory(downloaded, context, publicKey), 'Downloaded bundle must satisfy the macOS native harness file contract');
-  assert.doesNotThrow(() => require('./windows_release_acceptance.js').validateBundle(downloaded, context), 'Downloaded bundle must satisfy the Windows native harness file contract');
   await assert.rejects(downloadCandidate(api, downloaded, context, publicKey), /must not already exist/u);
   const wrongKeyDirectory = path.join(root, 'wrong-key-candidate');
   await assert.rejects(downloadCandidate(api, wrongKeyDirectory, context, crypto.randomBytes(32).toString('base64')), /signing key/u);
@@ -217,6 +260,6 @@ async function main() {
   assert.equal(betaRelease.draft, false);
   assert.equal(betaRelease.make_latest, 'false', 'Beta promotion must not replace the stable latest release');
   assert.match(betaRelease.body, /v0\.6\.3-beta\.1/u);
-  console.log('release_pipeline_test: passed (tag/version/ancestry, both channels, signatures, immutable drafts, byte-identical downloads, provenance and remote hashes, real acceptance gates, gated release notes)');
+  console.log('release_pipeline_test: passed (tag/version/ancestry, Mac default and optional legacy Windows, both channels, signatures, immutable drafts, byte-identical downloads, provenance and remote hashes, real acceptance gates, gated release notes)');
 }
 main().catch((error) => { console.error(error); process.exitCode = 1; }).finally(() => fs.rmSync(root, { recursive: true, force: true }));

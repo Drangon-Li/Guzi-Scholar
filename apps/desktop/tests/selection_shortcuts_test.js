@@ -109,33 +109,30 @@ function event(key, changes = {}) {
   const saveStart = source.indexOf('  async function saveAnnotation(');
   const saveEnd = source.indexOf('  function applyAnnotationActionFields(', saveStart);
   let completeSave;
-  let restoredHover = '';
   const savedSelection = { block_id: 'source', start: 0, end: 13, quote: 'Stored quote.' };
   const saveContext = vm.createContext({
     state: { activeJob: { job_id: 'job' }, selection: savedSelection, annotations: [] },
-    readerMount: {}, readerSentenceState: { pairs: [{ id: 'new-hover' }] },
+    readerMount: {},
     frameDocument: () => ({ querySelector: () => ({}) }),
     cssEscape: (value) => value, rangeAtOffsets: () => ({}), canonicalBlockText: () => 'Stored quote.',
     readerMountMatches: () => true, readerMountIsCurrent: () => true,
     jsonOptions: (value) => value, annotationColorFor: () => '#f59e0b',
     api: () => new Promise((resolve) => { completeSave = resolve; }),
-    renderFrameAnnotations() { if (saveContext.state.selection?.origin === 'sentence-hover') saveContext.state.selection = null; },
+    renderFrameAnnotations() {},
     playAnnotationDrawAnimation() {},
     renderAnnotations() {}, annotationAnchor: () => ({}),
     clearSelectionPopover() { saveContext.state.selection = null; },
-    setReaderSentenceHover(pair) { restoredHover = pair.id; },
     setPanelStatus: (message) => assert.fail(message), showToast: (message) => assert.fail(message),
   });
   vm.runInContext(source.slice(saveStart, saveEnd) + '\nthis.save = saveAnnotation;', saveContext);
-  for (const next of [null, { quote: 'A new manual selection.', origin: 'selection' }, { origin: 'sentence-hover', pair_id: 'new-hover' }]) {
+  for (const next of [null, { quote: 'A new manual selection.', origin: 'selection' }]) {
     saveContext.state.selection = savedSelection;
     const saving = saveContext.save('highlight');
     if (next) saveContext.state.selection = next;
     completeSave({ annotations: [{ id: 'saved' }], annotation: { id: 'saved' } });
     await saving;
     if (!next) assert.equal(saveContext.state.selection, null);
-    else if (next.origin === 'selection') assert.equal(saveContext.state.selection, next, 'A completed save must not clear a newer manual selection');
-    else assert.equal(restoredHover, 'new-hover', 'Repainting saved annotations must restore a newer hovered sentence');
+    else assert.equal(saveContext.state.selection, next, 'A completed save must not clear a newer manual selection');
   }
   console.log('selection number shortcut tests passed');
 })().catch((error) => { console.error(error); process.exitCode = 1; });

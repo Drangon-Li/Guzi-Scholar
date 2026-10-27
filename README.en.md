@@ -2,7 +2,7 @@
 
 Guzi Scholar is a local-first academic PDF reader for managing papers, structured reading, translation, annotations, notes, and article assistance in one desktop application.
 
-The open-source desktop distribution targets macOS and Windows with one shared desktop codebase. The macOS package is available first; Windows packages will follow after real-machine verification.
+Development, local testing, default CI validation, and new releases currently target macOS. Work on other platforms requires an explicit request. Windows source and manual build entry points are retained, but new Windows development, testing, and releases are paused.
 
 ## Online demo
 
@@ -20,7 +20,7 @@ The project code is licensed under [Apache License 2.0](LICENSE). Third-party de
 
 ## Downloads
 
-Download the latest macOS Apple Silicon DMG from the [Releases](https://github.com/Drangon-Li/Guzi-Scholar/releases) page. The current macOS package is the `v0.4.0` GitHub release: it uses ad-hoc signing and has not been signed with an Apple Developer ID or notarized by Apple. If Gatekeeper blocks the first launch, right-click `Guzi Scholar.app` in Finder, choose **Open**, and confirm the prompt. Updates are manual downloads from the Releases page; reliable in-app automatic replacement is not promised. Windows packages are coming after real-machine verification.
+Download the latest macOS Apple Silicon DMG from the [Releases](https://github.com/Drangon-Li/Guzi-Scholar/releases) page. It uses ad-hoc signing and has not been signed with an Apple Developer ID or notarized by Apple. If Gatekeeper blocks the first launch, right-click `谷子学术.app` in Finder, choose **Open**, and confirm the prompt. The app checks for updates at startup and supports manual checks; Sparkle verifies the update signature before installation. DMGs are also available for manual updates. Previous Windows packages remain available in historical releases.
 
 ## Development
 
@@ -31,6 +31,8 @@ npm run desktop:dev
 ```
 
 The shared desktop source lives in `apps/desktop/`. Platform packaging and launch configuration lives in `platforms/`. Please see [README.md](README.md) for the current feature list, requirements, data model, and contribution notes.
+
+Runtime and UI acceptance default to macOS; shared static checks may run on Linux CI. Releases require matching macOS signatures, asset verification, and native upgrade acceptance. Windows CI is manual-only. Explicitly including Windows in a release still requires its build and native upgrade acceptance.
 
 ## Remote parsing
 

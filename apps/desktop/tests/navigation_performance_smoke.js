@@ -41,7 +41,7 @@ function documentHTML(id) {
 }
 function instrument(source) {
   const functions = ['openReader', 'wireFrame', 'prepareMountedReader', 'prepareReaderMedia', 'prepareReaderImages',
-    'renderFrameAnnotations', 'buildReaderIndexes', 'rebuildReaderSentencePairs', 'renderCachedTranslations',
+    'renderFrameAnnotations', 'buildReaderIndexes', 'scheduleInterlinearTranslations', 'layoutInterlinearContainer', 'renderCachedTranslations',
     'renderLibrary', 'renderLibraryRows', 'renderFolderTree', 'showSettingsSection', 'applyAppearance', 'applyTypography', 'loadSettings', 'renderAISettings', 'renderAnnotationActionSettings', 'loadParsingProviders', 'ensureTitleTranslation'];
   for (const name of functions) assert.match(source, new RegExp(`function ${name}\\(`), `Missing instrumentation target ${name}`);
   const injection = `
@@ -173,7 +173,7 @@ async function staticServer() {
             holdTranslations = false;
             await new Promise((resolve) => { releaseTranslations = resolve; pending.add(resolve); });
           }
-          payload = { translations: [{ block_id: 'title', source_text: title, text: '合成导航性能论文', profile_id: 'navigation-fixture', target_language: '中文', formulas: [] }, ...Array.from({ length: translationCount - 1 }, (_, index) => ({ block_id: `paragraph-${index * 11}`, source_text: paragraph(index * 11), text: `文献 ${id[0].toUpperCase()} 第 ${index} 条合成缓存译文。`, profile_id: 'navigation-fixture', target_language: '中文', formulas: [] }))] };
+          payload = { translations: [{ block_id: 'title', source_text: title, text: '合成导航性能论文', profile_id: 'navigation-fixture', target_language: '中文', formulas: [], alignment_version: 'sentence-v1', segments: [{ id: `s0-${title.length}`, text: '合成导航性能论文' }] }, ...Array.from({ length: translationCount - 1 }, (_, index) => ({ block_id: `paragraph-${index * 11}`, source_text: paragraph(index * 11), text: `文献 ${id[0].toUpperCase()} 第 ${index} 条合成缓存译文。`, profile_id: 'navigation-fixture', target_language: '中文', formulas: [] }))] };
         }
         else if (endpoint === 'media-layout') payload = { media_layout: { version: 1, items: {} } };
         else if (endpoint === 'annotations') payload = { annotations: Array.from({ length: annotationCount }, (_, index) => ({ id: `${id[0]}-mark-${index}`, block_id: `paragraph-${index * 7}`, quote: sentence, start: 0, end: sentence.length, page: Math.floor(index * 7 / 15) + 1, kind: 'highlight', color: '#ffd400', source: 'manual', surface: 'source', note: `Synthetic note ${index}` })) };
@@ -238,7 +238,8 @@ async function staticServer() {
       assert.equal(firstOpen.buildReaderIndexes?.calls, 1, 'A newly loaded document must build its section index once');
       // Wiring, annotations, and the deliberately delayed translation cache each get one reconciliation.
       assert.ok(firstOpen.renderFrameAnnotations.calls <= 3, 'First open repeated annotation DOM reconciliation');
-      assert.ok(firstOpen.rebuildReaderSentencePairs.calls <= 3, 'First open repeated full-document sentence traversal');
+      assert.ok(firstOpen.layoutInterlinearContainer?.calls > 0, 'Aligned cached title must exercise bilingual layout');
+      assert.ok(firstOpen.layoutInterlinearContainer.calls <= 3, 'First open repeated bilingual layout of the aligned cached title');
     }
     const titleRequests = count(`/api/jobs/${ids[0]}/translate`, 'POST');
     if (!baseline) assert.equal(titleRequests, 0, 'Delayed cached title must not trigger a translation request');

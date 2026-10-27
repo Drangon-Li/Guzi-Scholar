@@ -5,6 +5,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const yaml = require('js-yaml');
+const vm = require('node:vm');
+const os = require('node:os');
 
 const directory = path.resolve(__dirname, '../../../.github/workflows');
 const read = (name) => yaml.load(fs.readFileSync(path.join(directory, name), 'utf8'));
@@ -79,4 +81,81 @@ assert.deepEqual(macCache.with.path.trim().split('\n'), ['${{ env.PIP_CACHE_DIR 
 for (const key of ['runner.os', 'runner.arch', 'steps.python.outputs.python-version', 'apps/desktop/package-lock.json', 'apps/desktop/scripts/prepare-mac-release.sh']) {
   assert.ok(macCache.with.key.includes(key));
 }
-console.log('CI workflow gates passed: all shards, both Windows jobs, early release contracts, download-only caches and release isolation');
+assert.deepEqual(Object.keys(windows.on), ['workflow_dispatch'], 'Windows builds must remain manual');
+assert.equal(checks.jobs.desktop.name, 'Desktop checks', 'Keep the existing branch protection check context');
+assert.equal(checks.jobs.desktop['runs-on'], 'macos-15');
+assert.equal(shards['runs-on'], 'macos-15');
+assert.equal(checks.jobs.runtime['runs-on'], 'macos-15');
+assert.equal(release.on.workflow_dispatch.inputs.include_windows.default, false);
+assert.match(release.jobs.windows.if, /github.event_name == 'workflow_dispatch'/u);
+assert.match(release.jobs.windows.if, /inputs.include_windows/u);
+assert.match(release.jobs.draft.if, /needs.macos.result == 'success'/u);
+assert.match(release.jobs.draft.if, /needs.windows.result == 'skipped'/u);
+const assemble = release.jobs.draft.steps.find((step) => step.run?.includes('release-pipeline.cjs prepare'));
+assert.match(assemble.run, /if \[\[ "\$INCLUDE_WINDOWS" == true \]\]/u);
+assert.match(assemble.run, /options\+=\(--with-windows\)/u);
+const acceptance = read('release-acceptance.yml');
+assert.match(acceptance.jobs.windows.if, /needs.validate.outputs.windows == 'true'/u);
+assert.match(acceptance.jobs.record.if, /needs.validate.outputs.windows != 'true' \|\| needs.windows.result == 'success'/u);
+const metadata = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf8'));
+for (const name of ['check', 'test:runtime', 'check:release-contracts']) {
+  assert.doesNotMatch(metadata.scripts[name], /test:windows|windows_(?:updater|release)|test_runner_windows/u, `Default ${name} must not run Windows-specific suites`);
+}
+assert.match(metadata.scripts['test:windows'], /windows_release_acceptance/u);
+assert.match(metadata.scripts['test:unit:windows'], /--windows$/u);
+assert.match(metadata.scripts['test:unit:all'], /--all$/u);
+
+function checkPythonSelection() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'guzi-python-selection-'));
+  try {
+    const tests = path.join(root, 'tests');
+    fs.mkdirSync(tests);
+    fs.copyFileSync(path.join(__dirname, 'run_python_suite.py'), path.join(tests, 'run_python_suite.py'));
+    for (const [name, marker] of [['common', 'shared-imported'], ['windows_runtime', 'windows-imported']]) {
+      fs.writeFileSync(path.join(tests, `test_${name}.py`), `import pathlib, unittest\npathlib.Path('${marker}').touch()\nclass Case(unittest.TestCase):\n    def test_pass(self):\n        pass\n`);
+    }
+    for (const [args, shared, windows] of [[[], true, false], [['--windows'], false, true], [['--all'], true, true]]) {
+      for (const marker of ['shared-imported', 'windows-imported']) fs.rmSync(path.join(root, marker), { force: true });
+      const result = spawnSync(process.execPath, [path.join(__dirname, 'run_python_tests.js'), ...args], { cwd: root, encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(fs.existsSync(path.join(root, 'shared-imported')), shared);
+      assert.equal(fs.existsSync(path.join(root, 'windows-imported')), windows);
+    }
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
+}
+checkPythonSelection();
+
+async function checkAcceptanceModes() {
+  const step = acceptance.jobs.validate.steps.find((item) => item.run?.includes("node <<'NODE'"));
+  const script = step.run.split("node <<'NODE'\n")[1].split('\nNODE')[0];
+  const context = { tag: 'v0.6.9', version: '0.6.9', channel: 'stable', commit: 'a'.repeat(40) };
+  const repository = 'Drangon-Li/Guzi-Scholar';
+  for (const windowsCandidate of [false, true]) {
+    for (const mac of ['', '{}']) for (const win of ['', '{}']) {
+      let output = '';
+      const downloaded = [];
+      const manifest = { schema: 2, repository, version: context.version, channel: context.channel, artifacts: [{ platform: 'darwin' }, ...(windowsCandidate ? [{ platform: 'win32' }] : [])] };
+      const processMock = { env: { MACOS_REPORT: mac, WINDOWS_REPORT: win, GITHUB_SHA: context.commit, GITHUB_WORKFLOW_SHA: context.commit, GITHUB_REF: `refs/tags/${context.tag}`, GITHUB_OUTPUT: 'output' }, exitCode: 0 };
+      vm.runInNewContext(script, {
+        process: processMock,
+        console: { error() {} },
+        require(name) {
+          if (name === 'node:fs') return { readFileSync: () => JSON.stringify(context), appendFileSync: (_file, value) => { output += value; } };
+          return { REPOSITORY: repository, GitHub: class {
+            async releases() { return [{ tag_name: context.tag, draft: true, prerelease: false }]; }
+            async assets() { return [{ name: 'update-manifest.json' }, { name: 'candidate.zip' }, { name: 'candidate.dmg' }]; }
+            async download(asset) { downloaded.push(asset.name); return JSON.stringify(manifest); }
+          } };
+        },
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(downloaded, ['update-manifest.json'], 'Routing must not download package payloads; native, record and promote verify them');
+      const valid = windowsCandidate ? Boolean(mac) === Boolean(win) : !win;
+      assert.equal(processMock.exitCode, valid ? 0 : 1, `Acceptance report mode must match actual candidate platforms: ${windowsCandidate}/${Boolean(mac)}/${Boolean(win)}`);
+      if (valid) assert.equal(output, `mode=${mac ? 'external' : 'native'}\nwindows=${windowsCandidate}\n`);
+      else assert.equal(output, '');
+    }
+  }
+  console.log('CI workflow gates passed: Mac defaults, manual Windows, platform-matched native/external acceptance, early release contracts, complete UI coverage and release isolation');
+}
+checkAcceptanceModes().catch((error) => { console.error(error); process.exitCode = 1; });
