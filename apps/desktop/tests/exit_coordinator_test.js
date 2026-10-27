@@ -4,6 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const { EventEmitter } = require('node:events');
 const { createExitCoordinator, flushRenderer } = require('../electron/exit-coordinator.cjs');
 
 function renderer(hook) {
@@ -205,22 +206,36 @@ async function testMainInstallationEntry() {
   const start = source.indexOf('function flushRendererState(');
   const end = source.indexOf('\nasync function startServer()', start);
   const events = [];
+  const diagnostics = [];
+  const app = new EventEmitter();
+  app.quit = () => { events.push('quit'); app.emit('will-quit'); };
+  let disposals = 0;
   const window = renderer(async () => true);
   window.close = () => events.push('close');
   const context = vm.createContext({
     createExitCoordinator, flushRenderer, module: { exports: {} }, mainWindow: window,
     libraryMigrationPromise: null, pythonServer: { exitCode: null, signalCode: null }, serverURL: 'http://127.0.0.1:1234',
     rendererCrashShutdownPromise: null, shuttingDown: false, allowQuit: false,
-    cancelPreparedUpdateForExit: async () => {}, windowsAllowedToClose: new WeakSet(), process,
-    app: { quit: () => events.push('quit') },
+    cancelPreparedUpdateForExit: async () => {}, windowsAllowedToClose: new WeakSet(), process: { platform: 'darwin' },
+    app, updateController: { dispose: () => { disposals += 1; } },
     dialog: { showMessageBox: async () => ({ response: 1 }), showErrorBox: () => events.push('report') },
-    diagnosticLog() {}, backendMigrationControl: async (action) => { events.push(action); return { migration: { ready: true } }; },
+    diagnosticLog: (...args) => diagnostics.push(args), backendMigrationControl: async (action) => { events.push(action); return { migration: { ready: true } }; },
     stopServer: async (options) => { events.push(['stop', options.allowForce]); }, startServer: async () => context.serverURL,
   });
   vm.runInContext(source.slice(start, end), context);
+  vm.runInContext(source.slice(source.indexOf("app.on('before-quit'")), context);
   const api = context.module.exports;
   api.setCancelPreparedUpdateForExit(async () => events.push('cancel-update'));
-  const result = await api.requestUpdateInstallation({ install: () => { assert.strictEqual(context.allowQuit, true); events.push('installer'); } });
+  const result = await api.requestUpdateInstallation({ install: async () => {
+    assert.strictEqual(context.allowQuit, true);
+    events.push('installer');
+    context.updateController.dispose = () => { disposals += 1; throw new Error('Cannot dispose an active Sparkle installation'); };
+    app.emit('before-quit', { preventDefault: () => assert.fail('Sparkle installation handoff must be allowed to quit') });
+    assert.doesNotThrow(() => app.emit('will-quit'));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.strictEqual(disposals, 0, 'installation handoff must leave the active Sparkle session intact');
+    assert.deepStrictEqual(diagnostics, [], 'native handoff must not log a cleanup failure');
+  } });
   assert.strictEqual(result.ok, true);
   assert.ok(events.includes('installer'));
   assert.ok(!events.includes('quit'), 'main installation entry must leave native installer in charge of relaunch');
@@ -230,18 +245,26 @@ async function testMainInstallationEntry() {
   assert.strictEqual(failure.ok, false);
   assert.strictEqual(context.allowQuit, false, 'failed native callback must close the quit bypass');
 
-  let quitHandler;
-  context.app.on = (_event, handler) => { quitHandler = handler; };
-  const quitStart = source.indexOf("app.on('before-quit'");
-  const quitEnd = source.indexOf("app.on('window-all-closed'", quitStart);
-  vm.runInContext(source.slice(quitStart, quitEnd), context);
+  context.updateController.dispose = () => { disposals += 1; };
   context.pythonServer = null;
   let prevented = false;
-  quitHandler({ preventDefault: () => { prevented = true; } });
+  app.emit('before-quit', { preventDefault: () => { prevented = true; } });
   await new Promise((resolve) => setImmediate(resolve));
   assert.strictEqual(prevented, true, 'dead backend must never bypass renderer save or native updater cancellation');
   assert.ok(events.includes('cancel-update'));
   assert.ok(events.includes('quit'));
+  assert.strictEqual(disposals, 1, 'ordinary quit must dispose the updater');
+
+  for (const asynchronous of [false, true]) {
+    const message = asynchronous ? 'async cleanup failed' : 'sync cleanup failed';
+    context.updateController.dispose = () => {
+      if (asynchronous) return Promise.reject(new Error(message));
+      throw new Error(message);
+    };
+    assert.doesNotThrow(() => app.emit('will-quit'), 'cleanup must not escape the Electron event callback');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepStrictEqual(diagnostics.at(-1), ['updater-dispose-error', message]);
+  }
 }
 
 async function testMainInstallStopNeverForces() {

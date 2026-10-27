@@ -10,336 +10,167 @@ function functionSource(name) {
   assert(start >= 0 && end > start, name);
   return source.slice(start, end + 4);
 }
-class Element {
-  constructor() {
-    this.hidden = false; this.children = []; this.dataset = {}; this.attributes = {}; this.styles = {};
-    this.events = new Map();
-    this.classes = new Set(); this.classList = { contains: (name) => this.classes.has(name) };
-    this.style = { setProperty: (name, value) => { this.styles[name] = value; } };
-    this.offsetWidth = 520; this.offsetHeight = 120;
-  }
-  set innerHTML(value) {
-    this.html = value;
-    if (value.includes('selection-hover-note-label')) this.children = ['selection-hover-note-label', 'selection-hover-note-body'].map((className) => Object.assign(new Element(), { className }));
-  }
-  append(...nodes) { this.children.push(...nodes); }
-  insertBefore(node, before) { const at = this.children.indexOf(before); this.children.splice(at < 0 ? this.children.length : at, 0, node); }
-  querySelector(selector) { return this.children.find((node) => `.${node.className}` === selector) || null; }
-  querySelectorAll() { return []; }
-  replaceChildren(...nodes) { this.children = nodes; }
-  setAttribute(key, value) { this.attributes[key] = value; }
-  removeAttribute(key) { delete this.attributes[key]; }
-  contains(node) { return node === this || this.children.includes(node); }
-  addEventListener(type, callback) { this.events.set(type, callback); }
-  getBoundingClientRect() { return this.rect || { left: 100, top: 200, right: 620, bottom: 320, width: 520, height: 120 }; }
-}
-const popover = new Element(); popover.hidden = true;
-const result = new Element(); popover.append(result);
-const readerView = new Element(); readerView.classes.add('active-view');
-const frame = { clientWidth: 1000, clientHeight: 800, getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 800 }) };
-const wrap = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 1000, height: 800 }) };
-const host = { activeElement: null, createElement: () => new Element() };
-const timers = new Map(); const timerDelays = new Map(); let timerId = 0;
-const rendered = []; const translations = []; let actionsRendered = 0; let nativeText = ''; let enabled = true;
+const timers = new Map();
+const listeners = new Map();
+const opened = [];
+const closed = [];
+let nextTimer = 0;
+let nativeText = '';
+let currentMount = {};
+let currentDoc;
+let note = null;
+const toolbarClasses = new Set();
+const readerClasses = new Set(['active-view']);
+const toolbar = { hidden: true, classList: { contains: (name) => toolbarClasses.has(name) } };
+const reader = { classList: { contains: (name) => readerClasses.has(name) } };
 const doc = {
-  defaultView: { cancelAnimationFrame() {} },
+  documentElement: { dataset: {} },
+  defaultView: { addEventListener: (name, callback) => listeners.set(`window:${name}`, callback) },
   getSelection: () => ({ toString: () => nativeText }),
-  querySelector: () => null, querySelectorAll: () => [],
-  createElement: () => ({ append(value) { this.source = value; }, querySelectorAll: () => [] }),
+  querySelector: () => note,
+  addEventListener: (name, callback) => listeners.set(name, callback),
 };
-let currentDoc = doc;
-const mount = {};
+currentDoc = doc;
+const annotation = { id: 'note', label: '论文贡献', note: 'Saved note.' };
 const context = vm.createContext({
-  state: { activeJob: { job_id: 'fixture' }, health: {}, selection: null },
-  readerSentenceState: { doc, activePairId: '', activePair: null, revision: 0, pendingTranslations: new Map() },
-  readerSentenceHighlightName: 'sentence',
-  document: host, frameDocument: () => currentDoc,
+  state: { selection: null, annotations: [annotation], activeJob: { job_id: 'paper' } },
+  readerMount: currentMount,
+  notePopoverHover: { openTimer: null, closeTimer: null, pendingAnnotationId: '', pendingDoc: null, pinned: false, anchor: null },
+  NOTE_HOVER_OPEN_DELAY: 120,
+  NOTE_HOVER_CLOSE_DELAY: 260,
+  frameDocument: () => currentDoc,
+  readerMountMatches: (mount, document) => mount === currentMount && document === currentDoc,
   window: {
     clearTimeout: (id) => timers.delete(id),
-    setTimeout: (callback, delay) => { timers.set(++timerId, callback); timerDelays.set(timerId, delay); return timerId; },
-    requestAnimationFrame: (callback) => callback(),
+    setTimeout: (callback, delay) => { timers.set(++nextTimer, { callback, delay }); return nextTimer; },
   },
-  $: (selector) => ({ '#selection-popover': popover, '#selection-translation-result': result, '#reader-view': readerView, '#html-preview': frame, '.reader-frame-wrap': wrap })[selector],
+  $: (selector) => selector === '#selection-popover' ? toolbar : selector === '#reader-view' ? reader : null,
   activeChatSourceGeneration: () => 'base',
-  cssEscape: (value) => value,
-  blockForNode: (node) => node.annotationBlock || node,
-  textOffset: (_root, _node, offset) => offset,
-  canonicalBlockText: (root) => root.text,
-  readerHighlightRegistry: () => ({ set() {}, delete() {} }),
-  readerHighlightForRanges: (_doc, ranges) => ranges,
-  renderSelectedContext() {}, renderSelectionActions: () => { actionsRendered += 1; },
-  openTransient: (node) => { node.hidden = false; node.classes.delete('is-closing'); },
-  closeTransient: (node, options) => { node.hidden = true; options.onFinish?.(); },
-  renderMarkdown: (text) => `<p>${text}</p>`, normalizeAnnotationColor: (color) => color,
-  renderTranslationText: (text, formulas, _doc, markers, emphasis) => {
-    const entry = { text, formulas, markers, emphasis }; rendered.push(entry); return entry;
-  },
-  readerHoverTranslationEnabled: () => enabled,
-  readerMount: mount, readerMountMatches: (candidate, candidateDoc) => candidate === mount && candidateDoc === currentDoc,
-  translationProfileId: () => 'profile', translationTargetLanguage: () => 'zh',
-  paragraphSource: (node) => node.source,
-  cachedTranslationForSource: () => null, aiServiceEnabled: () => true,
-  translationSourceIdentity: (value) => JSON.stringify(value),
-  requestTranslation: (text, _block, formulas, options) => new Promise((resolve) => translations.push({ text, formulas, options, resolve })),
-  hashText: (text) => text,
-  NOTE_HOVER_OPEN_DELAY: 120,
+  isAIAnnotation: (item) => item.source === 'ai',
+  hasAnnotationNote: (item) => Boolean(item.note?.trim()),
+  isAnnotationInteraction: (target) => Boolean(target?.closest?.('.annotation-note-popover') || target?.closest?.('.annotation-note-trigger')),
+  showInlineAnnotation: (...args) => { opened.push(args); },
+  closeInlineAnnotation: (document, options) => { closed.push({ document, options }); context.notePopoverHover.pinned = false; context.cancelNoteHoverOpen(); context.cancelNoteHoverClose(); },
+  clearSelectionPopover: () => { toolbar.hidden = true; context.state.selection = null; },
+  requestTranslation: () => assert.fail('Pointer movement must never request translation'),
+  beginSelectionTranslation: () => assert.fail('Pointer movement must never start selection translation'),
 });
-vm.runInContext('let selectionTranslationTimer = null; let selectionTranslationToken = 0; let selectionTranslationKey = ""; let selectionTranslationAbortController = null; let selectionTranslationRecord = null;\n' + [
-  'clearReaderSentenceHover', 'readerSentenceToolbarLocked', 'readerSentenceHoverProtectedAtPoint', 'readerSentenceSelection', 'paintReaderSentenceTooltip', 'positionReaderSentenceTooltip', 'setReaderSentenceHover',
-  'isAIAnnotation', 'hasAnnotationNote', 'hasAnnotationHoverDetails', 'applyAnnotationTheme',
-  'canonicalSelectionOffsets', 'clearSelectionPopover', 'selectionRequestKey', 'activeSelectionActionTarget', 'positionSelectionPopover', 'renderSelectionTranslation',
-].map(functionSource).join('\n') + '\nthis.test = { readerSentenceSelection, setReaderSentenceHover, clearReaderSentenceHover, clearSelectionPopover, activeSelectionActionTarget, positionReaderSentenceTooltip, readerSentenceHoverProtectedAtPoint };', context);
-const t = context.test;
-function pair(id, text, start = 0, end = text.length) {
-  const root = { isConnected: true, text, dataset: { page: '2', blockId: `block-${id}` } };
-  const formula = { token: '__MY_SCHOLAR_MATH_0__', tex: 'x', markup: '<math><mi>x</mi></math>' };
-  return {
-    id, blockId: `block-${id}`, source: root,
-    sourceRange: {
-      startContainer: root, endContainer: root, startOffset: start, endOffset: end,
-      getClientRects: () => [{ left: 40, top: 70, bottom: 90, width: 260, height: 20 }],
-      cloneContents: () => ({ text: text.slice(start, end), formulas: [formula], markers: [{ token: 'marker', tone: 'red' }], emphasis: [{ index: 0, style: 'bold' }] }),
-    },
+vm.runInContext([
+  'hasAnnotationHoverDetails', 'cancelNoteHoverOpen', 'cancelNoteHoverClose', 'scheduleNoteHoverOpen',
+  'scheduleNoteHoverClose', 'installReaderAnnotationHover', 'activeSelectionActionTarget',
+].map(functionSource).join('\n'), context);
+function flushTimers() {
+  const pending = [...timers.values()]; timers.clear();
+  for (const { callback } of pending) callback();
+}
+function targetFor(item, kind = 'mark') {
+  const target = {
+    ownerDocument: doc, isConnected: true, dataset: { annotationId: item.id }, parentElement: null,
+    closest: (selector) => selector === (kind === 'trigger' ? '.annotation-note-trigger' : ':is(mark, mrow)[data-annotation-id]') ? target : null,
   };
+  return target;
 }
-async function runOpenTimer() {
-  const id = context.readerSentenceState.hoverTimer;
-  const callback = timers.get(id); assert(callback, 'A delayed hover must be scheduled'); timers.delete(id);
-  const pending = callback(); await Promise.resolve(); return { pending };
+const pointer = (target = { closest: () => null }, changes = {}) => ({ target, pointerType: 'mouse', buttons: 0, ...changes });
+context.installReaderAnnotationHover(doc);
+assert.equal(listeners.size, 8);
+context.installReaderAnnotationHover(doc);
+assert.equal(listeners.size, 8, 'Reader activation does not duplicate annotation listeners');
+for (const name of ['pointermove', 'pointerup', 'mouseleave', 'window:blur']) {
+  listeners.get(name)(pointer());
+  flushTimers();
 }
-const plain = (value) => JSON.parse(JSON.stringify(value));
-(async () => {
-  const first = pair('first', 'Before. Current sentence. After.', 8, 25);
-  const snapshot = t.readerSentenceSelection(first);
-  assert.equal(snapshot.quote, 'Current sentence.');
-  assert.equal(snapshot.origin, 'sentence-hover');
-  assert.equal(snapshot.block_id, 'block-first');
-  assert.equal(snapshot.start, 8); assert.equal(snapshot.end, 25);
-  assert.equal(snapshot.quote_prefix, 'Before. '); assert.equal(snapshot.quote_suffix, ' After.');
-  assert.equal(snapshot.job_id, 'fixture'); assert.equal(snapshot.render_generation, 'base');
-  assert.equal(nativeText, '', 'Hover never creates a native browser selection');
-  const caption = pair('caption', 'Figure caption.');
-  const figure = { text: 'Figure caption.', dataset: { blockId: 'figure-1', page: '3' } };
-  caption.source.dataset = { translateBlockId: 'caption-1' }; caption.source.annotationBlock = figure;
-  assert.equal(t.readerSentenceSelection(caption).block_id, 'figure-1', 'A caption uses the actual annotation parent instead of its translation ID');
-  delete caption.source.annotationBlock;
-  assert.equal(t.readerSentenceSelection(caption), null, 'A source without an annotation root does not create an invalid action snapshot');
+assert.equal(context.state.selection, null, 'Ordinary sentences cannot create an action selection');
+assert.equal(toolbar.hidden, true, 'Ordinary sentences cannot open the manual selection toolbar');
+assert.equal(opened.length, 0);
+assert.equal(timers.size, 0);
 
-  t.setReaderSentenceHover(first, { id: 'note', label: '原理', note: 'Existing note' });
-  const firstOpen = await runOpenTimer();
-  assert.equal(context.state.selection.quote, 'Current sentence.');
-  assert.equal(popover.hidden, false); assert.equal(actionsRendered, 1);
-  assert.match(popover.querySelector('.selection-hover-note').querySelector('.selection-hover-note-body').html, /Existing note/);
-  assert.equal(t.activeSelectionActionTarget(), context.state.selection);
-  assert.equal(result.dataset.state, 'loading');
+const mark = targetFor(annotation);
+listeners.get('pointermove')(pointer(mark));
+assert.equal(timers.size, 1);
+assert.equal([...timers.values()][0].delay, 120);
+const originalTimer = context.notePopoverHover.openTimer;
+listeners.get('pointermove')(pointer(mark));
+assert.equal(context.notePopoverHover.openTimer, originalTimer, 'Movement inside the same note does not postpone its preview');
+flushTimers();
+assert.equal(opened.length, 1);
+assert.equal(opened[0][0], annotation);
+assert.equal(opened[0][1], mark);
+assert.equal(opened[0][2].pinned, false);
+assert.equal(context.state.selection, null, 'A note preview does not create a selection action target');
+assert.equal(toolbar.hidden, true);
 
-  const second = pair('second', 'Another sentence.');
-  t.setReaderSentenceHover(second);
-  const secondOpen = await runOpenTimer();
-  assert.equal(context.state.selection.quote, 'Another sentence.');
-  assert.equal(popover.querySelector('.selection-hover-note').hidden, true);
-  translations[0].resolve({ text: 'Late first result' }); await firstOpen.pending;
-  assert.equal(result.dataset.state, 'loading', 'A late response cannot replace a new sentence');
-  assert.equal(rendered.length, 0);
-  translations[1].resolve({ text: 'Second result', formulas: translations[1].formulas, markers: translations[1].options.markers, emphasis: translations[1].options.emphasis });
-  await secondOpen.pending;
-  assert.deepEqual(plain(rendered.at(-1)), { text: 'Second result', formulas: translations[1].formulas, markers: translations[1].options.markers, emphasis: translations[1].options.emphasis });
+for (const item of [
+  { id: 'label', label: '原理', note: '' },
+  { id: 'body', label: '', note: 'Personal note.' },
+  { id: 'plain', label: '', note: '   ' },
+  { id: 'ai', label: 'AI label', note: 'AI reason', source: 'ai' },
+]) {
+  context.state.annotations = [item];
+  const before = opened.length;
+  listeners.get('pointermove')(pointer(targetFor(item)));
+  flushTimers();
+  assert.equal(opened.length - before, item.id === 'label' || item.id === 'body' ? 1 : 0, `${item.id}: only manual marks with details open a note preview`);
+}
+const empty = { id: 'empty', label: '', note: '' };
+context.state.annotations = [empty];
+listeners.get('pointermove')(pointer(targetFor(empty, 'trigger')));
+flushTimers();
+assert.equal(opened.at(-1)[0], empty, 'An explicit note trigger can preview an empty manual annotation');
 
-  for (const mutate of [
-    () => { popover.hidden = true; },
-    () => { popover.classes.add('is-closing'); },
-    () => { context.state.selection.job_id = 'other'; },
-    () => { context.state.selection.render_generation = 'other'; },
-    () => { context.readerSentenceState.activePairId = 'other'; },
-    () => { second.source.isConnected = false; },
-    () => { currentDoc = {}; },
-    () => { readerView.classes.delete('active-view'); },
-  ]) {
-    mutate(); assert.equal(t.activeSelectionActionTarget(), null, 'A stale or hidden toolbar cannot receive actions');
-    popover.hidden = false; popover.classes.clear(); context.state.selection.job_id = 'fixture'; context.state.selection.render_generation = 'base';
-    context.readerSentenceState.activePairId = second.id; second.source.isConnected = true; currentDoc = doc; readerView.classes.add('active-view');
-  }
+context.state.annotations = [annotation];
+for (const invalidate of [
+  () => { mark.isConnected = false; },
+  () => { nativeText = 'Selected text'; },
+  () => { context.notePopoverHover.pinned = true; },
+  () => { currentMount = {}; },
+  () => { currentDoc = {}; },
+]) {
+  mark.isConnected = true; nativeText = ''; context.notePopoverHover.pinned = false;
+  currentMount = context.readerMount; currentDoc = doc;
+  const before = opened.length;
+  context.scheduleNoteHoverOpen(mark);
+  invalidate();
+  flushTimers();
+  assert.equal(opened.length, before, 'A stale, pinned or selected reader cannot open a delayed preview');
+}
+currentMount = context.readerMount; currentDoc = doc; nativeText = ''; context.notePopoverHover.pinned = false;
+context.scheduleNoteHoverOpen(mark);
+listeners.get('pointermove')(pointer());
+flushTimers();
+assert.equal(opened.at(-1)[0], empty, 'Leaving a note before its delay cancels the preview');
 
-  const previousAnchor = context.state.selection.anchorRect;
-  context.state.selection.anchorRect = { left: 40, top: 190.453125, bottom: 210.453125 };
-  Object.defineProperty(popover, 'offsetHeight', { configurable: true, get: () => Math.round(Math.min(900, parseFloat(popover.style.maxHeight))) });
-  context.positionSelectionPopover();
-  assert.equal(parseFloat(popover.style.top), 216.453125, 'Fractional available height must not move a long tooltip over its source sentence');
-  assert(parseFloat(popover.style.top) + popover.offsetHeight <= 792, 'The long tooltip remains within the reader viewport');
-  Object.defineProperty(popover, 'offsetHeight', { configurable: true, writable: true, value: 120 });
-  context.state.selection.anchorRect = previousAnchor;
+note = { dataset: { annotationId: annotation.id }, isConnected: true, classList: { contains: () => false } };
+listeners.get('pointermove')(pointer());
+assert.equal([...timers.values()][0].delay, 260);
+const noteTarget = { closest: (selector) => selector === '.annotation-note-popover' ? note : null };
+listeners.get('pointermove')(pointer(noteTarget));
+assert.equal(timers.size, 0, 'Entering the note cancels delayed close');
+context.notePopoverHover.pinned = true;
+listeners.get('scroll')(pointer());
+assert.equal(context.notePopoverHover.pinned, true, 'Scrolling preserves an explicitly pinned note');
+listeners.get('pointerdown')(pointer());
+assert.equal(context.notePopoverHover.pinned, false, 'An outside click releases a pinned note');
+assert.equal(closed.at(-1).options.immediate, true);
 
-  context.readerSentenceState.toolbarPointerInside = true;
-  popover.style.top = '123px'; t.positionReaderSentenceTooltip(doc);
-  assert.equal(popover.style.top, '123px', 'Background layout changes keep the hovered toolbar stationary');
-  t.setReaderSentenceHover(null);
-  assert.equal(timerDelays.get(context.readerSentenceState.closeTimer), 600, 'Leaving the sentence gives the pointer 600 ms to reach the toolbar');
-  const close = timers.get(context.readerSentenceState.closeTimer); timers.delete(context.readerSentenceState.closeTimer); close();
-  assert.equal(popover.hidden, false, 'The pointer can enter and operate the toolbar');
-  context.readerSentenceState.toolbarPointerInside = false;
-  t.setReaderSentenceHover(null); const leave = timers.get(context.readerSentenceState.closeTimer); leave();
-  assert.equal(popover.hidden, true); assert.equal(context.state.selection, null);
-
-  enabled = false;
-  t.setReaderSentenceHover(second); const disabledOpen = await runOpenTimer(); await disabledOpen.pending;
-  assert.equal(popover.hidden, false, 'Actions remain available when automatic hover translation is disabled');
-  assert.equal(result.hidden, true); assert.equal(translations.length, 2);
-  t.clearSelectionPopover();
-  assert.equal(context.state.selection, null, 'Closing a hover toolbar clears its action object even without clearState');
-  assert.equal(context.readerSentenceState.activePairId, '');
-
-  enabled = true; nativeText = 'Real drag selection';
-  t.setReaderSentenceHover(second); const nativeOpen = await runOpenTimer();
-  assert.equal(context.state.selection, null, 'Native selection prevents a hover from claiming the action object');
-  await nativeOpen.pending;
-  assert.equal(translations.length, 2, 'A pending hover does not translate a newly selected sentence');
-  assert.equal(popover.hidden, true);
-  context.state.selection = { origin: 'selection', quote: nativeText };
-  t.clearReaderSentenceHover(doc);
-  assert.equal(context.state.selection.quote, nativeText, 'Hover cleanup preserves a real selection snapshot');
-  nativeText = '';
-
-  const listeners = new Map(); const pointerFrames = new Map(); let pointerFrameId = 0;
-  doc.documentElement = { dataset: {} };
-  doc.addEventListener = (type, callback) => listeners.set(type, callback);
-  doc.defaultView.addEventListener = () => {};
-  doc.defaultView.requestAnimationFrame = (callback) => { pointerFrames.set(++pointerFrameId, callback); return pointerFrameId; };
-  doc.defaultView.cancelAnimationFrame = (id) => pointerFrames.delete(id);
-  Object.assign(context, {
-    notePopoverHover: { pinned: false },
-    cancelNoteHoverOpen() {}, cancelNoteHoverClose() {}, scheduleNoteHoverClose() {}, closeInlineAnnotation() {},
-    isAnnotationInteraction: () => false,
-    readerSentencePairAtPoint: () => second,
-  });
-  vm.runInContext(functionSource('installReaderSentenceHover') + '\nthis.installHover = installReaderSentenceHover;', context);
-  t.clearSelectionPopover({ clearState: true, immediate: true });
-  context.installHover(doc);
-  const popoverEventsStart = source.indexOf("  $('#selection-popover')?.addEventListener('pointerenter'");
-  vm.runInContext(source.slice(popoverEventsStart, source.indexOf('\n  function positionSelectionPopover(', popoverEventsStart)), context);
-  assert.equal(listeners.get('pointerup'), listeners.get('pointermove'), 'Pointer release reuses the same hover scheduling and selection guards');
-  const pointerEvent = { target: { closest: () => null }, pointerType: 'mouse', buttons: 0, clientX: 90, clientY: 80 };
-  listeners.get('pointerdown')({ ...pointerEvent, buttons: 1 });
-  assert.equal(context.readerSentenceState.activePairId, '');
-  listeners.get('pointerup')(pointerEvent);
-  assert.equal(pointerFrames.size, 1, 'Releasing a click without a native selection schedules hover without another pointer move');
-  const [frameId, pointerFrame] = pointerFrames.entries().next().value; pointerFrames.delete(frameId); pointerFrame();
-  assert.equal(context.readerSentenceState.activePairId, second.id);
-  assert(timers.has(context.readerSentenceState.hoverTimer), 'The sentence toolbar is scheduled to reopen after a click');
-  enabled = false;
-  await (await runOpenTimer()).pending;
-  context.readerSentenceState.hoverOrigin = { x: 90, y: 80 };
-  assert.equal(t.readerSentenceHoverProtectedAtPoint(doc, { x: 130, y: 140 }), true, 'The geometric path to the toolbar spans intervening sentences');
-  assert.equal(t.readerSentenceHoverProtectedAtPoint(doc, { x: 800, y: 140 }), false, 'Moving sideways outside the path can choose another sentence');
-  const originalPair = context.readerSentenceState.activePair;
-  context.readerSentencePairAtPoint = () => first;
-  listeners.get('pointermove')({ ...pointerEvent, clientX: 130, clientY: 140 });
-  assert.equal(pointerFrames.size, 0, 'Crossing another sentence on the way to the toolbar does not schedule a replacement');
-  assert.equal(context.readerSentenceState.activePair, originalPair);
-  popover.events.get('pointerenter')();
-  t.setReaderSentenceHover(first);
-  assert.equal(context.readerSentenceState.activePair, originalPair, 'Pointer entry locks the original toolbar action snapshot');
-  popover.events.get('pointerleave')();
-  host.activeElement = popover;
-  popover.events.get('focusin')();
-  t.setReaderSentenceHover(null);
-  timers.get(context.readerSentenceState.closeTimer)();
-  assert.equal(popover.hidden, false, 'Keyboard focus keeps the toolbar open after the pointer leaves');
-  host.activeElement = null;
-  popover.events.get('focusout')({ currentTarget: popover, relatedTarget: null });
-  assert.equal(timerDelays.get(context.readerSentenceState.closeTimer), 600);
-  context.readerSentencePairAtPoint = () => second;
-  listeners.get('pointerdown')({ ...pointerEvent, buttons: 1 });
-  listeners.get('pointerup')({ ...pointerEvent, buttons: 1 });
-  assert.equal(pointerFrames.size, 0, 'An ongoing pointer drag cannot schedule sentence hover');
-  nativeText = 'Real drag selection';
-  const draggedSelection = { origin: 'selection', quote: nativeText }; context.state.selection = draggedSelection;
-  listeners.get('pointerup')(pointerEvent);
-  assert.equal(pointerFrames.size, 0, 'Releasing a native text selection does not schedule sentence hover');
-  assert.equal(context.state.selection, draggedSelection, 'Pointer release never replaces a real selection action object');
-  assert.equal(timers.has(context.readerSentenceState.hoverTimer), false);
-
-  nativeText = '';
-  enabled = true;
-  let notePreviewOpen = true;
-  const notePreview = { dataset: { annotationId: 'note' }, classList: { add() {} }, remove: () => { notePreviewOpen = false; } };
-  doc.querySelector = (selector) => selector === '.annotation-note-popover' && notePreviewOpen ? notePreview : null;
-  context.annotationAnchor = () => null;
-  context.reducedMotionQuery = { matches: false };
-  vm.runInContext(functionSource('closeInlineAnnotation'), context);
-  context.notePopoverHover.pinned = true;
-  context.notePopoverHover.anchor = second.source;
-  listeners.get('pointerdown')({ ...pointerEvent, buttons: 1 });
-  assert.equal(context.notePopoverHover.pinned, false, 'Pressing outside a pinned note releases it before pointerup scheduling');
-  assert.equal(notePreviewOpen, false, 'Outside pointerdown removes the old note immediately so its closing animation cannot block noted-sentence hover');
-  listeners.get('pointerup')(pointerEvent);
-  assert.equal(pointerFrames.size, 1, 'Clicking a sentence after cancelling note editing can schedule its toolbar again');
-  const [noteFrameId, notePointerFrame] = pointerFrames.entries().next().value; pointerFrames.delete(noteFrameId); notePointerFrame();
-  assert.equal(context.readerSentenceState.activePairId, second.id);
-  assert(timers.has(context.readerSentenceState.hoverTimer));
-
-  let annotationMark;
-  doc.querySelector = (selector) => selector.startsWith(':is(mark, mrow)') ? annotationMark : null;
-  context.cssEscape = (value) => value;
-  context.readerSentenceState.pairs = [second];
-  second.source.contains = (node) => node === annotationMark;
-  second.sourceRange.intersectsNode = (node) => node === annotationMark;
-  vm.runInContext(functionSource('scheduleNoteHoverOpen'), context);
-  const hoverAnnotations = [
-    { id: 'principle', source: 'manual', kind: 'underline', label: '论文原理', color: '#ff6666', note: '' },
-    { id: 'contribution', source: 'manual', kind: 'highlight', label: '论文贡献', color: '#2ea8e5', note: '' },
-    { id: 'written-note', source: 'manual', kind: 'underline', label: '', color: '#5fb236', note: 'Existing personal note' },
-    { id: 'plain-mark', source: 'manual', kind: 'highlight', label: '', color: '#ffd400', note: '   ' },
-    { id: 'ai-mark', source: 'ai', kind: 'highlight', label: 'AI label', color: '#a28ae5', note: 'AI reason' },
-  ];
-  context.state.annotations = hoverAnnotations;
-  for (const annotation of hoverAnnotations) {
-    annotationMark = {
-      dataset: { annotationId: annotation.id }, parentElement: null,
-      closest: (selector) => selector === ':is(mark, mrow)[data-annotation-id]' ? annotationMark : null,
-    };
-    const trigger = {
-      ownerDocument: doc, isConnected: true, dataset: { annotationId: annotation.id }, matches: () => false,
-      getBoundingClientRect: () => ({ left: 90, top: 80 }),
-      closest: (selector) => selector === '.annotation-note-trigger' ? trigger : null,
-    };
-    for (const target of [annotationMark, trigger]) {
-      t.clearReaderSentenceHover(doc);
-      listeners.get('pointermove')({ ...pointerEvent, target });
-      if (annotation.source === 'ai' && target === trigger) {
-        assert.equal(context.readerSentenceState.activePairId, '', 'An AI trigger does not become a manual annotation detail preview');
-        continue;
-      }
-      if (pointerFrames.size) {
-        const [annotationFrameId, annotationFrame] = pointerFrames.entries().next().value;
-        pointerFrames.delete(annotationFrameId); annotationFrame();
-      }
-      const hasDetails = annotation.source === 'manual' && Boolean(annotation.label || annotation.note.trim());
-      assert.equal(context.readerSentenceState.annotation, hasDetails ? annotation : null, `${annotation.id} details are selected through ${target === trigger ? 'trigger' : 'mark'} hover`);
-      const annotationOpen = await runOpenTimer(); await annotationOpen.pending;
-      const details = popover.querySelector('.selection-hover-note');
-      assert.equal(details.hidden, !hasDetails);
-      assert.equal(result.hidden, false, 'The translation stays available with or without manual annotation details');
-      if (hasDetails) {
-        assert.equal(details.querySelector('.selection-hover-note-label').textContent, annotation.label || '笔记');
-        assert.equal(details.styles['--annotation-color'], annotation.color, 'Custom labels preserve their original annotation color');
-        const body = details.querySelector('.selection-hover-note-body');
-        assert.equal(body.hidden, !annotation.note.trim());
-        assert.equal(body.html, annotation.note.trim() ? `<p>${annotation.note}</p>` : '', 'Label-only annotations do not render an empty note body');
-      }
-    }
-  }
-
-  for (const escape of [listeners.get('keydown'), popover.events.get('keydown')]) {
-    t.clearReaderSentenceHover(doc);
-    context.state.selection = { origin: 'selection', quote: 'Dragged text' };
-    popover.hidden = false;
-    escape({ key: 'Escape', defaultPrevented: false });
-    assert.equal(popover.hidden, true, 'Escape closes the native selection toolbar in both the reader and toolbar');
-    assert.equal(context.state.selection, null, 'Dismissed selection actions cannot remain active');
-  }
-
-  assert.doesNotMatch(functionSource('paintReaderSentenceTooltip'), /className = 'reader-sentence-tooltip'/u, 'The pure translation hover card has been removed');
-  assert.match(functionSource('showSelection'), /origin: 'selection'/u);
-  assert.match(source, /else if \(!translationLayoutPending \|\| state\.selection\?\.origin !== 'sentence-hover'\) clearSelectionPopover/u);
-  console.log('sentence hover toolbar tests passed');
-})().catch((error) => { console.error(error); process.exitCode = 1; });
+const selection = { origin: 'selection', quote: 'Manually selected.', job_id: 'paper', render_generation: 'base' };
+context.state.selection = selection; toolbar.hidden = false;
+assert.equal(context.activeSelectionActionTarget(), selection);
+for (const invalidate of [
+  () => { toolbar.hidden = true; },
+  () => { toolbarClasses.add('is-closing'); },
+  () => { selection.job_id = 'other'; },
+  () => { selection.render_generation = 'other'; },
+  () => { currentDoc = null; },
+  () => { readerClasses.clear(); },
+]) {
+  invalidate();
+  assert.equal(context.activeSelectionActionTarget(), null, 'Stale or hidden manual actions cannot receive shortcuts');
+  toolbar.hidden = false; toolbarClasses.clear(); selection.job_id = 'paper'; selection.render_generation = 'base';
+  currentDoc = doc; readerClasses.add('active-view');
+}
+listeners.get('keydown')({ key: 'Escape', defaultPrevented: false });
+assert.equal(context.state.selection, null);
+assert.equal(toolbar.hidden, true, 'Escape still dismisses a manual selection toolbar');
+assert.doesNotMatch(source, /readerSentenceState|sentence-hover|installReaderSentenceHover|readerHoverTranslationEnabled/u);
+assert.match(functionSource('showSelection'), /origin: 'selection'/u);
+console.log('manual selection and annotation hover tests passed');

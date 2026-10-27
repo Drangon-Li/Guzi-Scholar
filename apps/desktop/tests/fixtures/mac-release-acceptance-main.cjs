@@ -10,6 +10,7 @@ if (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 
 const root = probe.root;
 const eventFile = path.join(root, 'events.jsonl');
 const record = (type, data = {}) => fs.appendFileSync(eventFile, `${JSON.stringify({ time: new Date().toISOString(), pid: process.pid, version: app.getVersion(), type, ...data })}\n`);
+process.on('uncaughtExceptionMonitor', (error, origin) => record('main-process-error', { origin, error: error.stack || String(error) }));
 let saveFailureResponse = 1;
 let installConfirmationResponse = 0;
 dialog.showMessageBox = async (...args) => {

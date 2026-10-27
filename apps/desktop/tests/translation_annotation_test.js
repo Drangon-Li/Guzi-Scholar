@@ -12,6 +12,7 @@ function functionSource(name) {
   return source.slice(start, end + 4);
 }
 const functions = [
+  'selectionElement', 'isPaperSelectionSurface', 'beginFrameTextSelection', 'renderFrameTextSelection',
   'blockForNode', 'canonicalSelectionOffsets', 'textNodes', 'textOffset', 'canonicalBlockText', 'rangeAtOffsets', 'annotationRange',
   'translationAnnotationGroup', 'translationGroupSelectionOffsets', 'translationGroupAnchor', 'resolveTranslationGroupAnnotation',
   'selectionTextRange', 'showSelection', 'resolveAnnotationAnchor', 'prepareMathAnnotationRange', 'applyMark', 'saveAnnotation',
@@ -22,17 +23,18 @@ const functions = [
     const page = await session.browser.newPage();
     await page.setContent(`<style>.reader-source-sentence { display:inline; }.reader-sentence-translation { display:block; }</style><main class="reader-content"><p data-block-id="fixture" data-page="1" class="reader-sentence-pairs">
       <span class="reader-source-sentence" id="source-one"><strong>ORIGINAL FIRST.</strong></span><span class="reader-source-sentence" id="source-two"><strong> ORIGINAL SECOND.</strong></span><span class="my-scholar-translation reader-sentence-translation" data-for="fixture" data-translation-for="fixture" data-block-id="translation-fixture--s0-6" data-page="1" id="translation-one">Alpha.</span><span class="my-scholar-translation reader-sentence-translation" data-for="fixture" data-translation-for="fixture" data-block-id="translation-fixture--s7-12" data-page="1" id="translation-two">Beta.</span>
-    </p><p data-block-id="other"><span class="my-scholar-translation" data-for="other" data-translation-for="other" data-block-id="translation-other" id="other-translation">Other.</span></p></main><div id="selection-popover" hidden><div class="selection-hover-note"></div></div><div id="selection-translation-result"></div>`);
+    </p><p data-block-id="other"><span class="my-scholar-translation" data-for="other" data-translation-for="other" data-block-id="translation-other" id="other-translation">Other.</span></p></main><div id="selection-popover" hidden></div><div id="selection-translation-result"></div>`);
     await page.evaluate((code) => {
       Object.assign(window, {
         state: { health: {}, activeJob: { job_id: 'fixture-job' }, annotations: [], selection: null },
-        readerContinuations: new WeakMap(), readerMount: {}, readerSentenceState: { pairs: [], annotation: null }, selectionTranslationKey: '',
+        readerContinuations: new WeakMap(), readerMount: {}, selectionTranslationKey: '',
+        readerTextSelectionStates: new WeakMap(),
         frameDocument: () => document, cssEscape: (value) => CSS.escape(value),
         normalizeChatSourceGeneration: (value) => value || 'base', activeChatSourceGeneration: () => 'base',
         isAnnotationInteraction: () => false, selectionRequestKey: (value) => value.quote,
         clearSelectionPopover: () => { window.state.selection = null; document.getElementById('selection-popover').hidden = true; },
         showToast: (message) => { window.lastToast = message; }, setPanelStatus: (message) => { throw new Error(message); },
-        renderSelectedContext() {}, renderSelectionActions() {}, clearReaderSentenceHover() {}, beginSelectionTranslation() {}, positionSelectionPopover() {},
+        renderSelectedContext() {}, renderSelectionActions() {}, beginSelectionTranslation() {}, positionSelectionPopover() {},
         openTransient: (element) => { element.hidden = false; },
         $: (selector) => document.querySelector(selector), MyScholarCore: { sentenceContext: (text) => text },
         isAIAnnotation: () => false, normalizeHighlightCategory: () => 'method', applyAnnotationColor() {}, applyAnnotationTheme() {},
@@ -54,6 +56,7 @@ const functions = [
         else selection.addRange(range);
         window.lastToast = null;
         window.showSelection();
+        window.renderFrameTextSelection(document);
         return window.state.selection;
       };
       window.selectText = (from, start, to, end) => {
@@ -105,9 +108,40 @@ const functions = [
     assert.equal(translationBoundary.block_id, 'translation-fixture');
     for (const [from, to] of [['source-one', 'translation-one'], ['source-two', 'translation-two']]) {
       const mixedSurface = await page.evaluate(([start, end]) => window.selectText(start, 0, end, 3), [from, to]);
-      assert.equal(mixedSurface, null, 'A nonempty source/translation endpoint mix is rejected');
-      assert.equal(await page.locator('#selection-popover').evaluate((node) => node.hidden), true);
+      assert.equal(mixedSurface.surface, 'paper', 'A source-started selection keeps its source surface even when the pointer ends on Chinese');
+      assert(!/Alpha|Beta/u.test(mixedSurface.quote));
+      const painted = await page.evaluate(() => window.readerTextSelectionStates.get(document).ranges.map(range => ({
+        sameText: range.startContainer === range.endContainer,
+        translated: Boolean(range.startContainer.parentElement.closest('.my-scholar-translation')),
+        text: range.toString(),
+      })));
+      assert(painted.length > 0);
+      assert(painted.every(range => range.sameText && !range.translated), 'Selection painting uses source text ranges, never tall line boxes or translated text');
+      assert.equal(await page.evaluate(() => {
+        const existing = window.readerTextSelectionStates.get(document);
+        const overlay = document.getElementById('reader-text-selection-overlay');
+        const path = overlay.firstElementChild.getAttribute('d');
+        const node = document.createElement('p'); node.textContent = 'Unrelated translation arrived.';
+        document.querySelector('.reader-content').append(node);
+        window.renderFrameTextSelection(document);
+        const unchanged = window.readerTextSelectionStates.get(document) === existing
+          && document.getElementById('reader-text-selection-overlay') === overlay && overlay.firstElementChild.getAttribute('d') === path;
+        node.remove();
+        return unchanged;
+      }), true, 'Unchanged selections reuse their ranges and paint path when unrelated paragraphs arrive');
     }
+    const backwardsTranslation = await page.evaluate(() => {
+      const range = document.createRange();
+      range.setStart(document.querySelector('#source-one strong').firstChild, 0);
+      range.setEnd(document.getElementById('translation-two').firstChild, 3);
+      return window.showSelectedRange(range, true);
+    });
+    assert.equal(backwardsTranslation.surface, 'translation');
+    assert.equal(backwardsTranslation.quote, 'Alpha. Bet', 'A reverse selection beginning on translated text excludes source prose');
+    assert.equal(await page.evaluate(() => window.readerTextSelectionStates.get(document).ranges.every(range => range.startContainer.parentElement.closest('.my-scholar-translation'))), true);
+    await page.evaluate(() => { document.getSelection().removeAllRanges(); window.renderFrameTextSelection(document); });
+    assert.equal(await page.evaluate(() => window.readerTextSelectionStates.has(document)), false);
+    assert.equal(await page.locator('#reader-text-selection-overlay').count(), 0);
     const selected = await page.evaluate(() => window.selectText('translation-one', 3, 'translation-two', 2));
     assert.equal(selected.quote, 'ha. Be');
     assert.equal(selected.block_id, 'translation-fixture');

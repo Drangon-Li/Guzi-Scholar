@@ -34,8 +34,6 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
 
 (async () => {
   const session = await launchManagedChromium();
-  let releaseDelayed;
-  const delayed = new Promise((resolve) => { releaseDelayed = resolve; });
   let gateFullTranslation = false;
   const fullTranslationWaiters = new Map();
   try {
@@ -58,9 +56,8 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
       else if (pathname.endsWith('/document.html')) { await route.fulfill({ contentType: 'text/html', body: html }); return; }
       else if (pathname.endsWith('/translate')) {
         const body = request.postDataJSON(); requests.push(body);
-        if (!body.block_id && body.text === texts.delayed) await delayed;
         if (body.block_id && gateFullTranslation) await new Promise((resolve) => fullTranslationWaiters.set(body.block_id, resolve));
-        const text = !body.block_id && body.text === texts.delayed ? '过期句译不应出现在另一句的卡片。' : '这是模拟句译结果。';
+        const text = '这是模拟句译结果。';
         payload = { result: { ...body, text, ...(body.segments ? { segments: body.segments.map(({ id }) => ({ id, text })) } : {}), profile_id: 'hover-fixture' } };
       } else if (pathname.endsWith('/translations')) payload = { translations: [] };
       else if (pathname.endsWith('/annotations')) payload = { annotations: pathname.includes(ids[0]) ? annotations : [] };
@@ -124,11 +121,7 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
       const box = await page.locator('#html-preview').boundingBox();
       await page.mouse.move(box.x + 8, box.y + 8);
       await page.locator('#selection-popover:not([hidden])').waitFor({ state: 'detached' });
-    }
-    async function toggleHover() {
-      await page.locator('#full-translate-scope-button').click();
-      await page.locator('#translation-hover-toggle').click();
-      await page.keyboard.press('Escape');
+      await frame.locator('.annotation-note-popover:not(.is-closing)').waitFor({ state: 'detached' });
     }
     await page.goto(baseURL, { waitUntil: 'networkidle' });
     let frame = await open(ids[0]);
@@ -150,54 +143,34 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     await idle();
 
     await hover(mark('first-note'));
-    await tooltip().filter({ hasText: '第一条：研究方法笔记' }).filter({ hasText: '这是模拟句译结果' }).waitFor();
-    assert.equal(sentences().filter((body) => body.text === annotations[0].quote).length, 1,
-      `A noted range requests its sentence translation exactly once; sentence requests: ${JSON.stringify(sentences().map((body) => body.text))}`);
-    assert(await tooltip().locator('button').count() > 0, 'Sentence hover exposes the complete selection toolbar');
-    assert.equal(await frame.locator('body').evaluate((node) => node.ownerDocument.getSelection().toString()), '', 'Hover actions do not require native text selection');
-    assert.equal(await popup().count(), 0);
+    await popup().filter({ hasText: '第一条：研究方法笔记' }).waitFor();
+    assert(await popup().locator('[data-action="edit"]').isVisible(), 'A note preview exposes annotation actions');
+    assert.equal(await tooltip().count(), 0, 'A note preview must not open the selection toolbar');
+    assert.equal(sentences().length, 0, 'Hovering an annotation must not translate its sentence');
+    assert.equal(await frame.locator('body').evaluate((node) => node.ownerDocument.getSelection().toString()), '', 'Note previews do not require native text selection');
     await hover(mark('second-note'));
-    await tooltip().filter({ hasText: '第二条：独立结果笔记' }).filter({ hasText: '这是模拟句译结果' }).waitFor();
-    assert.equal(await tooltip().count(), 1, 'Moving to an adjacent note must replace the preview');
+    await popup().filter({ hasText: '第二条：独立结果笔记' }).waitFor();
+    assert.equal(await popup().count(), 1, 'Moving to an adjacent note replaces the independent preview');
     await idle();
-    assert.equal(await tooltip().count(), 0, 'Moving to blank space closes a hover preview');
 
     await hover(mark('inner-empty'));
-    await tooltip().filter({ hasText: '外层笔记不应被内部空标记遮蔽' }).filter({ hasText: '这是模拟句译结果' }).waitFor();
-    await idle();
-    await toggleHover();
-    const beforeDisabled = sentences().length;
-    await hover(mark('first-note'));
-    await tooltip().filter({ hasText: '第一条：研究方法笔记' }).waitFor();
-    assert.equal(await tooltip().locator('#selection-translation-result').isVisible(), false);
-    assert.equal(sentences().length, beforeDisabled, 'Disabling sentence translation still previews notes without a request');
+    await popup().filter({ hasText: '外层笔记不应被内部空标记遮蔽' }).waitFor();
     await idle();
     await hover(mark('empty-note'));
     await page.waitForTimeout(600);
-    assert.equal(await tooltip().count(), 1, 'The toolbar remains available when automatic translation is disabled');
-    assert.equal(await tooltip().locator('.selection-hover-note').isVisible(), false);
+    assert.equal(await tooltip().count(), 0, 'An empty-note highlight must not open selection actions');
     assert.equal(await popup().count(), 0, 'Whitespace-only notes must not capture text hover');
-    await toggleHover();
-    await hover(mark('empty-note'));
-    await tooltip().filter({ hasText: '这是模拟句译结果' }).waitFor();
-    assert.equal(sentences().length, beforeDisabled + 1, 'An empty-note highlight still supports sentence translation');
-    assert.equal(await tooltip().evaluate((node) => getComputedStyle(node).animationName), 'none');
+    assert.equal(sentences().length, 0);
     await idle();
 
-    await hover(frame.locator('[data-block-id="first"]'), 'The remaining');
-    await tooltip().filter({ hasText: '这是模拟句译结果' }).waitFor();
-    assert.equal(await popup().count(), 0, 'A note must not capture unmarked text in the same paragraph');
-    assert.equal(await tooltip().locator('.selection-hover-note').isVisible(), false);
-    await idle();
-    await hover(frame.locator('[data-block-id="delayed"]'));
-    await tooltip().filter({ hasText: '正在翻译当前句' }).waitFor();
-    await hover(mark('second-note'));
-    await tooltip().filter({ hasText: '第二条：独立结果笔记' }).waitFor();
-    const response = page.waitForResponse((result) => result.url().endsWith('/translate') && result.request().postDataJSON().text === texts.delayed);
-    releaseDelayed(); await (await response).finished();
-    await page.waitForTimeout(150);
-    assert.equal(await tooltip().count(), 1, 'A late translation must not replace the current card');
-    assert.doesNotMatch(await tooltip().innerText(), /过期句译/u);
+    for (const [block, needle] of [['first', 'The remaining'], ['delayed', '']]) {
+      await hover(frame.locator(`[data-block-id="${block}"]`), needle);
+      await page.waitForTimeout(600);
+      assert.equal(await popup().count(), 0, 'A note must not capture unmarked text');
+      assert.equal(await tooltip().count(), 0, 'Ordinary text hover must not expose selection actions');
+      assert.equal(sentences().length, 0, 'Ordinary text hover must not request translation');
+      await idle();
+    }
 
     await frame.locator('.annotation-note-trigger[data-annotation-id="second-note"]').click();
     await popup().locator('[data-action="edit"]').click();
@@ -230,21 +203,16 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     await idle();
 
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    await hover(mark('empty-note'));
-    await tooltip().filter({ hasText: '这是模拟句译结果' }).waitFor();
-    assert.notEqual(await tooltip().evaluate((node) => getComputedStyle(node).animationName), 'none', 'Sentence preview should animate with ordinary motion preferences');
-    await page.waitForTimeout(200);
-    await idle();
     await hover(mark('first-note'));
-    await tooltip().filter({ hasText: '第一条：研究方法笔记' }).waitFor();
-    assert.notEqual(await tooltip().evaluate((node) => getComputedStyle(node).animationName), 'none');
+    await popup().filter({ hasText: '第一条：研究方法笔记' }).waitFor();
+    assert.notEqual(await popup().evaluate((node) => getComputedStyle(node).animationName), 'none', 'Note previews animate with ordinary motion preferences');
     await page.emulateMedia({ reducedMotion: 'reduce' });
-    assert.equal(await tooltip().evaluate((node) => getComputedStyle(node).animationName), 'none');
+    assert.equal(await popup().evaluate((node) => getComputedStyle(node).animationName), 'none');
     await frame.locator('.annotation-note-trigger[data-annotation-id="first-note"]').click();
     const pinnedLeft = await popup().evaluate((node) => node.getBoundingClientRect().left);
     await frame.locator('body').evaluate((node) => node.ownerDocument.defaultView.scrollBy(0, 40));
     await page.waitForTimeout(150);
-    assert(Math.abs(await popup().evaluate((node) => node.getBoundingClientRect().left) - pinnedLeft) < 2, 'Pinning a text preview must retain its source anchor on scroll');
+    assert(Math.abs(await popup().evaluate((node) => node.getBoundingClientRect().left) - pinnedLeft) < 2, 'A pinned note preview retains its source anchor on scroll');
     await popup().locator('[data-action="close"]').click();
     await idle();
 
@@ -253,24 +221,9 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     await frame.locator('.my-scholar-translation.is-pending').first().waitFor();
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     await hover(mark('first-note'));
-    await tooltip().filter({ hasText: '第一条：研究方法笔记' }).filter({ hasText: '这是模拟句译结果' }).waitFor().catch(async (error) => {
-      console.error(JSON.stringify(await mark('first-note').evaluate((node) => {
-        const doc = node.ownerDocument;
-        return { card: doc.defaultView.parent.document.querySelector('#selection-popover:not([hidden])')?.outerHTML, popover: doc.querySelector('.annotation-note-popover')?.outerHTML, selection: doc.getSelection()?.toString(), mark: node.getBoundingClientRect().toJSON(), highlight: [...(doc.defaultView.CSS.highlights.get('my-scholar-sentence-hover') || [])].map((range) => range.toString()), scroll: doc.defaultView.scrollY };
-      })));
-      await page.screenshot({ path: '/tmp/guzi-annotation-hover-full-run-failure.png' });
-      throw error;
-    });
+    await popup().filter({ hasText: '第一条：研究方法笔记' }).waitFor();
     await mark('first-note').evaluate((node) => {
-      const doc = node.ownerDocument;
-      doc.defaultView.hoverReferences = { annotationId: node.dataset.annotationId, quote: node.textContent, card: doc.defaultView.parent.document.querySelector('#selection-popover:not([hidden])'), sentence: [...doc.defaultView.CSS.highlights.get('my-scholar-sentence-hover')][0].toString() };
-      doc.defaultView.hoverLayoutScrolls = 0;
-      doc.defaultView.hoverLayoutObserver = new MutationObserver((records) => {
-        if (!records.some((record) => [...record.addedNodes].some((item) => item.nodeType === 1 && item.matches('.my-scholar-translation:not(.is-pending):not(.is-error)')))) return;
-        doc.defaultView.hoverLayoutScrolls += 1;
-        doc.dispatchEvent(new Event('scroll'));
-      });
-      doc.defaultView.hoverLayoutObserver.observe(doc.querySelector('.reader-content'), { childList: true, subtree: true });
+      node.ownerDocument.defaultView.annotationReferences = { annotationId: node.dataset.annotationId, quote: node.textContent };
     });
     const [translatedBlock, releaseBlock] = fullTranslationWaiters.entries().next().value;
     fullTranslationWaiters.delete(translatedBlock);
@@ -280,20 +233,19 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     assert.equal(await completedTranslations.count(), requests.find((body) => body.block_id === translatedBlock).segments.length, 'Every requested sentence renders a translation');
     assert((await completedTranslations.allTextContents()).every((text) => text.includes('这是模拟句译结果')), 'Every displayed sentence uses the translated fixture response');
     assert.deepEqual(await mark('first-note').evaluate((node) => {
-      const doc = node.ownerDocument; const saved = doc.defaultView.hoverReferences;
-      return { annotationId: saved.annotationId === node.dataset.annotationId, quote: saved.quote === node.textContent, card: saved.card === doc.defaultView.parent.document.querySelector('#selection-popover:not([hidden])'), sentence: saved.sentence === [...(doc.defaultView.CSS.highlights.get('my-scholar-sentence-hover') || [])][0]?.toString() };
-    }), { annotationId: true, quote: true, card: true, sentence: true }, 'An arriving full-document paragraph preserves the card, source annotation and highlighted sentence');
-    assert(await frame.locator('body').evaluate((node) => node.ownerDocument.defaultView.hoverLayoutScrolls > 0), 'Translation layout emitted the simulated scroll event');
-    await frame.locator('body').evaluate(async (node) => {
-      node.ownerDocument.defaultView.hoverLayoutObserver.disconnect();
-      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    });
-    await frame.locator('body').evaluate((node) => node.ownerDocument.dispatchEvent(new Event('scroll')));
-    await tooltip().waitFor({ state: 'detached' });
+      const saved = node.ownerDocument.defaultView.annotationReferences;
+      return { annotationId: saved.annotationId === node.dataset.annotationId, quote: saved.quote === node.textContent };
+    }), { annotationId: true, quote: true }, 'An arriving full-document paragraph preserves the source annotation and quote');
+    await idle();
     await hover(mark('first-note'));
-    await tooltip().filter({ hasText: '第一条：研究方法笔记' }).waitFor();
+    await popup().filter({ hasText: '第一条：研究方法笔记' }).waitFor();
+    assert.equal(await tooltip().count(), 0, 'Full translation does not turn note hover into selection actions');
+    await frame.locator('body').evaluate((node) => node.ownerDocument.dispatchEvent(new Event('scroll')));
+    await popup().waitFor({ state: 'detached' });
+    await hover(mark('first-note'));
+    await popup().filter({ hasText: '第一条：研究方法笔记' }).waitFor();
     await page.mouse.wheel(0, 40);
-    await tooltip().waitFor({ state: 'detached' });
+    await popup().waitFor({ state: 'detached' });
     gateFullTranslation = false;
     for (const release of fullTranslationWaiters.values()) release();
     fullTranslationWaiters.clear();
@@ -312,7 +264,6 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     assert.deepEqual(unexpected, []);
     console.log('annotation hover smoke passed');
   } finally {
-    releaseDelayed();
     for (const release of fullTranslationWaiters.values()) release();
     await session.close();
   }

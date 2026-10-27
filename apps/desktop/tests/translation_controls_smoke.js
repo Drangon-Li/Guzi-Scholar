@@ -13,11 +13,22 @@ const texts = {
   full: 'This remaining paragraph is reserved for the explicitly requested full translation run.',
   list: 'The first list item describes the method. The second item describes the evaluation.',
   caption: 'Figure 1. The synthetic evaluation diagram.',
+  legacy: 'The first legacy sentence describes the method. The second legacy sentence describes the results.',
+  archived: 'The first archived sentence describes the model. The second archived sentence describes the study.',
 };
 for (let index = 0; index < 18; index += 1) texts[`position-${index}`] = `This is the source paragraph at position ${index} in a tall synthetic article used to check reading location restoration.`;
 const jobs = ids.map((id, index) => ({ job_id: id, source_filename: `Display fixture ${index + 1}.pdf`, status: 'completed', created_at: '2026-10-22T00:00:00Z', links: { html: `/api/jobs/${id}/document.html` }, manifest: { counts: id === continuationId ? { pages: 3, images: 7 } : { pages: 1, images: 1 } } }));
 const library = { folders: [], properties: [], views: [], display: { columns: [{ id: 'name', visible: true, order: 0 }] }, items: Object.fromEntries(ids.map((id) => [id, { folder_ids: [], values: { reading_status: '未读', importance: 0 }, metadata: { fields: {}, status: 'complete' } }])) };
 const records = new Map(ids.map((id) => [id, ['title', 'ready', 'list', 'caption', ...Array.from({ length: 18 }, (_, index) => `position-${index}`)].map((block) => ({ block_id: block, source_text: texts[block], text: `缓存译文：${block}`, profile_id: profile, target_language: '中文' }))]));
+const archivedSentences = texts.archived.match(/[^.]+\./gu).map((text) => text.trim());
+const archivedSegments = archivedSentences.map((text, index) => {
+  const start = texts.archived.indexOf(text);
+  return { id: `s${start}-${start + text.length}`, text: `历史模型第${index + 1}句译文。` };
+});
+for (const id of ids) records.get(id).push(
+  { block_id: 'legacy', source_text: texts.legacy, text: '旧模型整段译文：第一句和第二句一起显示。', profile_id: 'historical-model', target_language: '中文' },
+  { block_id: 'archived', source_text: texts.archived, text: archivedSegments.map((item) => item.text).join(' '), segments: archivedSegments, alignment_version: 'sentence-v1', profile_id: 'historical-model', target_language: '中文' },
+);
 const documentHTML = `<!doctype html><html><head><style>
 body { margin:0; } .reader-content { max-width:720px; margin:auto; }
 .my-scholar-translation[data-for^="position-"] { min-height:160px; }
@@ -27,6 +38,7 @@ p[data-block-id^="position-"] { min-height:120px; }
 <p class="paper-metadata" data-translation-excluded="metadata" data-block-id="author">Author Name, Synthetic University</p>
 <h2 data-block-id="section">Methods</h2><p data-block-id="ready">${texts.ready}</p>
 <p data-block-id="missing">${texts.missing}</p><p data-block-id="full">${texts.full}</p>
+<p data-block-id="legacy">${texts.legacy}</p><p data-block-id="archived">${texts.archived}</p>
 <ul data-block-id="list"><li>The first list item describes the method.</li><li>The second item describes the evaluation.</li></ul>
 <div class="pdf-equation" data-block-id="equation">x² + y² = z²</div>
 <figure class="pdf-figure" data-block-id="figure"><img alt="Synthetic diagram" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='50'%3E%3Crect width='80' height='50' fill='tan'/%3E%3C/svg%3E"><figcaption data-translate-block-id="caption">${texts.caption}</figcaption></figure>
@@ -64,14 +76,18 @@ ${continuationParagraph('separate', 3, [.1, .37, .9, .42], 'another paragraph mu
 <h2>New section boundary</h2>${continuationParagraph('before-heading', 3, [.1, .46, .9, .51], 'This fragment must not cross')}
 ${continuationFigure('heading-figure', 3, [.1, .53, .9, .61])}<h2>A new section</h2>
 ${continuationParagraph('after-heading', 3, [.1, .63, .9, .68], 'the heading between these independent paragraphs.')}
-<h2>References</h2>${continuationParagraph('reference-start', 3, [.1, .7, .9, .74], 'reference content must stay')}
+<h2>Appendix A</h2><p data-block-id="early-appendix">An appendix before the reference heading remains part of the body translation.</p>
+<h2>References to previous work</h2><p data-block-id="reference-words">References to previous work explain why this paragraph still belongs to the body.</p>
+<h6> 9. rEfErEnCeS </h6>${continuationParagraph('reference-start', 3, [.1, .7, .9, .74], 'reference content must stay')}
 ${continuationFigure('reference-figure', 3, [.1, .76, .9, .84])}
-${continuationParagraph('reference-end', 3, [.1, .86, .9, .9], 'separate even if it resembles a continuation.')}</section></main></body></html>`;
+${continuationParagraph('reference-end', 3, [.1, .86, .9, .9], 'separate even if it resembles a continuation.')}
+<h2>Appendix B</h2><p data-block-id="late-appendix">An appendix after the reference heading stays outside the body translation.</p></section></main></body></html>`;
 records.get(continuationId).push({ block_id: 'same-start', source_text: continuationTexts['same-start'], text: '旧的半段译文', profile_id: profile, target_language: '中文' });
 (async () => {
   const session = await launchManagedChromium();
   let releaseFailure;
   let releaseSentence;
+  let fullSelectionSeen;
   try {
     const page = await session.browser.newPage({ viewport: { width: 1450, height: 940 }, reducedMotion: 'reduce' });
     page.setDefaultTimeout(15000);
@@ -79,6 +95,7 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
     let failMissing = true;
     const delayedFailure = new Promise((resolve) => { releaseFailure = resolve; });
     const delayedSentence = new Promise((resolve) => { releaseSentence = resolve; });
+    const fullSelectionRequest = new Promise((resolve) => { fullSelectionSeen = resolve; });
     page.on('pageerror', (error) => errors.push(error.message));
     await page.route('**/api/**', async (route) => {
       const request = route.request(); const pathname = new URL(request.url()).pathname;
@@ -97,8 +114,14 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
       else if (pathname.endsWith('/translate')) {
         const body = request.postDataJSON(); requests.push(body);
         if (!body.block_id) {
+          if (body.text === texts.full) fullSelectionSeen();
+          if (body.text.includes('legacy sentence')) {
+            const result = { ...body, text: `独立句译文：${body.text}`, profile_id: profile };
+            records.get(jobId).push(result);
+            await route.fulfill({ json: { result } }); return;
+          }
           await delayedSentence;
-          await route.fulfill({ json: { result: { ...body, text: '关闭开关后返回的模拟句子译文。', profile_id: profile } } }); return;
+          await route.fulfill({ json: { result: { ...body, text: '清除选区后返回的模拟句子译文。', profile_id: profile } } }); return;
         }
         if (body.block_id === 'missing' && failMissing) {
           failMissing = false; await delayedFailure;
@@ -121,26 +144,61 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
     });
     async function menu() { await page.locator('#full-translate-scope-button').click(); await page.locator('#translation-scope-menu').waitFor({ state: 'visible' }); }
     async function mode(value) { await menu(); await page.locator(`[data-translation-display="${value}"]`).click(); }
-    async function toggleHover() {
-      await menu(); await page.locator('#translation-hover-toggle').click(); await page.keyboard.press('Escape');
-    }
-    async function hoverSource(blockId = 'full') {
+    async function hoverSource(blockId = 'full', phrase = '') {
       const paragraph = frame.locator(`p[data-block-id="${blockId}"]`);
       await paragraph.scrollIntoViewIfNeeded();
-      const box = await paragraph.evaluate((node) => {
+      const box = await paragraph.evaluate((node, match) => {
         const walker = node.ownerDocument.createTreeWalker(node, NodeFilter.SHOW_TEXT);
         let text;
         while ((text = walker.nextNode())) {
           if (!text.textContent.trim() || text.parentElement.closest('button')) continue;
-          const range = node.ownerDocument.createRange(); range.setStart(text, 0); range.setEnd(text, Math.min(8, text.length));
+          const start = match ? text.textContent.indexOf(match) : 0;
+          if (start < 0) continue;
+          const range = node.ownerDocument.createRange(); range.setStart(text, start); range.setEnd(text, Math.min(start + 8, text.length));
           const rect = [...range.getClientRects()].find((item) => item.width > 0 && item.height > 0);
           if (rect) return { x: rect.left + Math.min(4, rect.width / 2), y: rect.top + rect.height / 2 };
         }
         return null;
-      });
+      }, phrase);
       assert.ok(box, 'The real mouse hover fixture must have visible source text');
       const iframe = await page.locator('#html-preview').boundingBox();
       await page.mouse.move(iframe.x + box.x, iframe.y + box.y);
+    }
+    async function selectSource(blockId, quote = texts[blockId]) {
+      const paragraph = frame.locator(`p[data-block-id="${blockId}"]`);
+      await paragraph.scrollIntoViewIfNeeded();
+      await paragraph.evaluate((node, quote) => {
+        const doc = node.ownerDocument;
+        const walker = doc.createTreeWalker(node, NodeFilter.SHOW_TEXT, {
+          acceptNode: (text) => text.parentElement.closest('.my-scholar-translation,button,.annotation-note-trigger') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+        });
+        const nodes = [];
+        let text;
+        while ((text = walker.nextNode())) nodes.push(text);
+        const canonical = nodes.map((item) => item.textContent).join('');
+        const start = canonical.indexOf(quote);
+        if (start < 0) throw new Error(`Missing source quote: ${quote}`);
+        const point = (offset) => {
+          for (const item of nodes) {
+            if (offset <= item.length) return [item, offset];
+            offset -= item.length;
+          }
+          throw new Error('Selection offset exceeds source text');
+        };
+        const range = doc.createRange();
+        range.setStart(...point(start)); range.setEnd(...point(start + quote.length));
+        doc.getSelection().removeAllRanges(); doc.getSelection().addRange(range);
+        doc.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      }, quote);
+      await tooltip().waitFor({ state: 'visible' });
+    }
+    async function clearSelection() {
+      await frame.locator('body').evaluate((node) => {
+        const doc = node.ownerDocument; doc.getSelection().removeAllRanges();
+        doc.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      });
+      await page.keyboard.press('Escape');
+      await tooltip().waitFor({ state: 'detached' });
     }
     const sentenceRequests = () => requests.filter((request) => !request.block_id);
     const blockRequests = () => requests.filter((request) => request.block_id);
@@ -157,30 +215,53 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
     await source().waitFor({ state: 'visible' }); await ready().waitFor({ state: 'visible' });
     assert.equal(requests.length, 0, 'Cache replay must not send requests');
     const tooltip = () => page.locator('#selection-popover:not([hidden]):not(.is-closing)');
-    await hoverSource('ready');
-    await tooltip().filter({ hasText: '缓存译文：ready' }).waitFor({ state: 'visible' });
-    assert.equal(sentenceRequests().length, 0, 'Hovering a cached paragraph must reuse its displayed translation');
-    await page.mouse.move(0, 0);
-    await tooltip().waitFor({ state: 'detached' });
-    await hoverSource();
-    await tooltip().filter({ hasText: '正在翻译当前句' }).waitFor({ state: 'visible' });
-    assert.equal(sentenceRequests().length, 1);
-    await toggleHover();
-    await tooltip().waitFor({ state: 'detached' });
-    const sentenceResponse = page.waitForResponse((response) => response.url().endsWith('/translate') && !response.request().postDataJSON().block_id);
-    releaseSentence(); await (await sentenceResponse).finished();
-    await hoverSource();
-    await page.waitForTimeout(650);
-    assert.equal(sentenceRequests().length, 1, 'Disabled hover must not request a sentence');
-    assert.equal(await tooltip().count(), 1, 'Disabling automatic translation keeps the sentence toolbar available');
-    assert(await tooltip().locator('.selection-actions button').count() > 0, 'The sentence toolbar retains its actions');
-    assert.equal(await tooltip().locator('#selection-translation-result').isVisible(), false, 'A late sentence response must not restore translation after disabling hover');
-    await toggleHover();
-    await hoverSource();
-    await tooltip().filter({ hasText: '关闭开关后返回的模拟句子译文' }).waitFor({ state: 'visible' });
-    await toggleHover();
-    await tooltip().waitFor({ state: 'detached' });
-    assert.equal(sentenceRequests().length, 1, 'The exact sentence cache must survive toggling hover');
+    for (const blockId of ['ready', 'archived', 'legacy', 'full']) {
+      await hoverSource(blockId);
+      await page.waitForTimeout(650);
+      assert.equal(await tooltip().count(), 0, 'Ordinary source hover must not open selection actions');
+      assert.equal(sentenceRequests().length, 0, 'Ordinary source hover must not request translation');
+    }
+    await selectSource('archived', archivedSentences[1]);
+    await tooltip().filter({ hasText: '历史模型第2句译文。' }).waitFor({ state: 'visible' });
+    assert.equal(await tooltip().innerText().then((text) => text.includes('历史模型第1句译文。')), false, 'Selecting an aligned sentence shows only its own historical translation');
+    assert.equal(sentenceRequests().length, 0, 'Aligned historical model sentences require no request');
+    await clearSelection();
+    const legacySentences = texts.legacy.match(/[^.]+\./gu).map((text) => text.trim());
+    await selectSource('legacy', legacySentences[0]);
+    await tooltip().filter({ hasText: `独立句译文：${legacySentences[0]}` }).waitFor({ state: 'visible' });
+    assert.equal(sentenceRequests().length, 1, 'A manual selection requests its exact text once');
+    assert.equal(sentenceRequests()[0].text, legacySentences[0]);
+    assert.equal(await tooltip().innerText().then((text) => text.includes('旧模型整段译文')), false);
+    await clearSelection();
+    await selectSource('legacy', legacySentences[0]);
+    await tooltip().filter({ hasText: '独立句译文' }).waitFor({ state: 'visible' });
+    assert.equal(sentenceRequests().length, 1, 'Repeating a manual selection reuses its exact translation');
+    await clearSelection();
+    await selectSource('legacy', legacySentences[1]);
+    await tooltip().filter({ hasText: `独立句译文：${legacySentences[1]}` }).waitFor({ state: 'visible' });
+    assert.equal(sentenceRequests().length, 2, 'A second selected sentence translates independently');
+    assert.equal(await frame.locator('.my-scholar-translation[data-for="legacy"] .translation-text').textContent(), '旧模型整段译文：第一句和第二句一起显示。', 'Manual sentence translation preserves the old paragraph translation');
+    await clearSelection();
+    await selectSource('full');
+    await tooltip().filter({ hasText: '正在翻译选中文本' }).waitFor({ state: 'visible' });
+    await fullSelectionRequest;
+    assert.equal(sentenceRequests().length, 3);
+    await clearSelection();
+    await selectSource('archived', archivedSentences[1]);
+    await tooltip().filter({ hasText: '历史模型第2句译文。' }).waitFor({ state: 'visible' });
+    releaseSentence();
+    await page.waitForTimeout(150);
+    assert.doesNotMatch(await tooltip().innerText(), /清除选区后返回/u, 'A late response must not replace a different manual selection');
+    assert.match(await tooltip().innerText(), /历史模型第2句译文/u);
+    await clearSelection();
+    await selectSource('full');
+    await tooltip().filter({ hasText: '清除选区后返回的模拟句子译文' }).waitFor({ state: 'visible' });
+    assert.equal(sentenceRequests().length, 4, 'An aborted manual selection can be requested again');
+    await clearSelection();
+    await selectSource('full');
+    await tooltip().filter({ hasText: '清除选区后返回的模拟句子译文' }).waitFor({ state: 'visible' });
+    assert.equal(sentenceRequests().length, 4, 'A completed exact selection translation remains cached');
+    await clearSelection();
     await mode('original');
     assert.equal(await ready().isVisible(), false); assert.equal(await source().isVisible(), true);
     await mode('translation');
@@ -199,11 +280,10 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
     await page.waitForFunction(() => document.querySelector('#reader-search-count').textContent === '无匹配');
     await page.keyboard.press('Escape');
     await menu();
-    assert.equal(await page.locator('#translation-hover-toggle').getAttribute('aria-checked'), 'false');
     await page.keyboard.press('Escape');
     frame = await open(ids[1]);
     assert.equal(await source().isVisible(), false);
-    await menu(); assert.equal(await page.locator('[data-translation-display="translation"]').getAttribute('aria-checked'), 'true'); assert.equal(await page.locator('#translation-hover-toggle').getAttribute('aria-checked'), 'false');
+    await menu(); assert.equal(await page.locator('[data-translation-display="translation"]').getAttribute('aria-checked'), 'true');
     await page.keyboard.press('Escape');
     const locationSelector = '.my-scholar-translation[data-for="position-12"]';
     await frame.locator(locationSelector).evaluate((node) => {
@@ -226,7 +306,7 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
       return target && !doc.documentElement.classList.contains('my-scholar-reader-restoring') && Math.abs(target.getBoundingClientRect().top + 10) < 60;
     }, locationSelector);
     assert.equal(await frame.locator('p[data-block-id="position-12"]').isVisible(), false, 'Restoration must locate the visible translation, while preserving the hidden source');
-    assert.deepEqual(await page.evaluate((storageKey) => JSON.parse(localStorage.getItem(storageKey)), key), { hoverEnabled: false, displayMode: 'translation' });
+    assert.deepEqual(await page.evaluate((storageKey) => JSON.parse(localStorage.getItem(storageKey)), key), { displayMode: 'translation' });
     await frame.locator('[data-translation-placeholder-for="missing"] button').click();
     await frame.locator('.my-scholar-translation.is-pending[data-for="missing"]').waitFor({ state: 'visible' });
     assert.equal(await frame.locator('p[data-block-id="missing"]').isVisible(), false);
@@ -236,7 +316,9 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
     await frame.locator('.my-scholar-translation[data-for="missing"]:not(.is-pending):not(.is-error)').waitFor({ state: 'visible' });
     assert.equal(blockRequests().length, 2); assert.ok(blockRequests()[1].refresh, 'Failure retry must bypass the failed attempt');
     const fullRunStart = requests.length;
-    await page.locator('#full-translate-button').click();
+    await menu();
+    assert.match(await page.locator('#translation-scope-body-count').innerText(), /未检测到 Reference \/ References 标题，与全文相同/u);
+    await page.locator('[data-translation-scope="body"]').click();
     await frame.locator('.my-scholar-translation[data-for="full"]:not(.is-pending):not(.is-error)').waitFor({ state: 'visible' });
     await page.waitForFunction(() => !document.querySelector('#full-translate-button').disabled && document.querySelector('#translation-progress')?.hidden);
     const fullRunRequests = requests.slice(fullRunStart);
@@ -258,10 +340,10 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
     assert.equal(await frame.locator('[data-annotation-id="saved-continuation"]').first().textContent(), 'translated paragraph', 'Saved offsets in a removed source fragment must still resolve');
     assert.equal(await frame.locator('.my-scholar-translation[data-for="same-start"]').count(), 0, 'A cached half-paragraph must not be replayed as the complete translation');
     for (const id of ['complete', 'separate', 'before-heading', 'after-heading', 'reference-start', 'reference-end']) assert.equal(await frame.locator(`p[data-block-id="${id}"]`).count(), 1, 'Independent paragraphs and section boundaries must remain separate');
-    const expectedContinuationIds = ['title', 'ready', 'same-start', 'page-start', 'trailing-start', 'complete', 'separate', 'after-heading', 'reference-end'];
+    const expectedContinuationIds = ['title', 'ready', 'same-start', 'page-start', 'trailing-start', 'complete', 'separate', 'after-heading', 'early-appendix', 'reference-words', 'reference-end', 'late-appendix'];
     expectedContinuationIds.push(...await frame.locator('figure.pdf-figure figcaption[data-translate-block-id]').evaluateAll((captions) => captions.map((caption) => caption.dataset.translateBlockId)));
     const requestStart = requests.length;
-    await page.locator('#full-translate-button').click();
+    await menu(); await page.locator('[data-translation-scope="all"]').click();
     for (const id of ['same-start', 'page-start', 'trailing-start']) await frame.locator(`.my-scholar-translation[data-for="${id}"]:not(.is-pending):not(.is-error)`).waitFor({ state: 'visible' });
     await page.waitForFunction(() => !document.querySelector('#full-translate-button').disabled && document.querySelector('#translation-progress')?.hidden);
     const continuationRequests = requests.slice(requestStart);
@@ -292,6 +374,15 @@ records.get(continuationId).push({ block_id: 'same-start', source_text: continua
     assert.equal(await frame.locator('.my-scholar-translation[data-for="same-start"] .translation-text').textContent(), `连贯译文：${joined}`);
     assert.equal(await frame.locator('[data-annotation-id="saved-continuation"]').first().textContent(), 'translated paragraph');
     assert.equal(requests.length, requestsBeforeReload, 'Reopening the reader must reuse the complete cached translation');
+    await mode('bilingual');
+    await menu();
+    assert.match(await page.locator('#translation-scope-body-count').innerText(), /参考文献标题之前/u);
+    const bodyStart = requests.length;
+    await page.locator('[data-translation-scope="body"]').click();
+    await page.waitForFunction(() => !document.querySelector('#full-translate-button').disabled && document.querySelector('#translation-progress')?.hidden);
+    const referenceCaptionId = await frame.locator('figure[data-block-id="reference-figure"] figcaption').getAttribute('data-translate-block-id');
+    const expectedBodyIds = expectedContinuationIds.filter((id) => !['reference-end', 'late-appendix', referenceCaptionId].includes(id));
+    assert.deepEqual(requests.slice(bodyStart).map((request) => request.block_id).sort(), expectedBodyIds.sort(), 'Body includes pre-reference appendices and reference words, then permanently excludes the reference heading and all later content');
     assert.deepEqual(errors, []); assert.deepEqual(unexpected, []);
     console.log('translation controls smoke passed (synthetic translations only)');
   } finally { releaseFailure?.(); releaseSentence?.(); await session.close(); }

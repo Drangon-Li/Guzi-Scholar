@@ -20,7 +20,7 @@ function functionSource(name) {
     await page.evaluate((functions) => {
       window.state = { translationPreferences: { displayMode: 'bilingual' } };
       window.eval(functions);
-      window.copyRange = (startId, startOffset, endId, endOffset, mode) => {
+      window.copyRange = (startId, startOffset, endId, endOffset, mode, backwards = false) => {
         document.documentElement.dataset.translationDisplay = mode;
         const start = document.getElementById(startId).firstChild;
         const end = document.getElementById(endId).firstChild;
@@ -28,7 +28,9 @@ function functionSource(name) {
         range.setStart(start, startOffset);
         range.setEnd(end, endOffset);
         const selection = document.getSelection();
-        selection.removeAllRanges(); selection.addRange(range);
+        selection.removeAllRanges();
+        if (backwards) selection.setBaseAndExtent(end, endOffset, start, startOffset);
+        else selection.addRange(range);
         let text;
         let prevented = false;
         window.guardFrameSelection({ type: 'copy', currentTarget: document, target: start.parentElement,
@@ -45,6 +47,9 @@ function functionSource(name) {
     assert.deepEqual(await copy('source-one', 2, 'source-two', 8, 'original'), { text: 'rst sentence. Second ', prevented: true });
     assert.deepEqual(await copy('source-one', 2, 'source-two', 8, 'bilingual'), { text: 'rst sentence. Second ', prevented: true }, 'A bilingual copy beginning on source prose stays on the source surface');
     assert.deepEqual(await copy('translation-one', 1, 'translation-two', 3, 'bilingual'), { text: '一句。第二句', prevented: true }, 'A bilingual copy beginning on translated prose stays on the translation surface');
+    assert.deepEqual(await copy('source-one', 2, 'source-two', 8, 'bilingual', true), { text: 'rst sentence. Second ', prevented: true }, 'Backward source selection remains English-only');
+    assert.deepEqual(await copy('source-one', 2, 'translation-two', 3, 'bilingual'), { text: 'rst sentence. Second sentence.', prevented: true }, 'A mixed endpoint does not add translated text to a source-started copy');
+    assert.deepEqual(await copy('source-one', 2, 'translation-two', 3, 'bilingual', true), { text: '第一句。第二句', prevented: true }, 'Backward translated selection follows the user anchor rather than DOM range order');
     assert.deepEqual(await copy('translation-one', 1, 'translation-one', 3, 'translation'), { text: '一句', prevented: false }, 'A local text selection keeps native copying and is not expanded');
     assert.equal(await page.locator('#paired').innerHTML(), pairedBefore, 'Copy filtering never mutates the reader DOM');
     await page.locator('#paired').evaluate((node) => {

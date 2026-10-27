@@ -52,38 +52,41 @@ function fileRecord(directory, name) {
   return { name, size: bytes.length, sha256: sha256(bytes), sha512: sha512(bytes) };
 }
 
-function prepare(directory, context, signature, { publishedAt = new Date().toISOString(), notes = '' } = {}) {
+function prepare(directory, context, signature, { publishedAt = new Date().toISOString(), notes = '', includeWindows = false } = {}) {
   assert(context.repository === REPOSITORY && /^[a-f0-9]{40}$/u.test(context.commit), 'Invalid build context');
   assert(identity(context.tag, context.version) === context.channel, 'Channel mismatch');
   assert(!fs.existsSync(path.join(directory, 'SHA256SUMS')), 'Refusing to overwrite an existing release bundle');
   const names = fs.readdirSync(directory).sort();
   const mac = names.filter((name) => name === `Guzi-Scholar-${context.version}-arm64-${context.channel}.zip`);
   const win = names.filter((name) => name === `Guzi-Scholar-${context.version}-windows-x64-setup.exe`);
-  assert(mac.length === 1 && win.length === 1, 'Exactly one macOS updater ZIP and Windows NSIS installer required');
+  assert(mac.length === 1, 'Exactly one macOS updater ZIP required');
+  assert(includeWindows ? win.length === 1 : !names.some((name) => /windows|\.exe$|\.blockmap$|^(latest|beta)\.yml$/u.test(name)), 'Windows assets require explicit includeWindows');
   assert(names.some((name) => name.endsWith('.dmg')), 'macOS DMG is required');
-  assert(names.includes(`${win[0]}.blockmap`), 'Windows blockmap is required');
+  if (includeWindows) assert(names.includes(`${win[0]}.blockmap`), 'Windows blockmap is required');
   const feedName = context.channel === 'stable' ? 'latest.yml' : 'beta.yml';
-  assert(names.includes(feedName), `Windows ${feedName} is required`);
+  if (includeWindows) assert(names.includes(feedName), `Windows ${feedName} is required`);
   assert(!names.includes(context.channel === 'stable' ? 'beta.yml' : 'latest.yml'), 'Cross-channel Windows feed rejected');
   const records = names.map((name) => fileRecord(directory, name));
-  const feed = fs.readFileSync(path.join(directory, feedName), 'utf8');
   const installer = records.find((record) => record.name === win[0]);
-  assert(new RegExp(`^version: ['"]?${context.version.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}['"]?\\s*$`, 'mu').test(feed), 'Windows feed version mismatch');
-  assert(feed.includes(win[0]) && feed.includes(installer.sha512) && feed.includes(String(installer.size)), 'Windows feed does not describe the candidate installer');
-  assert(feed.split(/\r?\n/u).some((line) => [`path: ${win[0]}`, `path: '${win[0]}'`, `path: "${win[0]}"`].includes(line)), 'Windows feed must point to the candidate installer');
-  assert(feed.split(/\r?\n/u).some((line) => [`sha512: ${installer.sha512}`, `sha512: '${installer.sha512}'`, `sha512: "${installer.sha512}"`].includes(line)), 'Windows feed root checksum mismatch');
+  if (includeWindows) {
+    const feed = fs.readFileSync(path.join(directory, feedName), 'utf8');
+    assert(new RegExp(`^version: ['"]?${context.version.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}['"]?\\s*$`, 'mu').test(feed), 'Windows feed version mismatch');
+    assert(feed.includes(win[0]) && feed.includes(installer.sha512) && feed.includes(String(installer.size)), 'Windows feed does not describe the candidate installer');
+    assert(feed.split(/\r?\n/u).some((line) => [`path: ${win[0]}`, `path: '${win[0]}'`, `path: "${win[0]}"`].includes(line)), 'Windows feed must point to the candidate installer');
+    assert(feed.split(/\r?\n/u).some((line) => [`sha512: ${installer.sha512}`, `sha512: '${installer.sha512}'`, `sha512: "${installer.sha512}"`].includes(line)), 'Windows feed root checksum mismatch');
+  }
   assert(signature.name === mac[0], 'Sparkle signature belongs to another archive');
   const macBytes = fs.readFileSync(path.join(directory, mac[0]));
   const key = crypto.createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), Buffer.from(signature.public_key, 'base64')]), format: 'der', type: 'spki' });
   assert(crypto.verify(null, macBytes, key, Buffer.from(signature.ed_signature, 'base64')), 'Invalid Sparkle archive signature');
   const artifacts = [
     { ...records.find((record) => record.name === mac[0]), platform: 'darwin', arch: 'arm64', kind: 'sparkle', minimum_system_version: '12.0', ed_signature: signature.ed_signature },
-    { ...installer, platform: 'win32', arch: 'x64', kind: 'nsis', minimum_system_version: '10.0.18362' },
+    ...(includeWindows ? [{ ...installer, platform: 'win32', arch: 'x64', kind: 'nsis', minimum_system_version: '10.0.18362' }] : []),
   ].map((artifact) => ({ ...artifact, url: `https://github.com/${REPOSITORY}/releases/download/${context.tag}/${encodeURIComponent(artifact.name)}` }));
   const manifest = { schema: 2, repository: REPOSITORY, version: context.version, channel: context.channel, published_at: publishedAt, notes, artifacts };
   write(path.join(directory, 'update-manifest.json'), manifest);
   records.push(fileRecord(directory, 'update-manifest.json'));
-  write(path.join(directory, 'release-provenance.json'), { ...context, source: `https://github.com/${REPOSITORY}/commit/${context.commit}`, signing: { macos: 'ad-hoc; Sparkle Ed25519 verified; not Apple notarized', windows: 'unsigned internal candidate; verify separately before distribution' }, sparkle_public_key: signature.public_key, assets: records });
+  write(path.join(directory, 'release-provenance.json'), { ...context, source: `https://github.com/${REPOSITORY}/commit/${context.commit}`, signing: { macos: 'ad-hoc; Sparkle Ed25519 verified; not Apple notarized', ...(includeWindows ? { windows: 'unsigned internal candidate; verify separately before distribution' } : {}) }, sparkle_public_key: signature.public_key, assets: records });
   records.push(fileRecord(directory, 'release-provenance.json'));
   fs.writeFileSync(path.join(directory, 'SHA256SUMS'), records.map((record) => `${record.sha256}  ${record.name}\n`).join(''));
   return manifest;
@@ -158,7 +161,9 @@ async function draft(api, directory, context) {
   await verifiedAssets({ assets: async () => localAssets, download: async (asset) => fs.readFileSync(path.join(directory, asset.name)) }, {});
   await remoteContext(api, context);
   assert(!(await api.releases()).some((release) => release.tag_name === context.tag), 'A release already exists for this tag; existing drafts and published releases are never overwritten');
-  const release = await api.request('/releases', { method: 'POST', body: JSON.stringify({ tag_name: context.tag, target_commitish: context.commit, name: `Guzi Scholar ${context.tag}`, draft: true, prerelease: context.channel === 'beta', body: `Candidate ${context.tag} (${context.commit}).\n\nmacOS: ad-hoc code signing, independently verified Sparkle Ed25519 update signature; not Apple Developer ID signed or notarized. On first launch, Gatekeeper may warn: in Finder right-click 谷子学术.app, choose Open and confirm.\nWindows: unsigned internal candidate.\n\nPublication requires explicit promotion and real upgrade acceptance evidence for both platforms.` }), headers: { 'Content-Type': 'application/json' } });
+  const manifest = json(path.join(directory, 'update-manifest.json'));
+  const withWindows = manifest.artifacts.some((artifact) => artifact.platform === 'win32');
+  const release = await api.request('/releases', { method: 'POST', body: JSON.stringify({ tag_name: context.tag, target_commitish: context.commit, name: `Guzi Scholar ${context.tag}`, draft: true, prerelease: context.channel === 'beta', body: `Candidate ${context.tag} (${context.commit}).\n\nmacOS: ad-hoc code signing, independently verified Sparkle Ed25519 update signature; not Apple Developer ID signed or notarized. On first launch, Gatekeeper may warn: in Finder right-click 谷子学术.app, choose Open and confirm.${withWindows ? '\nWindows: unsigned internal candidate.' : ''}\n\nPublication requires explicit promotion and real upgrade acceptance evidence for every platform in the candidate manifest.` }), headers: { 'Content-Type': 'application/json' } });
   for (const name of names) {
     const bytes = fs.readFileSync(path.join(directory, name));
     await api.request(`https://uploads.github.com/repos/${REPOSITORY}/releases/${release.id}/assets?name=${encodeURIComponent(name)}`, { method: 'POST', body: bytes, headers: { 'Content-Type': 'application/octet-stream' } });
@@ -169,6 +174,7 @@ async function draft(api, directory, context) {
 
 const ACCEPTANCE_CHECKS = ['discover', 'download', 'corrupt_rejected', 'save_cancel', 'ordinary_quit', 'relaunch', 'data_preserved'];
 function acceptance(report, context, artifact) {
+  assert(report && typeof report === 'object', `Acceptance report required: ${artifact.platform}`);
   for (const key of ['repository', 'tag', 'commit', 'version', 'channel']) assert(report[key] === context[key], `Acceptance ${key} mismatch`);
   assert(report.schema === 1 && report.passed === true, 'Acceptance must explicitly pass schema 1');
   assert(report.platform === artifact.platform && report.arch === artifact.arch, 'Acceptance platform mismatch');
@@ -199,7 +205,8 @@ async function verifiedCandidate(api, context, publicKey = process.env.SPARKLE_P
   }
   const manifest = JSON.parse(downloads.get('update-manifest.json'));
   assert(manifest.schema === 2 && manifest.repository === REPOSITORY && manifest.version === context.version && manifest.channel === context.channel, 'Remote manifest mismatch');
-  assert(manifest.artifacts.length === 2, 'Both platform update artifacts required');
+  assert(Array.isArray(manifest.artifacts) && [1, 2].includes(manifest.artifacts.length), 'One macOS artifact and optional Windows artifact required');
+  assert(manifest.artifacts.some((artifact) => artifact.platform === 'darwin'), 'macOS update artifact required');
   for (const artifact of manifest.artifacts) {
     const bytes = downloads.get(artifact.name);
     assert(bytes && bytes.length === artifact.size && sha256(bytes) === artifact.sha256 && sha512(bytes) === artifact.sha512, 'Manifest artifact hash/size mismatch');
@@ -211,16 +218,19 @@ async function verifiedCandidate(api, context, publicKey = process.env.SPARKLE_P
     } else assert(artifact.platform === 'win32' && artifact.arch === 'x64' && artifact.kind === 'nsis' && artifact.minimum_system_version === '10.0.18362', 'Invalid Windows artifact contract');
     assert(artifact.name === (artifact.platform === 'darwin' ? `Guzi-Scholar-${context.version}-arm64-${context.channel}.zip` : `Guzi-Scholar-${context.version}-windows-x64-setup.exe`), 'Candidate artifact name mismatch');
   }
-  assert(new Set(manifest.artifacts.map((artifact) => artifact.platform)).size === 2, 'Distinct platform acceptance required');
+  assert(new Set(manifest.artifacts.map((artifact) => artifact.platform)).size === manifest.artifacts.length, 'Distinct platform acceptance required');
+  assert(downloads.has(`Guzi-Scholar-${context.version}-arm64-${context.channel}.dmg`), 'Matching macOS DMG required');
   const feedName = context.channel === 'stable' ? 'latest.yml' : 'beta.yml';
   const installer = manifest.artifacts.find((artifact) => artifact.platform === 'win32');
-  assert(downloads.has(feedName) && !downloads.has(context.channel === 'stable' ? 'beta.yml' : 'latest.yml'), 'Candidate Windows feed channel mismatch');
-  const feed = downloads.get(feedName).toString('utf8');
-  for (const line of [`version: ${context.version}`, `path: ${installer.name}`, `sha512: ${installer.sha512}`]) {
-    const [field, value] = line.split(': ');
-    assert(feed.split(/\r?\n/u).some((item) => [line, `${field}: '${value}'`, `${field}: "${value}"`].includes(item)), `Candidate Windows feed mismatch: ${field}`);
-  }
-  assert(feed.includes(String(installer.size)) && downloads.has(`${installer.name}.blockmap`), 'Candidate Windows update metadata incomplete');
+  if (installer) {
+    assert(downloads.has(feedName) && !downloads.has(context.channel === 'stable' ? 'beta.yml' : 'latest.yml'), 'Candidate Windows feed channel mismatch');
+    const feed = downloads.get(feedName).toString('utf8');
+    for (const line of [`version: ${context.version}`, `path: ${installer.name}`, `sha512: ${installer.sha512}`]) {
+      const [field, value] = line.split(': ');
+      assert(feed.split(/\r?\n/u).some((item) => [line, `${field}: '${value}'`, `${field}: "${value}"`].includes(item)), `Candidate Windows feed mismatch: ${field}`);
+    }
+    assert(feed.includes(String(installer.size)) && downloads.has(`${installer.name}.blockmap`), 'Candidate Windows update metadata incomplete');
+  } else assert(![...downloads.keys()].some((name) => /windows|\.exe$|\.blockmap$|^(latest|beta)\.yml$/u.test(name)), 'Unexpected Windows assets outside the candidate manifest');
   return { release, manifest, downloads };
 }
 
@@ -235,19 +245,20 @@ async function downloadCandidate(api, directory, context, publicKey = process.en
 async function review(api, context, reports, publicKey = process.env.SPARKLE_PUBLIC_KEY) {
   const { release, manifest } = await verifiedCandidate(api, context, publicKey);
   for (const artifact of manifest.artifacts) acceptance(reports[artifact.platform], context, artifact);
-  return release;
+  return { release, manifest };
 }
 
-function releaseNotes(context) {
-  return `谷子学术 ${context.tag}\n\n支持 macOS Apple Silicon（arm64）与 Windows x64。应用内更新会先保存阅读状态与文献库数据，取消保存时不会安装更新。\n\n尚未内置更新器的旧版用户，请先手动安装一次本版本，之后可使用应用内更新。安装包、更新附件与 SHA256SUMS 校验文件见本页附件。\n\nmacOS 使用 ad-hoc 代码签名及 Sparkle Ed25519 更新签名，未使用 Apple Developer ID 签名或公证，首次打开可能出现系统安全提示。Windows 安装包未使用发布者证书签名。\n\n本次原始候选已通过 macOS 与 Windows 的升级验收，包含保存取消、普通退出、重启和数据保留检查。`;
+function releaseNotes(context, manifest) {
+  const withWindows = manifest.artifacts.some((artifact) => artifact.platform === 'win32');
+  return `谷子学术 ${context.tag}\n\n支持 macOS Apple Silicon（arm64）${withWindows ? ' 与 Windows x64' : ''}。应用内更新会先保存阅读状态与文献库数据，取消保存时不会安装更新。\n\n尚未内置更新器的旧版用户，请先手动安装一次本版本，之后可使用应用内更新。安装包、更新附件与 SHA256SUMS 校验文件见本页附件。\n\nmacOS 使用 ad-hoc 代码签名及 Sparkle Ed25519 更新签名，未使用 Apple Developer ID 签名或公证，首次打开可能出现系统安全提示。${withWindows ? 'Windows 安装包未使用发布者证书签名。' : ''}\n\n本次原始候选已通过 macOS${withWindows ? ' 与 Windows' : ''} 的升级验收，包含保存取消、普通退出、重启和数据保留检查。`;
 }
 
 async function promote(api, context, reports, acceptanceRunID, publicKey = process.env.SPARKLE_PUBLIC_KEY) {
   assert(/^\d+$/u.test(acceptanceRunID || ''), 'A successful acceptance workflow run ID is required');
   const run = await api.request(`/actions/runs/${acceptanceRunID}`);
   assert(run.head_sha === context.commit && run.conclusion === 'success' && run.event === 'workflow_dispatch' && run.path === '.github/workflows/release-acceptance.yml', 'Acceptance artifact must come from the successful manual acceptance workflow on this exact tag commit');
-  const release = await review(api, context, reports, publicKey);
-  return api.request(`/releases/${release.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft: false, make_latest: context.channel === 'stable' ? 'true' : 'false', body: releaseNotes(context) }) });
+  const { release, manifest } = await review(api, context, reports, publicKey);
+  return api.request(`/releases/${release.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft: false, make_latest: context.channel === 'stable' ? 'true' : 'false', body: releaseNotes(context, manifest) }) });
 }
 
 module.exports = { REPOSITORY, identity, validateVersions, preflight, prepare, draft, review, promote, acceptance, verifiedAssets, GitHub, sha256, sha512, ACCEPTANCE_CHECKS, verifiedCandidate, downloadCandidate, releaseNotes };
@@ -259,11 +270,11 @@ async function main() {
     const context = preflight(process.cwd(), args[0]);
     write(args[1], context);
     if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `tag=${context.tag}\nversion=${context.version}\nchannel=${context.channel}\ncommit=${context.commit}\n`);
-  } else if (command === 'prepare') prepare(args[0], json(args[1]), json(args[2]));
+  } else if (command === 'prepare') prepare(args[0], json(args[1]), json(args[2]), { includeWindows: args[3] === '--with-windows' });
   else if (command === 'draft') console.log(JSON.stringify(await draft(new GitHub(process.env.GH_TOKEN), args[0], json(args[1]))));
   else if (command === 'download-candidate') console.log(JSON.stringify(await downloadCandidate(new GitHub(process.env.GH_TOKEN), args[0], json(args[1]))));
-  else if (command === 'review') console.log(JSON.stringify(await review(new GitHub(process.env.GH_TOKEN), json(args[0]), { darwin: json(path.join(args[1], 'macos-acceptance.json')), win32: json(path.join(args[1], 'windows-acceptance.json')) })));
-  else if (command === 'promote') console.log(JSON.stringify(await promote(new GitHub(process.env.GH_TOKEN), json(args[0]), { darwin: json(path.join(args[1], 'macos-acceptance.json')), win32: json(path.join(args[1], 'windows-acceptance.json')) }, args[2])));
-  else throw new Error('Usage: release-pipeline.cjs check-versions [root] | preflight tag context | prepare directory context signature | draft directory context | download-candidate directory context | review context reports | promote context reports acceptance-run-id');
+  else if (command === 'review') console.log(JSON.stringify(await review(new GitHub(process.env.GH_TOKEN), json(args[0]), { darwin: json(path.join(args[1], 'macos-acceptance.json')), ...(fs.existsSync(path.join(args[1], 'windows-acceptance.json')) ? { win32: json(path.join(args[1], 'windows-acceptance.json')) } : {}) })));
+  else if (command === 'promote') console.log(JSON.stringify(await promote(new GitHub(process.env.GH_TOKEN), json(args[0]), { darwin: json(path.join(args[1], 'macos-acceptance.json')), ...(fs.existsSync(path.join(args[1], 'windows-acceptance.json')) ? { win32: json(path.join(args[1], 'windows-acceptance.json')) } : {}) }, args[2])));
+  else throw new Error('Usage: release-pipeline.cjs check-versions [root] | preflight tag context | prepare directory context signature [--with-windows] | draft directory context | download-candidate directory context | review context reports | promote context reports acceptance-run-id');
 }
 if (require.main === module) main().catch((error) => { console.error(error.message); process.exitCode = 1; });

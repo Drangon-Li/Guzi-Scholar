@@ -99,7 +99,7 @@ async function harness() {
     section('const annotationStyleSyncs =', 'const jsonOptions ='),
     'const jsonOptions = (body, method = "POST") => ({ method, body: JSON.stringify(body) });',
     section('async function streamApiRequest(', 'async function requestTranslation('),
-    section('async function requestTranslation(', 'function preserveReaderHoverThroughTranslationLayout('),
+    section('async function requestTranslation(', 'function reconcileTranslationAnnotations('),
     section('function persistArticleNoteDrafts(', 'function isArticleNoteSession('),
     section('function queueArticleNotesSave(', 'function renderArticleNoteConflict('),
     section('async function flushPendingArticleNotes(', 'function saveNotes('),

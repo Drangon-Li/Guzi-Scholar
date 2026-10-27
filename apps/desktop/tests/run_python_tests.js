@@ -41,7 +41,7 @@ if (!python) {
   process.exit(1);
 }
 
-const result = spawnSync(python.command, [...python.prefix, '-B', '-m', 'unittest', 'discover', '-s', 'tests', '-v'], {
+const result = spawnSync(python.command, [...python.prefix, '-B', 'tests/run_python_suite.py', ...process.argv.slice(2)], {
   cwd: process.cwd(),
   stdio: 'inherit',
   windowsHide: true,

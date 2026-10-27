@@ -15,6 +15,11 @@ on:
         description: Existing tag matching all package versions (vX.Y.Z or vX.Y.Z-beta.N)
         type: string
         required: true
+      include_windows:
+        description: Explicitly include the manually maintained Windows candidate
+        type: boolean
+        default: false
+        required: false
       acceptance_run_id:
         description: Successful Desktop release acceptance run ID; required for promote
         type: string
@@ -130,7 +135,7 @@ jobs:
           if-no-files-found: error
 
   windows:
-    if: inputs.action != 'promote'
+    if: github.event_name == 'workflow_dispatch' && inputs.action != 'promote' && inputs.include_windows
     needs: validate
     runs-on: windows-2022
     timeout-minutes: 90
@@ -181,7 +186,7 @@ jobs:
           if-no-files-found: error
 
   draft:
-    if: inputs.action != 'promote'
+    if: ${{ always() && !cancelled() && inputs.action != 'promote' && needs.validate.result == 'success' && needs.macos.result == 'success' && (needs.windows.result == 'success' || needs.windows.result == 'skipped') }}
     needs: [validate, macos, windows]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -208,10 +213,16 @@ jobs:
           test "$(stat -c %s candidate/pymupdf-1.28.2.tar.gz)" -eq 87903557
           test "$(stat -c %s candidate/mupdf-1.28.2-source.tar.gz)" -eq 68898646
       - name: Assemble manifest, provenance and checksums before creating a draft
+        env:
+          INCLUDE_WINDOWS: ${{ github.event_name == 'workflow_dispatch' && inputs.include_windows }}
         run: |
           cp candidate-inputs/release-macos/* candidate/
-          cp candidate-inputs/release-windows/* candidate/
-          node apps/desktop/scripts/release-pipeline.cjs prepare candidate candidate-inputs/release-context/release-context.json candidate-inputs/release-macos-signature/mac-signature.json
+          options=()
+          if [[ "$INCLUDE_WINDOWS" == true ]]; then
+            cp candidate-inputs/release-windows/* candidate/
+            options+=(--with-windows)
+          fi
+          node apps/desktop/scripts/release-pipeline.cjs prepare candidate candidate-inputs/release-context/release-context.json candidate-inputs/release-macos-signature/mac-signature.json "${options[@]}"
       - name: Create new draft, upload and re-download every asset for verification
         env:
           GH_TOKEN: ${{ github.token }}
@@ -247,7 +258,7 @@ jobs:
           run-id: ${{ inputs.acceptance_run_id }}
           github-token: ${{ github.token }}
           path: acceptance
-      - name: Revalidate remote draft and both real upgrade reports, then publish
+      - name: Revalidate remote draft and every required real upgrade report, then publish
         env:
           GH_TOKEN: ${{ github.token }}
           SPARKLE_PUBLIC_KEY: ${{ vars.SPARKLE_PUBLIC_KEY }}

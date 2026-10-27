@@ -2,7 +2,7 @@
 
 谷子学术是一个本地优先的学术 PDF 阅读器：把论文转换为连续、可检索的阅读页面，并在同一个桌面应用中提供文献管理、翻译、标注、笔记和文章助手。
 
-项目现在面向开源桌面发行，目标平台是 macOS 和 Windows。论文、译文、笔记、标注、设置和 AI 配置默认保存在本机；AI 服务由用户自行填写 OpenAI-compatible API 地址、密钥和模型。
+项目当前专注于 macOS 桌面版。除非明确指定其他平台，后续功能开发、本机测试、默认 CI 验证与新版发行均以 macOS 为目标。Windows 代码和手动构建入口保留，暂不持续开发、测试或发布新版。论文、译文、笔记、标注、设置和 AI 配置默认保存在本机；AI 服务由用户自行填写 OpenAI-compatible API 地址、密钥和模型。
 
 English documentation is coming soon. See [README.en.md](README.en.md) for the current English placeholder.
 
@@ -20,20 +20,18 @@ AI 回答和译文均为明确标注的预置示例，不调用真实模型。�
 - 文献库、文件夹、自定义属性、阅读状态和关系图谱
 - 原文、译文、笔记、标注和图片资产保存在本机
 - 选区翻译、全文翻译、文章问答、阅读重点和表格复核
-- macOS 与 Windows 共用同一套桌面应用代码
-- macOS 与 Windows 使用同一套源码和独立的平台打包层
+- macOS 桌面应用，保留共享源码和独立的平台打包层
 
 ## 下载
 
-前往 [Releases](https://github.com/Drangon-Li/Guzi-Scholar/releases) 下载对应平台的安装包：
+前往 [Releases](https://github.com/Drangon-Li/Guzi-Scholar/releases) 下载最新 macOS 安装包：
 
 | 平台 | 产物 | 当前状态 |
 | --- | --- | --- |
-| macOS Apple Silicon | `.dmg` | `v0.5.0` GitHub 发布版（未公证） |
-| Windows x64 | NSIS `.exe` | 等待实机验证 |
-| Windows x64 | 便携版 `.zip` | 等待实机验证 |
+| macOS Apple Silicon | `.dmg`（安装）、`.zip`（应用内更新） | 持续维护，尚未公证 |
+| Windows x64 | 历史 `.exe` / `.zip` | 暂停新版开发、测试与发行，旧版仍可从历史 Releases 下载 |
 
-macOS `v0.5.0` 发布包内置 Python、Java、Pandoc、OpenDataLoader 和 PyMuPDF 1.28.2 运行时，使用 ad-hoc 签名，尚未通过 Apple Developer ID 签名或 Apple 公证。首次打开时如果遇到 Gatekeeper 提示，请在 Finder 中右键“谷子学术.app”并选择“打开”，再确认提示。当前版本只提供主动检查和浏览器下载，不承诺可靠的应用内自动更新。Windows 开发版当前需要 Python 3.9 或更高版本，正式安装包将在实机验证后发布。
+macOS 发布包内置 Python、Java、Pandoc、OpenDataLoader 和 PyMuPDF 运行时，使用 ad-hoc 签名，尚未通过 Apple Developer ID 签名或 Apple 公证。首次打开时如果遇到 Gatekeeper 提示，请在 Finder 中右键“谷子学术.app”并选择“打开”，再确认提示。应用支持启动时检查更新及手动检查，通过 Sparkle 校验更新签名后安装；也可从 Releases 下载 DMG 手动更新。
 
 ## 远端解析服务器配置
 
@@ -117,13 +115,13 @@ npm run desktop:dev
 npm run desktop:check:syntax
 npm run desktop:check
 npm run build:mac
-npm run build:windows
-npm run verify:windows
 ```
 
-Windows 开发启动器位于 `platforms/windows/run-guzi-scholar.cmd`。完整的桌面服务、前端和测试代码位于 `apps/desktop/`。
+完整的桌面服务、前端和测试代码位于 `apps/desktop/`。默认开发与运行时、界面验收在 macOS 上进行；共享代码的静态检查可使用 Linux CI。Windows 启动器及 `build:windows` / `verify:windows` 命令仅作为明确要求恢复 Windows 工作时的手动入口，不属于默认验收范围。
 
 macOS Release workflow 会自动准备 Temurin JDK 21、Python 3.11、`certifi`、PyInstaller，并下载固定版本的 OpenDataLoader CLI；当前 GitHub 发布使用 ad-hoc 签名，不需要 GitHub Secrets 中的 Apple Developer ID 或公证凭据。它是可追溯的 GitHub 发布版，但仍需在 Finder 中确认首次启动；未来购买 Apple Developer Program 后，可再启用 Apple 正式签名和公证路径。
+
+默认 Release 只构建 macOS 产物，并要求对应版本的签名、资产完整性检查及真实 macOS 升级验收通过后才能发布。Windows CI 只接受手动触发；显式选择包含 Windows 的候选版本时，仍须完成 Windows 构建和升级验收。
 
 ## 项目结构
 

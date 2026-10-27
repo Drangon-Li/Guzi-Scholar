@@ -289,21 +289,41 @@ async function signal(promise, label) {
     assert.deepEqual([count(a, 'document.html'), count(a, 'assets/images/fixture.svg'), count(a, 'assets/images/inline.png')], aResources, 'Warm A switches requested resources');
     assert.deepEqual([count(b, 'document.html'), count(b, 'assets/images/fixture.svg'), count(b, 'assets/images/inline.png')], bResources, 'Warm B switches requested resources');
 
-    const hoverBefore = count(a, 'translate', 'POST');
-    const hoverSource = active().locator('[data-block-id="paragraph-2"]');
-    await hoverSource.scrollIntoViewIfNeeded();
-    await active().locator('body').evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    await hoverSource.evaluate((node) => {
+    const selectionBefore = count(a, 'translate', 'POST');
+    const selectionSource = active().locator('[data-block-id="paragraph-2"]');
+    await selectionSource.scrollIntoViewIfNeeded();
+    const hoverPoint = await selectionSource.evaluate((node) => {
       const doc = node.ownerDocument;
       doc.getSelection().removeAllRanges();
-      const walker = doc.createTreeWalker(node, NodeFilter.SHOW_TEXT);
-      const text = walker.nextNode();
+      const text = doc.createTreeWalker(node, NodeFilter.SHOW_TEXT).nextNode();
       const range = doc.createRange(); range.selectNodeContents(text);
       const rect = range.getClientRects()[0];
-      doc.dispatchEvent(new PointerEvent('pointermove', { clientX: rect.x + 5, clientY: rect.y + rect.height / 2 }));
+      return { x: rect.x + 5, y: rect.y + rect.height / 2 };
     });
+    const iframe = await page.locator('#html-preview').boundingBox();
+    await page.mouse.move(iframe.x + hoverPoint.x, iframe.y + hoverPoint.y);
+    await page.waitForTimeout(650);
+    assert.equal(await page.locator('#selection-popover:not([hidden]):not(.is-closing)').count(), 0, 'Ordinary hover opened selection actions after keepalive restore');
+    assert.equal(count(a, 'translate', 'POST'), selectionBefore, 'Ordinary hover requested translation after keepalive restore');
+    await selectionSource.evaluate((node, quote) => {
+      const doc = node.ownerDocument;
+      const text = doc.createTreeWalker(node, NodeFilter.SHOW_TEXT).nextNode();
+      if (!text.textContent.startsWith(quote)) throw new Error('Manual selection fixture changed');
+      const range = doc.createRange(); range.setStart(text, 0); range.setEnd(text, quote.length);
+      doc.getSelection().removeAllRanges(); doc.getSelection().addRange(range);
+      doc.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    }, prose);
     await page.locator('#selection-popover:not([hidden])').filter({ hasText: 'A mocked translation' }).waitFor();
-    assert.equal(count(a, 'translate', 'POST') - hoverBefore, 1, 'Hover dispatched duplicate translation requests');
+    assert.equal(count(a, 'translate', 'POST') - selectionBefore, 1, 'Manual selection dispatched duplicate translation requests after keepalive restore');
+    const selectionRequest = requests.filter((item) => item.id === a && item.endpoint === 'translate' && item.method === 'POST').at(-1);
+    assert.equal(selectionRequest.body.text, prose, 'Restored manual selection translated the exact selected source');
+    await selectionSource.evaluate((node) => {
+      const doc = node.ownerDocument;
+      doc.getSelection().removeAllRanges();
+      doc.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+    });
+    await page.keyboard.press('Escape');
+    await page.locator('#selection-popover:not([hidden]):not(.is-closing)').waitFor({ state: 'detached' });
     const paragraphBefore = count(a, 'translate', 'POST');
     await translateParagraph(1);
     await active().locator('.my-scholar-translation[data-for="paragraph-1"]:not(.is-pending)').filter({ hasText: 'A mocked translation' }).waitFor();

@@ -28,7 +28,7 @@ jobs:
 
   desktop:
     name: Desktop checks
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -48,8 +48,6 @@ jobs:
         run: |
           npm --prefix apps/desktop run check:release-contracts
           npm --prefix apps/desktop run test:ci
-      - name: Install shell syntax checker
-        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y zsh
       - name: Check JavaScript and shell syntax
         run: npm run desktop:check:syntax
       - name: Run Python unit tests
@@ -88,7 +86,7 @@ jobs:
 
   ui-shards:
     name: UI smoke tests (${{ matrix.shard }}/4)
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     timeout-minutes: 20
     strategy:
       fail-fast: false
@@ -115,7 +113,7 @@ jobs:
           # runs used, and the two disagreed on whether a keepalive fetch is
           # interceptable -- which is why a green local run could still fail here.
           npm install --global playwright@1.58.2
-          playwright install --with-deps chromium
+          playwright install chromium
           echo "MY_SCHOLAR_PLAYWRIGHT_MODULE=$(npm root -g)/playwright" >> "$GITHUB_ENV"
       # The runner seeds a fresh library and starts a dedicated server for each
       # suite, and prints that server's log when a suite fails.
@@ -154,7 +152,7 @@ jobs:
 
   runtime:
     name: Runtime checks (macOS)
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4

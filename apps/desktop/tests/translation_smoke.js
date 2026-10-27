@@ -159,57 +159,82 @@ let browserSession;
   await page.keyboard.press('Escape');
   await page.locator('#reader-search[hidden]').waitFor({ state: 'attached' });
 
-  await frame.locator(`[data-block-id="${blockId}"]`).scrollIntoViewIfNeeded();
-  const sentenceHoverState = await frame.locator(`[data-block-id="${blockId}"]`).evaluate((source) => {
-    const doc = source.ownerDocument;
-    const walker = doc.createTreeWalker(source, NodeFilter.SHOW_TEXT);
-    let textNode;
-    while ((textNode = walker.nextNode()) && !textNode.nodeValue.trim()) { /* advance past blank text nodes */ }
-    if (!textNode) return { ready: false, reason: 'source has no text node' };
-    const range = doc.createRange();
-    range.selectNodeContents(textNode);
-    const rect = [...range.getClientRects()].find((item) => item.width && item.height);
-    if (!rect) return { ready: false, reason: 'source text has no layout rect' };
-    doc.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: rect.left + Math.min(4, rect.width / 2), clientY: rect.top + rect.height / 2 }));
-    return { ready: true };
-  });
-  if (!sentenceHoverState.ready) throw new Error(`Sentence hover fixture unavailable (${sentenceHoverState.reason})`);
-  await frame.locator('body').evaluate(async () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  await page.locator('#selection-popover:not([hidden])').waitFor();
-  const hoverState = await frame.locator('body').evaluate(() => ({
-    custom: Boolean(document.defaultView.CSS?.highlights?.has('my-scholar-sentence-hover')),
-    customRanges: document.defaultView.CSS?.highlights?.get('my-scholar-sentence-hover')?.size || 0,
-    translatedRanges: [...(CSS.highlights?.get('my-scholar-sentence-hover') || [])].filter((range) => (range.commonAncestorContainer.parentElement || range.commonAncestorContainer).closest('.my-scholar-translation')).length,
-    fallback: document.querySelectorAll('.reader-sentence-hover-fallback').length,
-    tooltip: parent.document.querySelector('#selection-popover:not([hidden])')?.textContent,
-  }));
-  if (!hoverState.custom || hoverState.customRanges !== 1 || hoverState.translatedRanges || hoverState.fallback || !hoverState.tooltip) throw new Error(`Sentence hover did not show a source-only background with its tooltip (${JSON.stringify(hoverState)})`);
+  const source = frame.locator(`[data-block-id="${blockId}"]`);
+  async function hoverText(locator) {
+    await locator.scrollIntoViewIfNeeded();
+    const point = await locator.evaluate((node) => {
+      const doc = node.ownerDocument;
+      const walker = doc.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+      let text;
+      while ((text = walker.nextNode())) {
+        if (!text.nodeValue.trim() || text.parentElement.closest('button, .annotation-note-trigger')) continue;
+        const range = doc.createRange();
+        range.selectNodeContents(text);
+        const rect = [...range.getClientRects()].find((item) => item.width && item.height);
+        if (rect) return { x: rect.left + Math.min(4, rect.width / 2), y: rect.top + rect.height / 2 };
+      }
+      return null;
+    });
+    if (!point) throw new Error('Hover fixture has no visible text');
+    const iframe = await page.locator('#html-preview').boundingBox();
+    await page.mouse.move(iframe.x + point.x, iframe.y + point.y);
+    await page.waitForTimeout(650);
+  }
+  async function assertOrdinaryHover(locator, label) {
+    const before = translationPostCount;
+    await hoverText(locator);
+    const hoverState = await frame.locator('body').evaluate(() => ({
+      custom: Boolean(document.defaultView.CSS?.highlights?.has('my-scholar-sentence-hover')),
+      fallback: document.querySelectorAll('.reader-sentence-hover-fallback').length,
+      toolbar: Boolean(parent.document.querySelector('#selection-popover:not([hidden]):not(.is-closing)')),
+    }));
+    if (hoverState.custom || hoverState.fallback || hoverState.toolbar || translationPostCount !== before) throw new Error(`${label} hover triggered selection actions or translation (${JSON.stringify(hoverState)})`);
+  }
+  await assertOrdinaryHover(source, 'Source');
 
-  // Leave the toolbar's protected travel corridor before testing translation-only hover.
-  await page.mouse.move(0, 0);
-  await page.locator('#selection-popover:not([hidden])').waitFor({ state: 'detached' });
-  const reverseHoverState = await frame.locator(`.my-scholar-translation[data-for="${blockId}"]`).evaluate((translation) => {
-    const doc = translation.ownerDocument;
-    const walker = doc.createTreeWalker(translation, NodeFilter.SHOW_TEXT);
-    let textNode;
-    while ((textNode = walker.nextNode()) && !textNode.nodeValue.trim()) { /* advance past blank text nodes */ }
-    if (!textNode) return { ready: false, reason: 'translation has no text node' };
-    const range = doc.createRange();
-    range.selectNodeContents(textNode);
-    const rect = [...range.getClientRects()].find((item) => item.width && item.height);
-    if (!rect) return { ready: false, reason: 'translation text has no layout rect' };
-    doc.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, clientX: rect.left + Math.min(4, rect.width / 2), clientY: rect.top + rect.height / 2 }));
-    return { ready: true };
+  const postsBeforeSelection = translationPostCount;
+  const selectedQuote = await source.evaluate((node) => {
+    const doc = node.ownerDocument;
+    const walker = doc.createTreeWalker(node, NodeFilter.SHOW_TEXT, {
+      acceptNode: (text) => text.parentElement.closest('.my-scholar-translation, button, .annotation-note-trigger') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+    });
+    let text;
+    while ((text = walker.nextNode())) {
+      const start = text.nodeValue.search(/\S/u);
+      if (start < 0 || text.length - start < 8) continue;
+      const quote = text.nodeValue.slice(start, start + 40).trimEnd();
+      const range = doc.createRange();
+      range.setStart(text, start);
+      range.setEnd(text, start + quote.length);
+      doc.getSelection().removeAllRanges();
+      doc.getSelection().addRange(range);
+      doc.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      return quote;
+    }
+    throw new Error('Manual selection fixture has no source text');
   });
-  if (!reverseHoverState.ready) throw new Error(`Reverse sentence hover fixture unavailable (${reverseHoverState.reason})`);
-  await frame.locator('body').evaluate(async () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-  await page.locator('#selection-popover:not([hidden])').waitFor({ state: 'detached' });
-  const reverseHoverResult = await frame.locator('body').evaluate(() => ({
-    custom: Boolean(document.defaultView.CSS?.highlights?.has('my-scholar-sentence-hover')),
-    customRanges: document.defaultView.CSS?.highlights?.get('my-scholar-sentence-hover')?.size || 0,
-    fallback: document.querySelectorAll('.reader-sentence-hover-fallback').length,
-  }));
-  if (reverseHoverResult.custom || reverseHoverResult.fallback) throw new Error(`Translation hover still linked source and translation (${JSON.stringify(reverseHoverResult)})`);
+  await page.locator('#selection-popover:not([hidden]):not(.is-closing)').waitFor();
+  await page.locator('#selection-translation-result[data-state="ready"]').filter({ hasText: `测试译文：${selectedQuote}` }).waitFor();
+  const selectionState = await source.evaluate((node) => {
+    const doc = node.ownerDocument;
+    const selection = doc.getSelection();
+    return {
+      quote: selection.toString(),
+      translated: (selection.anchorNode?.parentElement || selection.anchorNode)?.closest?.('.my-scholar-translation') != null,
+      overlay: Boolean(doc.querySelector('#reader-text-selection-overlay path[d]')),
+    };
+  });
+  if (selectionState.quote !== selectedQuote || selectionState.translated || !selectionState.overlay) throw new Error(`Manual source selection did not remain isolated from its translation (${JSON.stringify(selectionState)})`);
+  const selectionRequest = translationPostPayloads.at(-1);
+  if (translationPostCount !== postsBeforeSelection + 1 || selectionRequest.blockId || selectionRequest.text !== selectedQuote) throw new Error(`Manual selection did not translate its exact source once (${JSON.stringify(selectionRequest)})`);
+  await source.evaluate((node) => {
+    const doc = node.ownerDocument;
+    doc.getSelection().removeAllRanges();
+    doc.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  });
+  await page.keyboard.press('Escape');
+  await page.locator('#selection-popover:not([hidden]):not(.is-closing)').waitFor({ state: 'detached' });
+  await assertOrdinaryHover(translation, 'Translation');
 
   const boundaryBlockId = translationSpacingFixture.boundary.sourceId;
   let boundaryTranslation = frame.locator(`.my-scholar-translation[data-for="${boundaryBlockId}"]:not(.is-pending):not(.is-error)`);

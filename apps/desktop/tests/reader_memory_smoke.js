@@ -55,8 +55,7 @@ function instrument(source) {
         fontWaits: [...readerMounts.values()].filter((mount) => mount.cancelFontWait).length,
         fontTimers: window.__memoryFontTimers.active.size, fontCallbacks: window.__memoryFontTimers.manual.size,
         activeTranslations: state.translationCache.length, activeChat: state.chat.length, annotations: state.annotations.length, aiHighlights: state.aiHighlights.length,
-        sentenceDocuments: Number(Boolean(readerSentenceState.doc)), sentencePairs: readerSentenceState.pairs.length,
-        sentencePending: readerSentenceState.pendingTranslations.size, searchMatches: readerSearchState.matches.length,
+        searchMatches: readerSearchState.matches.length,
         runningTranslations: [...state.translationRuns.values()].filter((run) => run.running).length,
         translationDocumentRefs: [...state.translationRuns.values()].filter((run) => run.document).length,
         translationMountRefs: [...state.translationRuns.values()].filter((run) => run.mount).length,
@@ -192,7 +191,7 @@ async function signal(promise, label) {
           const gate = gates.get(id);
           if (gate) { gate.signal(); await gate.wait; }
           const body = request.postDataJSON();
-          const result = { ...body, text: `Synthetic mocked translation ${body.block_id || 'hover'}`, profile_id: profile };
+          const result = { ...body, text: `Synthetic mocked translation ${body.block_id || 'selection'}`, profile_id: profile };
           if (body.block_id) translations.set(id, translations.get(id).filter((item) => item.block_id !== body.block_id).concat(result));
           payload = { result };
           await route.fulfill({ json: payload }); gate?.finish(); return;
@@ -263,22 +262,22 @@ async function signal(promise, label) {
     await measure('preview-closed');
 
     await open(ids[0]);
-    const hover = hold(ids[0]);
-    const hoverSource = active().locator('[data-block-id="paragraph-2"]');
-    await hoverSource.scrollIntoViewIfNeeded();
+    const selection = hold(ids[0]);
+    const selectionSource = active().locator('[data-block-id="paragraph-2"]');
+    await selectionSource.scrollIntoViewIfNeeded();
     await active().locator('body').evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    await hoverSource.evaluate((node) => {
+    await selectionSource.evaluate((node) => {
       const doc = node.ownerDocument; doc.getSelection().removeAllRanges();
       const text = [...node.childNodes].find((child) => child.nodeType === Node.TEXT_NODE && child.textContent.trim()) || doc.createTreeWalker(node, NodeFilter.SHOW_TEXT).nextNode();
-      const range = doc.createRange(); range.selectNodeContents(text); const rect = range.getClientRects()[0];
-      doc.dispatchEvent(new PointerEvent('pointermove', { clientX: rect.x + 5, clientY: rect.y + rect.height / 2 }));
+      const range = doc.createRange(); range.selectNodeContents(text); doc.getSelection().addRange(range);
+      doc.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     });
-    await signal(hover.seen, 'hover translation');
+    await signal(selection.seen, 'manual selection translation');
     await close(ids[0]);
     // Network is deliberately pending: inspect ownership separately from final GC.
-    const hoverPending = (await measure('hover-pending')).counts;
-    hover.release(); gates.delete(ids[0]); await signal(hover.done, 'hover completion');
-    await measure('hover-completed-closed');
+    const selectionPending = (await measure('selection-pending')).counts;
+    selection.release(); gates.delete(ids[0]); await signal(selection.done, 'selection completion');
+    await measure('selection-completed-closed');
 
     await open(ids[0]); await open(ids[1]); await tab(ids[0]).click(); await ready(ids[0]);
     const full = hold(ids[0]);
@@ -336,7 +335,7 @@ async function signal(promise, label) {
       for (const key of ['translationCaches', 'mediaLayouts', 'chatSessions', 'translationRuns']) assert.equal(final.counts[key], 0, `Closed job cache retained: ${key}`);
       assert.equal(final.counts.detachedDocuments, 0, 'Closed reader Documents remain strongly reachable after completed work and GC');
       assert.equal(final.counts.translationDocumentRefs, 0); assert.equal(final.counts.translationMountRefs, 0);
-      assert.equal(final.counts.sentenceDocuments, 0); assert.equal(final.counts.sentencePairs, 0); assert.equal(final.counts.searchMatches, 0);
+      assert.equal(final.counts.searchMatches, 0);
       assert.equal(fullPending.translationDocumentRefs, 0, 'A closed background translation must use its source snapshot');
       assert.equal(fullPending.translationMountRefs, 0);
       assert.equal(chatPending.chatSessions, 1, 'Streaming chat must pin its envelope after close');
@@ -351,7 +350,7 @@ async function signal(promise, label) {
       assert.ok(growth.nodes < 128 && growth.documents <= 0 && growth.listeners < 16, `DOM/listener growth across repeated closes: ${JSON.stringify(growth)}`);
     }
     assert.deepEqual(errors, [], 'Unexpected page errors'); assert.deepEqual(unexpected, [], 'Unexpected endpoint: no real AI or user data is permitted');
-    console.log(JSON.stringify({ passed: true, baseline, syntheticOnly: true, mockedAI: true, documents: ids.length, paragraphs, markers, growth, hoverPending, fullPending, chatPending, snapshots }));
+    console.log(JSON.stringify({ passed: true, baseline, syntheticOnly: true, mockedAI: true, documents: ids.length, paragraphs, markers, growth, selectionPending, fullPending, chatPending, snapshots }));
   } finally {
     pending.forEach((gate) => gate.release());
     try { if (cdp) await cdp.detach(); }

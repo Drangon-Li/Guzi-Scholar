@@ -1088,4 +1088,10 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('will-quit', () => { Promise.resolve(updateController?.dispose()).catch((error) => diagnosticLog('updater-dispose-error', error.message)); });
+app.on('will-quit', () => {
+  const exit = exitCoordinator.state;
+  // Sparkle owns termination after installation starts; disposing here would interrupt that handoff.
+  if (process.platform === 'darwin' && exit.pending && exit.intent === 'install-update' && exit.phase === 'installing') return;
+  const report = (error) => diagnosticLog('updater-dispose-error', error.message);
+  try { Promise.resolve(updateController?.dispose()).catch(report); } catch (error) { report(error); }
+});

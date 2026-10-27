@@ -14,11 +14,12 @@ assert.deepStrictEqual(selectTests([], {}).selected, tests);
 assert.deepStrictEqual(selectTests([], { MY_SCHOLAR_UI_CI: 'yes' }).selected, selectTests(['--ci'], {}).selected);
 assert.deepStrictEqual(selectTests(['--only=graph'], {}).selected.map(([name]) => name), ['graph']);
 assert.deepStrictEqual(selectTests(['--ci', '--only=graph', '--shard=1/1'], {}).selected.map(([name]) => name), ['graph']);
-assert(plans.every((plan) => plan.selected.length === 8));
+const shardSizes = plans.map((plan) => plan.selected.length);
+assert(Math.max(...shardSizes) - Math.min(...shardSizes) <= 1);
 const names = plans.flatMap((plan) => plan.selected.map(([name]) => name));
 assert.equal(new Set(names).size, tests.length);
 assert.deepStrictEqual([...names].sort(), tests.filter(([, , meta]) => meta.ci).map(([name]) => name).sort());
-for (const arg of ['--shard', '--shard=', '--shard=0/4', '--shard=5/4', '--shard=1/0', '--shard=1.5/4', '--shard=01/4', '--shard=1/4x', '--shard=33/33', '--shard=1/9007199254740992']) {
+for (const arg of ['--shard', '--shard=', '--shard=0/4', '--shard=5/4', '--shard=1/0', '--shard=1.5/4', '--shard=01/4', '--shard=1/4x', `--shard=${tests.length + 1}/${tests.length + 1}`, '--shard=1/9007199254740992']) {
   assert.throws(() => selectTests([arg], {}), /shard/i, arg);
 }
 assert.throws(() => selectTests(['--shard=1/4', '--shard=2/4'], {}), /shard/i);

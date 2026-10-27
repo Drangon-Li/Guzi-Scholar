@@ -19,7 +19,7 @@ function exerciseUnitRunner(platform, env, available) {
         if (name === 'fs') return { existsSync: () => true };
         return require(name);
       },
-      process: { platform, env, cwd: () => __dirname, exit(value) { status = value; throw exit; } },
+      process: { platform, env, argv: ['node', 'runner', '--all'], cwd: () => __dirname, exit(value) { status = value; throw exit; } },
       console,
     });
   } catch (error) {
@@ -32,7 +32,7 @@ function exerciseUnitRunner(platform, env, available) {
   const { calls, status } = exerciseUnitRunner('win32', {}, (command) => command === 'py');
   assert.equal(status, 0);
   assert.deepEqual(calls.map((call) => call.command), ['python', 'python3', 'py', 'py']);
-  assert.deepEqual(calls.at(-1).args, ['-3', '-B', '-m', 'unittest', 'discover', '-s', 'tests', '-v']);
+  assert.deepEqual(calls.at(-1).args, ['-3', '-B', 'tests/run_python_suite.py', '--all']);
   assert(calls.every((call) => call.options.windowsHide === true && !call.options.shell));
 }
 

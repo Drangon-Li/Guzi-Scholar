@@ -47,11 +47,11 @@ function annotations(id) {
   }));
 }
 function instrument(source) {
-  const functions = ['openReader', 'renderFrameAnnotations', 'rebuildReaderSentencePairs', 'buildReaderIndexes',
+  const functions = ['openReader', 'renderFrameAnnotations', 'buildReaderIndexes',
     'applyTypography', 'applyAppearance', 'renderCachedTranslations', 'installCitationHoverPreviews'];
   functions.forEach((name) => assert.match(source, new RegExp(`function ${name}\\(`), `Missing instrumentation target ${name}`));
   const injection = `
-  window.__switchPerformance = { metrics: {}, refs: {}, internals: () => ({ pairs: readerSentenceState.pairs, sections: readerSections }) };
+  window.__switchPerformance = { metrics: {}, refs: {}, internals: () => ({ sections: readerSections }) };
   ${functions.map((name) => `{
     const original = ${name};
     ${name} = function (...args) {
@@ -171,7 +171,6 @@ async function staticServer() {
         const ref = window.__switchPerformance.refs[jobId];
         if (ref) {
           const internals = window.__switchPerformance.internals();
-          ref.rangesPreserved &&= internals.pairs === ref.pairs;
           ref.sectionsPreserved &&= internals.sections === ref.sections;
         }
       }, id);
@@ -194,7 +193,7 @@ async function staticServer() {
           frame, doc, marks: [...doc.querySelectorAll('mark[data-annotation-id]')],
           translations: [...doc.querySelectorAll('.my-scholar-translation')],
           paragraph: doc.querySelector('[data-block-id="paragraph-0"]'),
-          ...window.__switchPerformance.internals(), rangesPreserved: true, sectionsPreserved: true, observation, observer,
+          ...window.__switchPerformance.internals(), sectionsPreserved: true, observation, observer,
         };
       }, id);
       await page.waitForFunction(() => document.querySelector('#html-preview').contentWindow.scrollY >= 3998);
@@ -232,7 +231,6 @@ async function staticServer() {
         marks: ref.marks.every((node) => node.isConnected),
         translations: ref.translations.every((node) => node.isConnected),
         sectionIndexes: ref.sectionsPreserved && (!active || internals.sections === ref.sections),
-        sentenceRanges: ref.rangesPreserved && (!active || internals.pairs === ref.pairs),
         scroll: Math.abs(ref.doc.defaultView.scrollY - 4000) <= 2,
         ...ref.observation,
       }];
@@ -245,11 +243,10 @@ async function staticServer() {
     assert.deepEqual(unexpected, [], 'All API traffic must stay inside the synthetic fixture');
     if (!baseline) {
       for (const [id, value] of Object.entries(preserved)) {
-        assert.ok(value.tab && value.marks && value.sentenceRanges && value.sectionIndexes, `Unchanged reader DOM or indexes rebuilt for ${id}: ${JSON.stringify(value)}`);
+        assert.ok(value.tab && value.marks && value.sectionIndexes, `Unchanged reader DOM or indexes rebuilt for ${id}: ${JSON.stringify(value)}`);
         assert.equal(value.removedMarks, 0, `Warm switches removed saved annotation marks for ${id}`);
         assert.equal(value.removedTranslations, 0, `Warm switches removed cached translations for ${id}`);
       }
-      assert.equal(metrics.rebuildReaderSentencePairs?.calls || 0, 0, 'Warm switching rebuilt unchanged sentence ranges');
 
       const animations = await page.evaluate(() => window.__switchAnimations);
       assert.ok(animations.length >= 10, 'Warm activation should apply the document opacity animation');
