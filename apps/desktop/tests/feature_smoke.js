@@ -133,10 +133,23 @@ let page;
     batch.observer = new MutationObserver(() => { batch.writes.push(status.textContent); });
     batch.observer.observe(status, { childList: true, characterData: true, subtree: true });
   });
+  const initialReaderData = Promise.all(['annotations', 'notes', 'media-layout', 'translations'].map((resource) => page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return response.request().method() === 'GET' && url.pathname === `/api/jobs/${jobId}/${resource}`;
+  }))).then((responses) => Promise.all(responses.map((response) => response.finished())));
+  const initialDocumentURL = (url) => url.pathname === `/api/jobs/${jobId}/document.html`;
+  const deferInitialDocument = async (route) => {
+    // Exercise data responses winning the race against iframe navigation.
+    await initialReaderData;
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    await route.continue();
+  };
+  await page.route(initialDocumentURL, deferInitialDocument);
   await firstCard.dblclick();
   await page.locator('#reader-view.active-view').waitFor();
   const frame = page.frameLocator('#html-preview');
   await frame.locator('.pdf-page').first().waitFor();
+  await page.unroute(initialDocumentURL, deferInitialDocument);
   try {
     await page.waitForFunction(() => window.__initialHighlightBatch.writes.includes('AI 建议，仅供参考 · 点击可采纳或忽略'));
   } catch (error) {

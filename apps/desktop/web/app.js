@@ -3979,6 +3979,8 @@
       run.document = null;
     }
     readerMounts.delete(jobId);
+    mount.resolveDocumentReady?.();
+    mount.resolveDocumentReady = null;
     mount.frame.remove();
   }
 
@@ -4026,6 +4028,7 @@
       saveMaxTimer: null,
       activeSectionIndex: -1,
       };
+      mount.documentReady = new Promise((resolve) => { mount.resolveDocumentReady = resolve; });
       readerMounts.set(jobId, mount);
       frame.addEventListener('load', () => {
         if (!readerMountIsCurrent(mount) || readerURLIdentity(frame.contentDocument?.URL) !== mount.urlIdentity) return;
@@ -4034,6 +4037,8 @@
           mount.preparingActivation = null;
         }
         mount.loaded = true;
+        mount.resolveDocumentReady?.();
+        mount.resolveDocumentReady = null;
         if (readerMount === mount) void prepareMountedReader(mount);
       });
       frame.src = url;
@@ -6390,6 +6395,7 @@
           --reader-ui-paper:#fff;
           --reader-ui-ink:#191919;
           --reader-ui-muted:#756b60;
+          background:var(--paper,var(--reader-ui-paper));
         }
         /* Some saved documents define the theme variables without applying them to text. */
         body.reader-embedded,
@@ -11746,7 +11752,7 @@
     }).catch((error) => {
       if (readerMountIsCurrent(mount)) handleArticleNotesLoadError(jobId, error, notesSession);
     });
-    await Promise.all([notesPromise, annotationsReady, mount.layoutReady]);
+    await Promise.all([notesPromise, annotationsReady, mount.layoutReady, mount.documentReady]);
     if (!current()) return;
     state.chat = chatSession(jobId); renderChat();
     if (!mount.highlightsLoaded && !mount.highlightsPending) {
