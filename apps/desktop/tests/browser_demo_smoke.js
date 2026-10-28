@@ -115,6 +115,9 @@ async function run() {
   try {
     const context = await session.browser.newContext({ viewport: { width: 1460, height: 960 } });
     contexts.push(context);
+    const health = await context.request.get(new URL('/api/health', baseURL).href);
+    assert(health.ok(), 'Fixture health endpoint must be available.');
+    assert.equal((await health.json()).readonly, true, 'Browser demo smoke requires a read-only fixture server.');
     context.on('request', (request) => {
       if (!['GET', 'HEAD', 'OPTIONS'].includes(request.method())) networkWrites.push(`${request.method()} ${request.url()}`);
     });

@@ -198,7 +198,7 @@ def _write_media_layout(job_dir: Path, items: Dict[str, Dict[str, float]]) -> Di
         temporary.unlink(missing_ok=True)
     return layout
 
-def _write_content_manifest(job_dir: Path, *, updated_at: Optional[str] = None) -> None:
+def _write_content_manifest(job_dir: Path, *, updated_at: Optional[str] = None, english_source: Optional[Dict[str, Any]] = None) -> None:
     if runtime.READONLY_MODE:
         return
     root = _content_root(job_dir)
@@ -207,10 +207,12 @@ def _write_content_manifest(job_dir: Path, *, updated_at: Optional[str] = None) 
     if not isinstance(current, dict):
         current = {}
     existing = dict(current)
+    if english_source is not None:
+        current["english_source"] = english_source
     current.update({
         "version": 1,
         "source_pdf": "../source.pdf" if (job_dir / "source.pdf").is_file() else "../upload.pdf",
-        "html": "../document.html",
+        "html": "../" + (_active_conversion_root(job_dir) / "document.html").relative_to(job_dir).as_posix(),
         "english": "english/blocks.json",
         "chinese": "chinese/blocks.json",
         "notes": "notes/notes.md",
@@ -221,28 +223,35 @@ def _write_content_manifest(job_dir: Path, *, updated_at: Optional[str] = None) 
     # Reads call this defensively; only touch the disk when something changed.
     if existing and {**current, "updated_at": existing.get("updated_at")} == existing:
         return
-    temporary = _atomic_temp_path(manifest_path)
-    temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(manifest_path)
+    _atomic_write_text(manifest_path, json.dumps(current, ensure_ascii=False, indent=2))
 
-def _write_english_snapshot(job_dir: Path) -> None:
+def _write_english_snapshot(job_dir: Path) -> Optional[Dict[str, Any]]:
     """Materialize a compact English block index from the deterministic HTML."""
     if runtime.READONLY_MODE:
         return
     root = _content_root(job_dir)
     target = root / "english" / "blocks.json"
-    if target.is_file():
-        return
-    document = _read_json_file(_active_conversion_root(job_dir) / "document.json", {})
+    document_path = _active_conversion_root(job_dir) / "document.json"
+    source: Dict[str, Any] = {"path": document_path.relative_to(job_dir).as_posix(), "stat": None}
+    try:
+        source_stat = document_path.stat()
+        source["stat"] = {
+            "size": source_stat.st_size,
+            "mtime_ns": source_stat.st_mtime_ns,
+        }
+    except OSError:
+        pass
+    current = _read_json_file(root / "manifest.json", {})
+    if target.is_file() and isinstance(current, dict) and current.get("english_source") == source:
+        return source
+    document = _read_json_file(document_path, {})
     blocks: List[Dict[str, Any]] = []
     semantic_validation = document.get("semantic_validation", {}) if isinstance(document, dict) else {}
     semantic_failed = isinstance(semantic_validation, dict) and semantic_validation.get("status") == "FAIL"
     translation_disabled = isinstance(document, dict) and document.get("translation_enabled") is False
     if semantic_failed or translation_disabled:
-        temporary = _atomic_temp_path(target)
-        temporary.write_text(json.dumps({"version": 1, "blocks": []}, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(target)
-        return
+        _atomic_write_text(target, json.dumps({"version": 1, "source": source, "blocks": []}, ensure_ascii=False, indent=2))
+        return source
     for page in document.get("pages", []) if isinstance(document, dict) else []:
         if not isinstance(page, dict):
             continue
@@ -254,16 +263,15 @@ def _write_english_snapshot(job_dir: Path) -> None:
             block_id = str(element.get("block_id") or "").strip()
             if text and block_id:
                 blocks.append({"block_id": block_id, "page": page_number, "text": text, "type": element.get("type")})
-    temporary = _atomic_temp_path(target)
-    temporary.write_text(json.dumps({"version": 1, "blocks": blocks}, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(target)
+    _atomic_write_text(target, json.dumps({"version": 1, "source": source, "blocks": blocks}, ensure_ascii=False, indent=2))
+    return source
 
 def _ensure_content_layout(job_dir: Path) -> None:
     if runtime.READONLY_MODE:
         return
     _content_root(job_dir)
-    _write_english_snapshot(job_dir)
-    _write_content_manifest(job_dir)
+    english_source = _write_english_snapshot(job_dir)
+    _write_content_manifest(job_dir, english_source=english_source)
 
 def _sync_content_file(job_dir: Path, relative: str, payload: Any) -> None:
     if runtime.READONLY_MODE:

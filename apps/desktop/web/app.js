@@ -353,9 +353,7 @@
   if (window.myScholarDesktop?.platform === 'darwin') document.documentElement.classList.add('desktop-macos');
 
   const escapeHTML = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
-  const annotationStyleSyncs = [];
-  const annotationResponseRevisions = new WeakMap();
-  const api = async (url, options = {}) => {
+  const requestAPI = async (url, options = {}) => {
     const response = await request(url, options);
     const payload = await response.json().catch(() => ({}));
     await waitForCloseResume(options.closeSave === true);
@@ -367,15 +365,14 @@
       error.status = response.status;
       throw error;
     }
-    const currentAnnotation = (annotation) => {
-      annotationResponseRevisions.set(annotation, Number(payload.annotation_style_revision) || 0);
-      for (const sync of annotationStyleSyncs) annotation = applyAnnotationActionFields(annotation, sync.updates, sync.revision);
-      return annotation;
-    };
-    if (Array.isArray(payload.annotations)) payload.annotations = payload.annotations.map(currentAnnotation);
-    if (payload.annotation) payload.annotation = currentAnnotation(payload.annotation);
     return payload;
   };
+  const annotationOperations = window.MyScholarAnnotationOperations.create({
+    request: requestAPI, getCloseGate: () => request.closeGate, waitForCloseResume,
+    state, mounts: readerMounts, getCurrentMount: () => readerMount,
+    isCurrentMount: readerMountIsCurrent, matchesMount: readerMountMatches, isAIAnnotation,
+  });
+  const api = annotationOperations.api;
   const jsonOptions = (body, method = 'POST') => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
   const pluginHost = window.MyScholarPluginHost.create({
     api, jsonOptions, navigate: openPrimaryView, toast: showToast, confirm: requestConfirmation,
@@ -2622,11 +2619,7 @@
       const cellRow = cell.closest('.library-row');
       if (cellRow && !state.selectedLibraryJobIds.has(cellRow.dataset.jobId)) selectLibraryRow(cellRow);
       openLibraryCellEditor(cell);
-      return;
     }
-    // Row controls own their click lifecycle; clicking a button or link must
-    // not unexpectedly navigate into the reader.
-    if (event.target.closest('button, select, input, a')) return;
   }
   async function handleLibraryListDblClick(event) {
     const row = event.target.closest('.library-row');
@@ -7169,7 +7162,7 @@
         installCitationHoverPreviews(doc);
         updateReaderProgress(doc);
       }
-      if (!mount.ready && !await restoreReadingLocationAfterLoad(mount, activation)) return;
+      if (!mount.ready) await restoreReadingLocationAfterLoad(mount, activation);
     } catch (error) {
       if (current()) setPanelStatus(`阅读位置恢复失败：${error.message}`, true);
     } finally {
@@ -7651,9 +7644,7 @@
           source: 'manual',
           ...location,
         }));
-        if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
-        if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return null;
-        state.annotations = payload.annotations || state.annotations;
+        if (!annotationOperations.applyResult(jobId, mount, payload)) return null;
         manual = state.annotations.find((item) => item.id === payload.annotation?.id) || manualAnnotationForSuggestion(annotation);
       }
       renderAnnotations();
@@ -7681,9 +7672,7 @@
     if (!readerMountMatches(mount)) return;
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations/${annotation.id}`, jsonOptions({ suggestion_state: suggestionState }, 'PATCH'));
-      if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
-      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return false;
-      state.annotations = payload.annotations || state.annotations;
+      if (!annotationOperations.applyResult(jobId, mount, payload)) return false;
       renderAnnotations();
       renderFrameAnnotations();
       showToast(suggestionState === 'ignored' ? '已忽略这条 AI 建议，可在阅读重点中恢复。' : 'AI 建议已恢复。');
@@ -7814,9 +7803,7 @@
     if (button) button.disabled = true;
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations/${annotation.id}`, jsonOptions({ kind }, 'PATCH'));
-      if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
-      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
-      state.annotations = payload.annotations || state.annotations;
+      if (!annotationOperations.applyResult(jobId, mount, payload)) return;
       const updated = state.annotations.find((item) => item.id === annotation.id) || payload.annotation;
       Object.assign(annotation, updated || { kind });
       renderFrameAnnotations();
@@ -7841,9 +7828,7 @@
     buttons.forEach((button) => { button.disabled = true; });
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations/${annotation.id}`, jsonOptions({ color: nextColor }, 'PATCH'));
-      if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
-      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
-      state.annotations = payload.annotations || state.annotations;
+      if (!annotationOperations.applyResult(jobId, mount, payload)) return;
       const updated = state.annotations.find((item) => item.id === annotation.id) || { ...annotation, color: nextColor };
       Object.assign(annotation, updated);
       frameDocument()?.querySelectorAll(`:is(mark, mrow)[data-annotation-id="${cssEscape(annotation.id)}"]`).forEach((mark) => applyAnnotationColor(mark, annotation));
@@ -8024,9 +8009,7 @@
     let note = '';
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations`, jsonOptions({ ...selection, kind, note, category: 'method', color: action?.color || annotationColorFor(kind), source: 'manual', ...(action ? { action_id: action.id, label: action.label } : {}) }));
-      if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
-      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
-      state.annotations = payload.annotations || [];
+      if (!annotationOperations.applyResult(jobId, mount, payload, { defaultEmpty: true })) return;
       const currentTarget = state.selection;
       renderFrameAnnotations();
       renderAnnotations();
@@ -8051,22 +8034,8 @@
       setPanelStatus(error.message, true);
     }
   }
-  function applyAnnotationActionFields(annotation, updates, revision = 0) {
-    if (revision && (annotationResponseRevisions.get(annotation) || 0) >= revision) return annotation;
-    const fields = updates[annotation?.action_id];
-    const updated = fields && !isAIAnnotation(annotation) ? { ...annotation, ...fields } : annotation;
-    if (revision) annotationResponseRevisions.set(updated, revision);
-    return updated;
-  }
-
   function applyAnnotationActionSync(sync) {
-    if (!sync?.updates || !Object.keys(sync.updates).length) return;
-    const revision = Number(sync.revision) || annotationStyleSyncs.length + 1;
-    annotationStyleSyncs.push({ updates: sync.updates, revision });
-    readerMounts.forEach((mount) => {
-      mount.annotations = mount.annotations.map((annotation) => applyAnnotationActionFields(annotation, sync.updates, revision));
-    });
-    state.annotations = readerMount?.annotations || state.annotations.map((annotation) => applyAnnotationActionFields(annotation, sync.updates, revision));
+    if (!annotationOperations.applyStyleSync(sync)) return;
     renderAnnotations();
     renderFrameAnnotations();
   }
@@ -8556,9 +8525,7 @@
     if (!readerMountMatches(mount)) return;
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations/${annotation.id}`, jsonOptions({ note }, 'PATCH'));
-      if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
-      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
-      state.annotations = payload.annotations || state.annotations;
+      if (!annotationOperations.applyResult(jobId, mount, payload)) return;
       renderAnnotations();
       renderFrameAnnotations();
       const refreshed = state.annotations.find((item) => item.id === annotation.id) || annotation;
@@ -8576,11 +8543,9 @@
     const mount = readerMount;
     if (!readerMountMatches(mount)) return;
     try {
-      await api(`/api/jobs/${jobId}/annotations/${annotation.id}`, { method: 'DELETE' });
-      if (readerMountIsCurrent(mount)) mount.annotations = (mount.annotations || []).filter((item) => item.id !== annotation.id);
-      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
+      const payload = await api(`/api/jobs/${jobId}/annotations/${annotation.id}`, { method: 'DELETE' });
+      if (!annotationOperations.applyResult(jobId, mount, payload, { deletedId: annotation.id })) return;
       closeInlineAnnotation();
-      state.annotations = state.annotations.filter((item) => item.id !== annotation.id);
       renderFrameAnnotations();
       renderAnnotations();
     } catch (error) {
@@ -8606,9 +8571,7 @@
     button.disabled = true;
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations`, { method: 'DELETE' });
-      if (readerMountIsCurrent(mount) && payload.annotations) mount.annotations = payload.annotations;
-      if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
-      state.annotations = payload.annotations || [];
+      if (!annotationOperations.applyResult(jobId, mount, payload, { defaultEmpty: true })) return;
       closeInlineAnnotation();
       renderAnnotations();
       renderFrameAnnotations();
@@ -11707,9 +11670,7 @@
         continue;
       }
       const saved = await api(`/api/jobs/${jobId}/annotations`, jsonOptions({ kind: 'highlight', quote: suggestion.quote, block_id: suggestion.block_id, note: suggestion.reason || '', category, color: 'orange', source: 'ai' }));
-      if (readerMountIsCurrent(mount) && saved.annotations) mount.annotations = saved.annotations;
-      if (!readerMountMatches(mount) || !isActiveReaderJob(jobId)) break;
-      state.annotations = saved.annotations || state.annotations;
+      if (!annotationOperations.applyResult(jobId, mount, saved, { allowStateUpdate: isActiveReaderJob(jobId) })) break;
       added += 1;
     }
     if (!readerMountMatches(mount) || !isActiveReaderJob(jobId)) return added;
@@ -14508,7 +14469,7 @@
     if (request.closeGate) return request.closeGate;
     let wake;
     const surfaces = [...new Set([document, frameDocument()].filter(Boolean))].map((doc) => ({ doc, inert: doc.body?.inert }));
-    const gate = { allowSave: true, surfaces, pendingWrites: [...request.inFlightWrites], changed: new Promise((resolve) => { wake = resolve; }) };
+    const gate = { allowSave: true, surfaces, pendingWrites: [...request.inFlightWrites], annotationWrites: annotationOperations.capturePendingWrites(), changed: new Promise((resolve) => { wake = resolve; }) };
     gate.wake = () => {
       wake();
       gate.changed = new Promise((resolve) => { wake = resolve; });
@@ -14559,6 +14520,9 @@
         if (!isCurrent()) return false;
         if (!discard && pendingWrites.some((result) => result.status !== 'fulfilled' || result.value?.ok !== true)) saved = false;
         if (!discard) {
+          const annotationWritesSaved = await annotationOperations.waitForPendingWrites(gate.annotationWrites);
+          if (!isCurrent()) return false;
+          if (!annotationWritesSaved) saved = false;
           if (await flushPendingArticleNotes(null, { isCurrent }) !== true) saved = false;
           if (!isCurrent()) return false;
           if (await flushPendingSettings({ isCurrent }) !== true || settingsSavedRevision < settingsSaveRevision) saved = false;

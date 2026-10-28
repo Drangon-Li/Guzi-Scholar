@@ -275,14 +275,13 @@ class LayoutTranscriptSurvivesCandidateTest(unittest.TestCase):
             job_dir.mkdir()
             (Path(temp) / "input.pdf").write_bytes(b"%PDF-1.4\n")
             with patch.object(pipeline_module, "_process_layout_candidate", side_effect=fake):
-                # The outer handler converts it, since the cancellation type
-                # subclasses LayoutPipelineError.
-                with self.assertRaises(pipeline_module.PipelineError):
+                with self.assertRaises(layout_pipeline.LayoutPipelineCancelled):
                     pipeline_module.process_pdf(
                         Path(temp) / "input.pdf", job_dir,
                         job_id="testjob", source_name="paper.pdf", backend_override="layout",
                     )
             self.assertFalse((job_dir / "layout" / "mineru.log").exists())
+            self.assertFalse((job_dir / "layout-error.log").exists())
 
 
 class PreserveLayoutErrorLogTest(unittest.TestCase):

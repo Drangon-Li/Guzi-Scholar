@@ -25,10 +25,10 @@
 
   function sentenceContext(text, start, end) {
     const before = text.slice(0, start);
-    const boundary = /[.!?。！？]\s+/gu;
+    const boundary = /[。！？]\s*|[.!?]\s+/gu;
     let left = 0;
     for (const match of before.matchAll(boundary)) left = match.index + match[0].length;
-    const tail = text.slice(end).match(/[.!?。！？](?:\s|$)/u);
+    const tail = text.slice(end).match(/[。！？]|[.!?](?:\s|$)/u);
     return text.slice(left, tail ? end + tail.index + 1 : text.length).trim().slice(0, 10000);
   }
 

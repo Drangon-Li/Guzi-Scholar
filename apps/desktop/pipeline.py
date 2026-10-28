@@ -898,8 +898,9 @@ def process_pdf(
     job_dir.parent.mkdir(parents=True, exist_ok=True)
     selection: Dict[str, Any] = {}
     if backend != "odl":
+        layout_module = None
         try:
-            from layout_pipeline import LayoutPipelineCancelled, LayoutPipelineError
+            import layout_pipeline as layout_module
 
             with tempfile.TemporaryDirectory(prefix=f".{job_id}-layout-", dir=str(job_dir.parent)) as temp:
                 candidate_dir = Path(temp)
@@ -917,10 +918,10 @@ def process_pdf(
                         layout_server_url=layout_server_url,
                         cancel_event=cancel_event,
                     )
-                except LayoutPipelineCancelled:
+                except layout_module.LayoutPipelineCancelled:
                     # A cancellation explains itself; it is not a diagnostic.
                     raise
-                except LayoutPipelineError:
+                except layout_module.LayoutPipelineError:
                     _preserve_layout_transcript(candidate_dir, job_dir)
                     raise
                 if manifest is not None:
@@ -947,31 +948,23 @@ def process_pdf(
                     "rejected_backend": "layout",
                     "reason": "layout-backend-unavailable",
                 }
-        except LayoutPipelineError as exc:
-            if backend == "layout":
-                job_dir.mkdir(parents=True, exist_ok=True)
-                (job_dir / "layout-error.log").write_text(str(exc), encoding="utf-8")
-                raise PipelineError(str(exc)) from exc
-            selection = {
-                "selected_backend": "OpenDataLoader PDF CLI",
-                "rejected_backend": "layout",
-                "reason": "layout-error",
-                "error": str(exc),
-            }
         except Exception as exc:
+            if layout_module is not None and isinstance(exc, layout_module.LayoutPipelineCancelled):
+                raise
+            expected_error = layout_module is not None and isinstance(exc, layout_module.LayoutPipelineError)
+            diagnostic = str(exc) if expected_error else f"{type(exc).__name__}: {exc}"
             # Keep auto mode usable when an optional layout dependency is
             # unavailable, while leaving a concrete diagnostic artifact.
             if backend == "layout":
                 job_dir.mkdir(parents=True, exist_ok=True)
-                (job_dir / "layout-error.log").write_text(
-                    f"{type(exc).__name__}: {exc}", encoding="utf-8"
-                )
-                raise PipelineError(f"版面解析失败：{exc}") from exc
+                (job_dir / "layout-error.log").write_text(diagnostic, encoding="utf-8")
+                message = str(exc) if expected_error else f"版面解析失败：{exc}"
+                raise PipelineError(message) from exc
             selection = {
                 "selected_backend": "OpenDataLoader PDF CLI",
                 "rejected_backend": "layout",
                 "reason": "layout-error",
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": diagnostic,
             }
     if backend == "odl":
         return _process_pdf_odl(

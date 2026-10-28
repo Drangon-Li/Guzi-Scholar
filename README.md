@@ -1,41 +1,96 @@
 # 谷子学术（Guzi Scholar）
 
-谷子学术是一个本地优先的学术 PDF 阅读器：把论文转换为连续、可检索的阅读页面，并在同一个桌面应用中提供文献管理、翻译、标注、笔记和文章助手。
+本地优先的学术 PDF 阅读器，把文献整理、连续阅读与翻译、标注笔记和生词复习放在同一个桌面应用中。
 
-项目当前专注于 macOS 桌面版。除非明确指定其他平台，后续功能开发、本机测试、默认 CI 验证与新版发行均以 macOS 为目标。Windows 代码和手动构建入口保留，暂不持续开发、测试或发布新版。论文、译文、笔记、标注、设置和 AI 配置默认保存在本机；AI 服务由用户自行填写 OpenAI-compatible API 地址、密钥和模型。
+论文和阅读成果默认保存在本机；翻译与文章助手由你配置自己的 API 服务。
 
-English documentation is coming soon. See [README.en.md](README.en.md) for the current English placeholder.
+[下载桌面版](https://github.com/Drangon-Li/Guzi-Scholar/releases) · [在线体验](https://scholar.guzilab.com/) · [English](README.en.md)
 
-## 在线演示
+![谷子学术连续阅读与翻译界面](docs/images/reading.jpg)
+
+*截图来自公开《Attention Is All You Need》样例的网页演示；AI 译文和回答均为预置示例，不代表实时模型效果，也不展示私人文献库。*
+
+## 从整理到读懂，再留下自己的积累
+
+### 1. 整理文献，找到下一篇要读的论文
+
+导入 PDF，用文件夹、阅读状态、自定义属性和筛选视图整理文献。按自己的研究主题安排阅读，把待读、在读和已读的论文放在清楚的位置。
+
+![文献库与阅读状态](docs/images/library.jpg)
+
+*截图来自公开《Attention Is All You Need》样例的网页演示；AI 译文和回答均为预置示例，不代表实时模型效果，也不展示私人文献库。*
+
+### 2. 连续阅读，在上下文中理解原文
+
+将 PDF 转为连续阅读页面，结合目录和可调整的字号、行距阅读正文。遇到难句时使用选区翻译，需要通读时使用全文翻译；也可以围绕文章向阅读助手提问。译文缓存保存在本机，方便再次阅读。
+
+本地转换可直接使用安装包附带的工具；复杂版面也可选择自行部署的 GLM-OCR + MinerU 融合解析服务。转换质量取决于原始 PDF 和所用解析引擎。翻译、问答等 AI 功能需要自行配置服务。
+
+### 3. 标注与笔记，保留自己的理解
+
+在阅读时高亮原文、添加批注，并用文章笔记整理问题与结论。笔记支持插入图片；个人标注与 AI 阅读重点分开保存，回看时能区分自己的记录和模型建议。
+
+![文章笔记与标注](docs/images/notes.jpg)
+
+*截图来自公开《Attention Is All You Need》样例的网页演示；AI 译文和回答均为预置示例，不代表实时模型效果，也不展示私人文献库。*
+
+### 4. 收藏生词，带着原句复习
+
+选中原文中的单词或短语，加入生词本并保留原句与文献来源。可以编辑释义、标签和备注，按“未掌握 / 已掌握”筛选复习，再回到论文上下文查看用法。
+
+![生词本、原句与文献来源](docs/images/vocabulary.jpg)
+
+*截图来自公开《Attention Is All You Need》样例的网页演示；AI 译文和回答均为预置示例，不代表实时模型效果，也不展示私人文献库。*
+
+## 先试用，再安装
 
 **[打开网页体验版 → scholar.guzilab.com](https://scholar.guzilab.com/)**
 
-无需安装即可使用公开论文样例，体验完整阅读侧边栏、笔记、批注和生词本。编辑内容仅保存在当前浏览器，刷新后保留，也可重置测试数据。
+无需安装即可用公开论文样例体验阅读侧边栏、笔记、批注和生词本。编辑内容保存在当前浏览器，刷新后保留，也可重置测试数据。
 
-AI 回答和译文均为明确标注的预置示例，不调用真实模型。加载网页及样例需要联网；PDF 上传、重新解析和 Zotero 等功能请使用桌面版。
+网页中的 AI 回答和译文均为明确标注的预置示例，不调用真实模型。加载网页及样例需要联网；PDF 上传、重新解析、Zotero 导入和真实 AI 服务请使用桌面版。
 
-## 功能
+## 下载与平台支持
 
-- 导入 PDF，使用本地基础转换或自行配置的远端 GLM-OCR + MinerU 融合解析，生成结构化阅读页面
-- 文献库、文件夹、自定义属性、阅读状态和关系图谱
-- 原文、译文、笔记、标注和图片资产保存在本机
-- 选区翻译、全文翻译、文章问答、阅读重点和表格复核
-- macOS 桌面应用，保留共享源码和独立的平台打包层
-
-## 下载
-
-前往 [Releases](https://github.com/Drangon-Li/Guzi-Scholar/releases) 下载最新 macOS 安装包：
+前往 [Releases](https://github.com/Drangon-Li/Guzi-Scholar/releases) 下载桌面安装包：
 
 | 平台 | 产物 | 当前状态 |
 | --- | --- | --- |
 | macOS Apple Silicon | `.dmg`（安装）、`.zip`（应用内更新） | 持续维护，尚未公证 |
-| Windows x64 | 历史 `.exe` / `.zip` | 暂停新版开发、测试与发行，旧版仍可从历史 Releases 下载 |
+| Windows x64 | `.exe` / `.zip` | 按大版本计划在关键版本更新；现有安装包可从历史 Releases 下载 |
+
+macOS 是当前主要开发与发布平台，日常功能迭代、本机测试和默认 CI 验证均以 macOS 为目标。
+
+**Windows 版本暂缓日常持续迭代，但不会终止开发。** 后续将按照项目大版本的目标和需求，集中推进 Windows 适配、测试与发布，仅在关键版本更新，不跟随每次 macOS 小版本同步发行。Windows 源码和手动构建入口继续保留。
 
 macOS 发布包内置 Python、Java、Pandoc、OpenDataLoader 和 PyMuPDF 运行时，使用 ad-hoc 签名，尚未通过 Apple Developer ID 签名或 Apple 公证。首次打开时如果遇到 Gatekeeper 提示，请在 Finder 中右键“谷子学术.app”并选择“打开”，再确认提示。应用支持启动时检查更新及手动检查，通过 Sparkle 校验更新签名后安装；也可从 Releases 下载 DMG 手动更新。
+
+## 开始使用
+
+1. 安装桌面版，导入自己的 PDF，等待本地转换完成。
+2. 在设置中配置翻译与文章助手的服务地址、API Key 和模型。两项服务可以分别配置，支持 OpenAI-compatible API 等界面提供的服务格式；应用不提供供应商密钥或内置大模型。
+3. 打开论文开始阅读，按需翻译、标注、记笔记或收藏生词。未配置 AI 服务时，文献管理、已转换内容的阅读、标注和本地笔记仍可使用。
+
+需要使用自建 GPU 解析服务时，见下方[远端解析服务器配置](#远端解析服务器配置)。
+
+## 数据与隐私
+
+PDF、译文、笔记、标注、生词、设置和 AI 配置默认保存在当前设备。安装版将应用状态和文献库分别保存，也可以在设置中选择文献库位置。
+
+“本地优先”不代表所有功能都离线运行：
+
+- 开启在线元数据检索时，论文标识符、标题或作者候选会发送到相应公共服务。
+- 使用翻译、文章助手或 AI 辅助释义时，相应文本、文章上下文或你明确加入的图片会发送到自行配置的服务。
+- 启用远端融合解析时，原 PDF 会上传到你指定的解析服务器，解析结果下载后保存在本机。
+
+不要把真实 API Key、用户数据、`data/`、`developer.tokens.json` 或本地构建产物提交到 Git。
 
 ## 远端解析服务器配置
 
 远端融合解析是可选功能，需要你自己的 Linux NVIDIA GPU 服务器。安装包不附带公共解析服务器、访问凭据或模型权重。启用后，导入 PDF 和 AI 重新排版会把原 PDF 上传到指定服务器；结果下载后仍保存在本机。翻译和文章助手的 API 配置与解析服务器配置相互独立。
+
+<details>
+<summary>展开连接配置、自行部署步骤与常见问题</summary>
 
 ### 已有解析服务器：连接桌面端
 
@@ -101,6 +156,9 @@ MY_SCHOLAR_REMOTE_PARSER_CONFIG="$HOME/.config/guzi-scholar/remote-parser.config
 
 常见问题：`未配置` 检查配置文件位置和 `enabled`；`SSH 隧道启动失败` 检查 SSH 端口、用户名、私钥及可信主机指纹；`本机转发端口已被占用` 换空闲端口；`HTTP 401` 检查两端 token；`服务尚未就绪` 检查 `/health` 的缺失文件和服务日志；`Resource preflight failed` 释放资源后再试。启用远端后，连接失败会明确报错，不会悄悄切到本地 AI 引擎。
 
+
+</details>
+
 ## 本地开发
 
 ```sh
@@ -117,11 +175,11 @@ npm run desktop:check
 npm run build:mac
 ```
 
-完整的桌面服务、前端和测试代码位于 `apps/desktop/`。默认开发与运行时、界面验收在 macOS 上进行；共享代码的静态检查可使用 Linux CI。Windows 启动器及 `build:windows` / `verify:windows` 命令仅作为明确要求恢复 Windows 工作时的手动入口，不属于默认验收范围。
+完整的桌面服务、前端和测试代码位于 `apps/desktop/`。默认开发与运行时、界面验收在 macOS 上进行；共享代码的静态检查可使用 Linux CI。Windows 启动器及 `build:windows` / `verify:windows` 命令保留，供关键版本的集中适配、构建和验收使用，不属于日常默认验收范围。
 
 macOS Release workflow 会自动准备 Temurin JDK 21、Python 3.11、`certifi`、PyInstaller，并下载固定版本的 OpenDataLoader CLI；当前 GitHub 发布使用 ad-hoc 签名，不需要 GitHub Secrets 中的 Apple Developer ID 或公证凭据。它是可追溯的 GitHub 发布版，但仍需在 Finder 中确认首次启动；未来购买 Apple Developer Program 后，可再启用 Apple 正式签名和公证路径。
 
-默认 Release 只构建 macOS 产物，并要求对应版本的签名、资产完整性检查及真实 macOS 升级验收通过后才能发布。Windows CI 只接受手动触发；显式选择包含 Windows 的候选版本时，仍须完成 Windows 构建和升级验收。
+默认 Release 只构建 macOS 产物，并要求对应版本的签名、资产完整性检查及真实 macOS 升级验收通过后才能发布。Windows CI 只接受手动触发；纳入大版本计划的 Windows 候选版本，仍须完成 Windows 构建和升级验收后才能发布。
 
 ## 项目结构
 
@@ -144,12 +202,8 @@ deploy/              # 私有部署与运维脚本
 
 平台层只负责图标、安装器、Python 探测、进程终止、签名和发布配置；业务逻辑、渲染器和本地服务由 `apps/desktop` 共享。
 
-## 数据与隐私
+## 许可与贡献
 
-默认情况下，PDF、译文、笔记、标注和 AI 配置只写入当前设备。启用在线元数据检索时，论文标识符或元数据候选会发送到相应公共服务；使用翻译或文章助手时，选中的文本或文章上下文会发送到用户配置的 AI 服务。
+本项目自有代码按 [Apache License 2.0](LICENSE) 授权。二次开发和再发布请保留 [NOTICE.md](NOTICE.md) 中的来源说明，同时遵守第三方依赖、字体、图标和论文内容各自的授权条款。
 
-不要把真实 API Key、用户数据、`data/`、`developer.tokens.json` 或本地构建产物提交到 Git。本项目自有代码按 [Apache License 2.0](LICENSE) 授权，发布衍生版本时请同时遵守 `NOTICE.md`、第三方依赖、字体、图标和论文内容的授权条款。
-
-## 贡献
-
-欢迎通过 Issue 和 Pull Request 反馈问题、提交适配和改进。涉及平台打包的改动请同时说明目标系统、架构、安装方式和验证结果。
+欢迎通过 Issue 和 Pull Request 反馈问题、提交适配和改进。涉及平台打包的改动请说明目标系统、架构、安装方式和验证结果。

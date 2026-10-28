@@ -10,16 +10,19 @@ const { EventEmitter } = require('events');
 const { tests, selectTests } = require('./ui-test-plan.cjs');
 const { verifyReports, readReports } = require('../scripts/verify-ui-results.cjs');
 
+const ciTests = tests.filter(([, , meta]) => meta.ci);
 const plans = Array.from({ length: 4 }, (_, index) => selectTests(['--ci', `--shard=${index + 1}/4`], {}));
 assert.deepStrictEqual(selectTests([], {}).selected, tests);
 assert.deepStrictEqual(selectTests([], { MY_SCHOLAR_UI_CI: 'yes' }).selected, selectTests(['--ci'], {}).selected);
 assert.deepStrictEqual(selectTests(['--only=graph'], {}).selected.map(([name]) => name), ['graph']);
+assert.deepStrictEqual(selectTests(['--only=browser-demo'], {}).selected.map(([name]) => name), ['browser-demo']);
+assert(!ciTests.some(([name]) => name === 'browser-demo'));
 assert.deepStrictEqual(selectTests(['--ci', '--only=graph', '--shard=1/1'], {}).selected.map(([name]) => name), ['graph']);
 const shardSizes = plans.map((plan) => plan.selected.length);
 assert(Math.max(...shardSizes) - Math.min(...shardSizes) <= 1);
 const names = plans.flatMap((plan) => plan.selected.map(([name]) => name));
-assert.equal(new Set(names).size, tests.length);
-assert.deepStrictEqual([...names].sort(), tests.filter(([, , meta]) => meta.ci).map(([name]) => name).sort());
+assert.equal(new Set(names).size, ciTests.length);
+assert.deepStrictEqual([...names].sort(), ciTests.map(([name]) => name).sort());
 for (const arg of ['--shard', '--shard=', '--shard=0/4', '--shard=5/4', '--shard=1/0', '--shard=1.5/4', '--shard=01/4', '--shard=1/4x', `--shard=${tests.length + 1}/${tests.length + 1}`, '--shard=1/9007199254740992']) {
   assert.throws(() => selectTests([arg], {}), /shard/i, arg);
 }
@@ -39,7 +42,7 @@ function passingReports() {
   }));
 }
 
-assert.deepStrictEqual(verifyReports(passingReports(), 4), { shards: 4, suites: tests.length });
+assert.deepStrictEqual(verifyReports(passingReports(), 4), { shards: 4, suites: ciTests.length });
 function rejectChange(change) {
   const reports = passingReports();
   change(reports);
@@ -145,8 +148,69 @@ async function exerciseHealthProbe() {
   assert.equal(requests.length, 3, 'the overall deadline must stop new probes');
 }
 
+async function exerciseManagedFixture(name, status) {
+  const [, script, meta] = tests.find(([suite]) => suite === name);
+  const calls = [];
+  let dataRoot;
+  let serverStopped = false;
+  const context = {
+    fs, os, path,
+    __dirname,
+    desktopRoot: path.join(__dirname, '..'),
+    python: { command: 'python3', prefix: [] },
+    process: {
+      execPath: process.execPath,
+      env: {
+        MY_SCHOLAR_DATA_DIR: '/existing/data',
+        MY_SCHOLAR_LIBRARY_DIR: '/existing/library',
+        MY_SCHOLAR_COMPONENTS_DIR: '/existing/components',
+        MY_SCHOLAR_READONLY: '1',
+      },
+      stderr: { write() {} },
+    },
+    freePort: async () => 8123,
+    waitForHealth: async () => {},
+    setTimeout() {},
+    spawnSync(command, args, options) {
+      calls.push({ command, args: Array.from(args), options });
+      if (calls.length === 1) dataRoot = args.at(-1);
+      return { status: calls.length === 1 ? 0 : status, signal: null };
+    },
+    spawn(command, args, options) {
+      calls.push({ command, args: Array.from(args), options });
+      const server = new EventEmitter();
+      server.kill = (signal) => {
+        assert.equal(signal, 'SIGTERM');
+        serverStopped = true;
+        queueMicrotask(() => server.emit('exit', 0));
+      };
+      return server;
+    },
+  };
+  const source = fs.readFileSync(path.join(__dirname, 'run_ui_tests.js'), 'utf8');
+  vm.runInNewContext(source.slice(source.indexOf('async function runManaged'), source.indexOf('function runShared')), context);
+  const result = await context.runManaged(script, meta);
+  assert.equal(result.passed, status === 0);
+  assert.equal(path.basename(calls[0].args[0]), meta.fixture || 'seed_library.py');
+  assert.equal(calls[0].options.env.MY_SCHOLAR_READONLY, '0', 'Seed construction must remain writable.');
+  assert(calls[1].args.includes('--host') && calls[1].args.includes('127.0.0.1'));
+  for (const call of calls) {
+    assert.equal(call.options.env.MY_SCHOLAR_DATA_DIR, dataRoot);
+    assert.equal(call.options.env.MY_SCHOLAR_LIBRARY_DIR, dataRoot, 'Never inherit the existing library.');
+    assert.equal(call.options.env.MY_SCHOLAR_COMPONENTS_DIR, path.join(dataRoot, 'components'));
+    assert.equal(call.options.env.MY_SCHOLAR_SETTINGS_FILE, path.join(dataRoot, 'settings.json'));
+  }
+  assert.equal(calls[1].options.env.MY_SCHOLAR_READONLY, meta.readonly ? '1' : '0');
+  assert.equal(calls[2].options.env.MY_SCHOLAR_TEST_DATA, dataRoot);
+  assert(serverStopped, 'Stop the owned server after both passing and failing suites.');
+  assert(!fs.existsSync(dataRoot), 'Remove the owned fixture after both passing and failing suites.');
+}
+
 async function main() {
   await exerciseHealthProbe();
+  await exerciseManagedFixture('browser-demo', 0);
+  await exerciseManagedFixture('browser-demo', 1);
+  await exerciseManagedFixture('graph', 0);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'ui-sharding-unit-'));
   try {
     const reportPath = path.join(directory, 'runner.json');
@@ -157,7 +221,7 @@ async function main() {
     assert.equal(successful.exitCode, undefined);
     const reports = passingReports();
     reports[0] = successful.report;
-    assert.equal(verifyReports(reports, 4).suites, tests.length);
+    assert.equal(verifyReports(reports, 4).suites, ciTests.length);
 
     const only = await exerciseRunner(['http://127.0.0.1:8123', '--only=graph'], reportPath);
     assert.deepStrictEqual(only.report.expectedSuites, ['graph']);
@@ -189,7 +253,7 @@ async function main() {
     const nested = path.join(directory, 'artifacts');
     fs.mkdirSync(nested);
     passingReports().forEach((report, index) => fs.writeFileSync(path.join(nested, `shard-${index + 1}.json`), JSON.stringify(report)));
-    assert.equal(verifyReports(readReports(directory), 4).suites, tests.length);
+    assert.equal(verifyReports(readReports(directory), 4).suites, ciTests.length);
     const verifier = path.join(__dirname, '..', 'scripts', 'verify-ui-results.cjs');
     assert.equal(spawnSync(process.execPath, [verifier, directory, '4']).status, 0);
     fs.unlinkSync(path.join(nested, 'shard-4.json'));

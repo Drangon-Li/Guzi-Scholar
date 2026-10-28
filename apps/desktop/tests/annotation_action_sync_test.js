@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const annotationOperations = require('../web/annotation-operations.js');
 const source = fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8');
 function section(from, to) {
   const start = source.indexOf(`  ${from}`);
@@ -14,12 +15,15 @@ const manual = { id: 'manual', action_id: 'principle', source: 'manual', label: 
 const other = { id: 'other', action_id: 'other', source: 'manual', color: '#111111' };
 const plain = { id: 'plain', source: 'manual', color: '#222222' };
 const ai = { id: 'ai', action_id: 'principle', source: 'ai', color: '#333333' };
-const first = { annotations: [manual, other, plain, ai] };
-const second = { annotations: [{ ...manual, id: 'second' }] };
+const first = { jobId: 'one', annotations: [manual, other, plain, ai] };
+const second = { jobId: 'two', annotations: [{ ...manual, id: 'second' }] };
 const pending = []; let renderCount = 0;
 const context = vm.createContext({
-  state: { annotations: first.annotations }, readerMount: first,
+  state: { activeJob: { job_id: 'one' }, annotations: first.annotations }, readerMount: first,
+  window: { MyScholarAnnotationOperations: annotationOperations },
   readerMounts: new Map([['one', first], ['two', second]]),
+  readerMountIsCurrent: (mount) => context.readerMounts.get(mount.jobId) === mount,
+  readerMountMatches: (mount) => context.readerMount === mount && context.state.activeJob?.job_id === mount.jobId,
   isAIAnnotation: (annotation) => annotation.source === 'ai',
   renderAnnotations: () => { renderCount += 1; }, renderFrameAnnotations: () => { renderCount += 1; },
   fetch: async () => new Promise((resolve) => pending.push((payload) => resolve({ ok: true, json: async () => payload }))),
@@ -27,13 +31,13 @@ const context = vm.createContext({
 vm.runInContext([
   'const browserDemo = null; let demoResetting = false;',
   section('const request =', 'const appearanceDefaults ='),
-  section('const annotationStyleSyncs =', 'const jsonOptions ='),
-  section('function applyAnnotationActionFields(', 'const builtinAnnotationActions ='),
+  section('const requestAPI =', 'const jsonOptions ='),
+  section('function applyAnnotationActionSync(', 'const builtinAnnotationActions ='),
   'this.api = api; this.sync = applyAnnotationActionSync;',
 ].join('\n'), context);
 
 (async () => {
-  const staleResponse = context.api('/annotations');
+  const staleResponse = context.api('/api/jobs/one/annotations');
   context.sync({ revision: 1, updates: { principle: { label: '新原理', color: '#00aa00', kind: 'underline' } } });
   assert.equal(first.annotations[0].color, '#00aa00');
   assert.equal(second.annotations[0].kind, 'underline', 'All kept-alive reader mounts receive the action update');
@@ -63,5 +67,18 @@ vm.runInContext([
   first.annotations = (await arrivedBeforeSettingsResponse).annotations;
   context.sync({ revision: 4, updates: { principle: { color: '#008800' } } });
   assert.equal(first.annotations[0].color, '#ffaa00', 'A later-version annotation response also survives a delayed settings response');
+  const serverArray = [{ ...manual, color: '#112233' }];
+  const backgroundRead = context.api('/api/jobs/two/annotations');
+  pending.shift()({ annotation_style_revision: 0, annotations: serverArray });
+  const backgroundResponse = await backgroundRead;
+  assert.notEqual(backgroundResponse.annotations, serverArray, 'Style normalization replaces the response array');
+  assert.equal(backgroundResponse.annotations[0].color, '#008800', 'Background GET responses receive every newer action revision');
+  assert.equal(serverArray[0].color, '#112233', 'Style normalization does not rewrite the original server objects');
+  context.readerMount = null;
+  context.state.annotations = [manualOverride];
+  context.sync({ revision: 5, updates: { principle: { label: '无当前阅读页' } } });
+  assert.equal(context.state.annotations[0].label, '无当前阅读页', 'Action synchronization also updates active state without a reader mount');
+  assert.equal(context.state.annotations[0].color, '#ffaa00', 'No-mount synchronization preserves unmentioned fields');
+  assert.equal(second.annotations[0].label, '无当前阅读页', 'Kept-alive background mounts continue receiving revisions without a foreground mount');
   console.log('annotation action synchronization tests passed');
 })().catch((error) => { console.error(error); process.exitCode = 1; });
