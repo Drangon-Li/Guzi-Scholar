@@ -21,13 +21,14 @@ const functions = [
   const session = await launchManagedChromium();
   try {
     const page = await session.browser.newPage();
+    await page.addScriptTag({ path: path.join(__dirname, '../web/annotation-operations.js') });
     await page.setContent(`<style>.reader-source-sentence { display:inline; }.reader-sentence-translation { display:block; }</style><main class="reader-content"><p data-block-id="fixture" data-page="1" class="reader-sentence-pairs">
       <span class="reader-source-sentence" id="source-one"><strong>ORIGINAL FIRST.</strong></span><span class="reader-source-sentence" id="source-two"><strong> ORIGINAL SECOND.</strong></span><span class="my-scholar-translation reader-sentence-translation" data-for="fixture" data-translation-for="fixture" data-block-id="translation-fixture--s0-6" data-page="1" id="translation-one">Alpha.</span><span class="my-scholar-translation reader-sentence-translation" data-for="fixture" data-translation-for="fixture" data-block-id="translation-fixture--s7-12" data-page="1" id="translation-two">Beta.</span>
     </p><p data-block-id="other"><span class="my-scholar-translation" data-for="other" data-translation-for="other" data-block-id="translation-other" id="other-translation">Other.</span></p></main><div id="selection-popover" hidden></div><div id="selection-translation-result"></div>`);
     await page.evaluate((code) => {
       Object.assign(window, {
         state: { health: {}, activeJob: { job_id: 'fixture-job' }, annotations: [], selection: null },
-        readerContinuations: new WeakMap(), readerMount: {}, selectionTranslationKey: '',
+        readerContinuations: new WeakMap(), readerMount: { jobId: 'fixture-job', annotations: [] }, selectionTranslationKey: '',
         readerTextSelectionStates: new WeakMap(),
         frameDocument: () => document, cssEscape: (value) => CSS.escape(value),
         normalizeChatSourceGeneration: (value) => value || 'base', activeChatSourceGeneration: () => 'base',
@@ -49,6 +50,14 @@ const functions = [
         renderAnnotations() {}, playAnnotationDrawAnimation() {},
         annotationAnchor: (_doc, id) => document.querySelector(`[data-annotation-id="${id}"]`),
       });
+      window.annotationOperations = window.MyScholarAnnotationOperations.create({
+        request: window.api, getCloseGate: () => null, waitForCloseResume: async () => {},
+        state: window.state, mounts: new Map([['fixture-job', window.readerMount]]),
+        getCurrentMount: () => window.readerMount,
+        isCurrentMount: window.readerMountIsCurrent, matchesMount: window.readerMountMatches,
+        isAIAnnotation: window.isAIAnnotation,
+      });
+      window.api = window.annotationOperations.api;
       window.eval(code);
       window.showSelectedRange = (range, backwards = false) => {
         const selection = document.getSelection(); selection.removeAllRanges();

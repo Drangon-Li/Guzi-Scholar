@@ -174,7 +174,11 @@ class LibraryStore:
             if not candidate.is_file():
                 continue
             try:
-                raw = json.loads(candidate.read_text(encoding="utf-8"))
+                candidate_raw = json.loads(candidate.read_text(encoding="utf-8"))
+                if not isinstance(candidate_raw, dict):
+                    corrupt_paths.append(candidate)
+                    continue
+                raw = candidate_raw
                 loaded_from_backup = candidate != self.path
                 self._loaded_from_backup = loaded_from_backup
                 break
@@ -187,16 +191,16 @@ class LibraryStore:
             archived = self._archive_corrupt_files(corrupt_paths)
             if archived:
                 self.recovery_warning = "文献库索引损坏，已保留损坏副本并从可用数据恢复。"
-        if not isinstance(raw, dict):
+        if raw is None:
             # A malformed metadata file must not make the PDFs inaccessible.
             return _default_state()
         try:
-            stored_version = int(raw.get("version", 0)) if isinstance(raw, dict) else 0
+            stored_version = int(raw.get("version", 0))
         except (TypeError, ValueError):
             stored_version = 0
         self._migration_required = loaded_from_backup or stored_version < SCHEMA_VERSION
         normalized = self._normalize(raw)
-        if isinstance(raw, dict) and raw.get("display") != normalized.get("display"):
+        if raw.get("display") != normalized.get("display"):
             # Persist shape repairs even when a previous build already used
             # the current version number but omitted a newly added preference.
             self._migration_required = True

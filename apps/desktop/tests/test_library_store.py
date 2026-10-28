@@ -159,6 +159,32 @@ class LibraryStoreTest(unittest.TestCase):
         self.assertEqual(preserved_backup["items"][job_id]["values"]["reading_status"], "阅读中")
         self.assertTrue(list(Path(self.temp.name).glob("library.json.corrupt-*")))
 
+    def test_non_object_primary_library_recovers_and_preserves_backup(self) -> None:
+        for invalid in ([], None, 0, "invalid", True):
+            with self.subTest(invalid=invalid), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                store = LibraryStore(root)
+                store.sync_jobs(self.jobs)
+                job_id = "a" * 16
+                store.update_item(job_id, {"values": {"reading_status": "阅读中"}})
+                backup = store.path.with_suffix(".json.bak")
+                valid_bytes = store.path.read_bytes()
+                backup.write_bytes(valid_bytes)
+                invalid_text = json.dumps(invalid)
+                store.path.write_text(invalid_text, encoding="utf-8")
+
+                recovered = LibraryStore(root)
+
+                self.assertEqual(recovered.state["items"][job_id]["values"]["reading_status"], "阅读中")
+                self.assertEqual(backup.read_bytes(), valid_bytes)
+                self.assertEqual(json.loads(recovered.path.read_text(encoding="utf-8"))["items"], recovered.state["items"])
+                self.assertIn("损坏", recovered.recovery_warning)
+                archived = list(root.glob("library.json.corrupt-*"))
+                self.assertEqual(len(archived), 1)
+                self.assertEqual(archived[0].read_text(encoding="utf-8"), invalid_text)
+                recovered.update_item(job_id, {"values": {"reading_status": "已完成"}})
+                self.assertEqual(backup.read_bytes(), valid_bytes)
+
     def test_two_corrupt_library_indexes_are_archived_before_rebuild(self) -> None:
         self.store.update_item("a" * 16, {"values": {"reading_status": "阅读中"}})
         backup = self.store.path.with_suffix(".json.bak")

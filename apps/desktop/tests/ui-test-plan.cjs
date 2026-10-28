@@ -1,6 +1,6 @@
 'use strict';
 
-// Every suite runs against the synthetic library produced by
+// Suites default to the synthetic library produced by
 // tests/fixtures/seed_library.py. The reader suites assert on fixed block ids,
 // verbatim sentences and an exact document census, so the fixture reproduces
 // that shape deliberately -- see the comments in seed_library.py.
@@ -38,6 +38,7 @@ const tests = [
   ['reading-progress', 'reading_progress_retirement_smoke.js', { ci: true }],
   ['graph', 'graph_ui_smoke.js', { ci: true }],
   ['onboarding', 'onboarding_smoke.js', { ci: true }],
+  ['browser-demo', 'browser_demo_smoke.js', { ci: false, fixture: 'seed_browser_demo.py', readonly: true }],
 ];
 
 

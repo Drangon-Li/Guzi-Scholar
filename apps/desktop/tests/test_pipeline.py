@@ -1,4 +1,5 @@
 import json
+import builtins
 import os
 import tempfile
 import unittest
@@ -112,6 +113,51 @@ class PipelineHelpersTest(unittest.TestCase):
             self.assertEqual(manifest["backend_selection"]["reason"], "semantic-quality-gate")
             selection = json.loads((job_dir / "backend-selection.json").read_text(encoding="utf-8"))
             self.assertEqual(selection["hard_failures"], ["pathological-script-markup"])
+
+    def test_layout_cancellation_propagates_without_fallback_or_error_log(self):
+        for backend in ("auto", "layout"):
+            with self.subTest(backend=backend), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                source = root / "paper.pdf"
+                source.write_bytes(b"%PDF-fixture")
+                job_dir = root / "job"
+                cancelled = layout_pipeline.LayoutPipelineCancelled("cancelled")
+                with (
+                    patch("layout_pipeline.process_layout_pdf", side_effect=cancelled),
+                    patch("pipeline._preserve_layout_transcript") as preserve,
+                    patch("pipeline._process_pdf_odl") as odl,
+                ):
+                    with self.assertRaises(layout_pipeline.LayoutPipelineCancelled) as raised:
+                        process_pdf(source, job_dir, job_id="fixture", source_name="paper.pdf", backend_override=backend)
+
+                self.assertIs(raised.exception, cancelled)
+                preserve.assert_not_called()
+                odl.assert_not_called()
+                self.assertFalse((job_dir / "layout-error.log").exists())
+                self.assertFalse((job_dir / "backend-selection.json").exists())
+
+    def test_auto_backend_falls_back_when_layout_import_fails(self):
+        original_import = builtins.__import__
+
+        def import_without_layout(name, *args, **kwargs):
+            if name == "layout_pipeline":
+                raise ImportError("missing optional layout dependency")
+            return original_import(name, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "paper.pdf"
+            source.write_bytes(b"%PDF-fixture")
+            job_dir = root / "job"
+            with (
+                patch("builtins.__import__", side_effect=import_without_layout),
+                patch("pipeline._process_pdf_odl", return_value={"outputs": []}) as odl,
+            ):
+                manifest = process_pdf(source, job_dir, job_id="fixture", source_name="paper.pdf", backend_override="auto")
+
+            odl.assert_called_once()
+            self.assertEqual(manifest["backend_selection"]["reason"], "layout-error")
+            self.assertIn("ImportError", manifest["backend_selection"]["error"])
 
     def test_auto_backend_promotes_healthy_layout_without_running_odl(self):
         def fake_layout(_pdf_path, candidate_dir, **_kwargs):

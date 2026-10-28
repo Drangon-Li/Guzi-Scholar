@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const annotationOperations = require('../web/annotation-operations.js');
 const source = fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8');
 const start = source.indexOf('  const builtinAnnotationActions =');
 const end = source.indexOf('  function renderAnnotationActionSettings(', start);
@@ -107,12 +108,13 @@ function event(key, changes = {}) {
   await Promise.resolve();
 
   const saveStart = source.indexOf('  async function saveAnnotation(');
-  const saveEnd = source.indexOf('  function applyAnnotationActionFields(', saveStart);
+  const saveEnd = source.indexOf('  function applyAnnotationActionSync(', saveStart);
+  assert(saveStart >= 0 && saveEnd > saveStart);
   let completeSave;
   const savedSelection = { block_id: 'source', start: 0, end: 13, quote: 'Stored quote.' };
   const saveContext = vm.createContext({
     state: { activeJob: { job_id: 'job' }, selection: savedSelection, annotations: [] },
-    readerMount: {},
+    readerMount: { jobId: 'job', annotations: [] },
     frameDocument: () => ({ querySelector: () => ({}) }),
     cssEscape: (value) => value, rangeAtOffsets: () => ({}), canonicalBlockText: () => 'Stored quote.',
     readerMountMatches: () => true, readerMountIsCurrent: () => true,
@@ -124,11 +126,20 @@ function event(key, changes = {}) {
     clearSelectionPopover() { saveContext.state.selection = null; },
     setPanelStatus: (message) => assert.fail(message), showToast: (message) => assert.fail(message),
   });
+  saveContext.annotationOperations = annotationOperations.create({
+    request: saveContext.api, getCloseGate: () => null, waitForCloseResume: async () => {},
+    state: saveContext.state, mounts: new Map([['job', saveContext.readerMount]]),
+    getCurrentMount: () => saveContext.readerMount,
+    isCurrentMount: saveContext.readerMountIsCurrent, matchesMount: saveContext.readerMountMatches,
+    isAIAnnotation: (annotation) => annotation.source === 'ai',
+  });
+  saveContext.api = saveContext.annotationOperations.api;
   vm.runInContext(source.slice(saveStart, saveEnd) + '\nthis.save = saveAnnotation;', saveContext);
   for (const next of [null, { quote: 'A new manual selection.', origin: 'selection' }]) {
     saveContext.state.selection = savedSelection;
     const saving = saveContext.save('highlight');
     if (next) saveContext.state.selection = next;
+    await Promise.resolve();
     completeSave({ annotations: [{ id: 'saved' }], annotation: { id: 'saved' } });
     await saving;
     if (!next) assert.equal(saveContext.state.selection, null);

@@ -17,6 +17,21 @@ assert(!validTerm(''));
 const paragraph = 'Earlier work exists. We use variational inference for this task. A later result follows.';
 const start = paragraph.indexOf('variational inference');
 assert.equal(sentenceContext(paragraph, start, start + 'variational inference'.length), 'We use variational inference for this task.');
+for (const contextFor of [sentenceContext, context.window.MyScholarVocabulary.sentenceContext]) {
+  for (const [text, selected, expected] of [
+    ['前一句。目标句。后一句。', '目标句', '目标句。'],
+    ['前一句！目标句？后一句。', '目标句', '目标句？'],
+    ['前一句？目标句！后一句。', '目标句', '目标句！'],
+    ['Earlier work. 目标 uses inference。Next result.', 'inference', '目标 uses inference。'],
+    ['前一句。We use inference. Next result.', 'inference', 'We use inference.'],
+    [paragraph, 'variational inference', 'We use variational inference for this task.'],
+    ['Earlier work! We use inference? Next result.', 'inference', 'We use inference?'],
+    ['Earlier work. We use v1.2 methods e.g.examples for inference. Next result.', 'methods', 'We use v1.2 methods e.g.examples for inference.'],
+  ]) {
+    const offset = text.indexOf(selected);
+    assert.equal(contextFor(text, offset, offset + selected.length), expected);
+  }
+}
 const entry = { term: 'Inference', meaning: '推断', note: '概率', tags: ['模型'], sources: [{ quote: 'An approximate posterior.', title: 'Paper' }], review: { status: 'new' } };
 assert(matches(entry, { status: 'learning' }), 'new words must be included in unmastered filter');
 assert(!matches(entry, { status: 'mastered' }));

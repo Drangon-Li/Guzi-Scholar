@@ -81,13 +81,27 @@ async function waitForHealth(port, timeoutMs = 60000) {
 // suites persist annotations, notes and media layout, so a shared data root
 // makes later suites depend on what earlier ones wrote -- which is how `graph`
 // began failing as soon as the reader suites joined the run.
-async function runManaged(script) {
+async function runManaged(script, meta) {
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'my-scholar-ui-'));
   const logPath = path.join(dataRoot, 'server.log');
+  const env = {
+    ...process.env,
+    MY_SCHOLAR_PROJECT_ROOT: desktopRoot,
+    MY_SCHOLAR_DATA_DIR: dataRoot,
+    MY_SCHOLAR_LIBRARY_DIR: dataRoot,
+    MY_SCHOLAR_COMPONENTS_DIR: path.join(dataRoot, 'components'),
+    MY_SCHOLAR_SETTINGS_FILE: path.join(dataRoot, 'settings.json'),
+    MY_SCHOLAR_DEVELOPER_TOKENS_FILE: path.join(dataRoot, 'developer.tokens.json'),
+    MY_SCHOLAR_READONLY: meta.readonly ? '1' : '0',
+    MY_SCHOLAR_LANDING_FILE: '',
+    MY_SCHOLAR_SHELL: 'reference',
+    ...(script === 'plugin_market_smoke.js' ? { MY_SCHOLAR_PLUGIN_ADMISSION_TOKEN: 'fixture-admission-token' } : {}),
+  };
   let server = null;
   try {
-    const seed = spawnSync(python.command, [...python.prefix, path.join(__dirname, 'fixtures', 'seed_library.py'), dataRoot], {
+    const seed = spawnSync(python.command, [...python.prefix, path.join(__dirname, 'fixtures', meta.fixture || 'seed_library.py'), dataRoot], {
       cwd: desktopRoot,
+      env: { ...env, MY_SCHOLAR_READONLY: '0' },
       encoding: 'utf-8',
       windowsHide: true,
     });
@@ -95,9 +109,9 @@ async function runManaged(script) {
 
     const port = await freePort();
     const log = fs.openSync(logPath, 'a');
-    server = spawn(python.command, [...python.prefix, path.join(desktopRoot, 'server.py'), '--port', String(port)], {
+    server = spawn(python.command, [...python.prefix, path.join(desktopRoot, 'server.py'), '--host', '127.0.0.1', '--port', String(port)], {
       cwd: desktopRoot,
-      env: { ...process.env, MY_SCHOLAR_DATA_DIR: dataRoot, ...(script === 'plugin_market_smoke.js' ? { MY_SCHOLAR_PLUGIN_ADMISSION_TOKEN: 'fixture-admission-token' } : {}) },
+      env,
       stdio: ['ignore', log, log],
       windowsHide: true,
     });
@@ -106,7 +120,7 @@ async function runManaged(script) {
 
     const result = spawnSync(process.execPath, [path.join(__dirname, script), `http://127.0.0.1:${port}`], {
       cwd: desktopRoot,
-      env: { ...process.env, MY_SCHOLAR_TEST_DATA: dataRoot },
+      env: { ...env, MY_SCHOLAR_TEST_DATA: dataRoot },
       stdio: 'inherit',
       windowsHide: true,
     });
@@ -157,11 +171,11 @@ async function main() {
   writeReport();
   try {
     python = explicitBaseURL ? null : resolvePython();
-    for (const [name, script] of selected) {
+    for (const [name, script, meta] of selected) {
       console.log(`\n[UI ${report.results.length + 1}/${selected.length}, shard ${shard.index}/${shard.total}] ${name}`);
       const started = Date.now();
       try {
-        const outcome = explicitBaseURL ? runShared(script, explicitBaseURL) : await runManaged(script);
+        const outcome = explicitBaseURL ? runShared(script, explicitBaseURL) : await runManaged(script, meta);
         report.results.push({ name, script, ...outcome, error: null, durationMs: Date.now() - started });
       } catch (error) {
         report.results.push({ name, script, passed: false, status: null, signal: null, error: String(error), durationMs: Date.now() - started });

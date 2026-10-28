@@ -4,9 +4,19 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const annotationOperations = require('../web/annotation-operations.js');
 const source = fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8');
 const coreSource = fs.readFileSync(path.join(__dirname, '../web/core.js'), 'utf8');
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+async function within(promise) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Annotation close protocol stalled')), 1000); }),
+    ]);
+  } finally { clearTimeout(timeout); }
+}
 function section(from, to) {
   const start = source.indexOf(`  ${from}`);
   const end = source.indexOf(`  ${to}`, start);
@@ -45,14 +55,25 @@ async function harness() {
     state: { annotationActions: { custom: [] }, appearance: {}, shortcuts: {}, chatSessions: new Map() },
     $: node, $$: () => [],
     window: {
+      MyScholarAnnotationOperations: annotationOperations,
       setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
       clearTimeout(id) { timers.delete(id); },
     },
+    readerMounts: new Map(), readerMount: null,
+    readerMountIsCurrent: (mount) => Boolean(mount && context.readerMounts.get(mount.jobId) === mount),
+    readerMountMatches: (mount) => Boolean(mount && context.readerMount === mount && context.state.activeJob?.job_id === mount.jobId),
+    isAIAnnotation: (annotation) => annotation.source === 'ai',
     fetch: async (url, options) => {
       requests.push({ url, options });
       if (url === '/api/stream') return controls.streamResponse;
       if (url.endsWith('/translate') && controls.translationResponse) return controls.translationResponse;
       if (url === '/api/background' && controls.backgroundResponse) return controls.backgroundResponse;
+      if (/\/annotations(?:\/[^/]+)?$/u.test(url) && controls.annotationResponses) {
+        return new Promise((resolve, reject) => controls.annotationResponses.push({
+          url, reject,
+          release: (ok = true) => resolve({ ok, status: ok ? 200 : 503, json: async () => ok ? {} : { error: 'annotation save failed' } }),
+        }));
+      }
       const noteId = url.match(/^\/api\/jobs\/([^/]+)\/notes$/u)?.[1];
       if (noteId && options.method === 'PUT' && controls.blockNotes) await controls.blockNotes;
       if (url === '/api/settings' && controls.blockSettings) await controls.blockSettings;
@@ -96,7 +117,7 @@ async function harness() {
     'let notesTimer = null, pendingNotesSnapshot = null, notesSaveQueue = Promise.resolve();',
     'const articleNoteDraftStorageKey = "drafts", articleNoteDrafts = new Map(), articleNoteServerRevisions = new Map(), articleNoteConflicts = new Map(), chatPersistTimers = new Map();',
     section('const request =', 'const appearanceDefaults ='),
-    section('const annotationStyleSyncs =', 'const jsonOptions ='),
+    section('const requestAPI =', 'const jsonOptions ='),
     'const jsonOptions = (body, method = "POST") => ({ method, body: JSON.stringify(body) });',
     section('async function streamApiRequest(', 'async function requestTranslation('),
     section('async function requestTranslation(', 'function reconcileTranslationAnnotations('),
@@ -106,7 +127,7 @@ async function harness() {
     section('function persistChatSession(', 'function setChatHistoryOpen('),
     section('let settingsSaveTimer =', "$('#settings-form').addEventListener('submit'"),
     section('function freezeForClose(', "$('#setting-app-font')?.addEventListener"),
-    'this.gateTest = { request, streamApiRequest, requestTranslation, queueArticleNotesSave, flushPendingArticleNotes, queueSettingsSave, settingsDirty: () => settingsSaveRevision - settingsSavedRevision, drafts: articleNoteDrafts, conflicts: articleNoteConflicts, setPending: (draft) => { pendingNotesSnapshot = draft; retainArticleNoteDraft(draft); }, dirtySettings: () => { settingsSaveRevision += 1; }, pending: () => pendingNotesSnapshot };',
+    'this.gateTest = { api, request, streamApiRequest, requestTranslation, queueArticleNotesSave, flushPendingArticleNotes, queueSettingsSave, settingsDirty: () => settingsSaveRevision - settingsSavedRevision, drafts: articleNoteDrafts, conflicts: articleNoteConflicts, setPending: (draft) => { pendingNotesSnapshot = draft; retainArticleNoteDraft(draft); }, dirtySettings: () => { settingsSaveRevision += 1; }, pending: () => pendingNotesSnapshot };',
   ].join('\n'), context);
   function edit(draft) {
     const event = { prevented: false, preventDefault() { this.prevented = true; }, stopImmediatePropagation() {} };
@@ -121,6 +142,89 @@ async function harness() {
 const draft = (jobId, markdown = jobId) => ({ jobId, markdown, revision: 1, baseRevision: `base-${jobId}` });
 
 (async () => {
+  {
+    const h = await harness();
+    h.controls.annotationResponses = [];
+    const patch = h.api.api('/api/jobs/A/annotations/A', { method: 'PATCH' });
+    const deletion = h.api.api('/api/jobs/A/annotations/B', { method: 'DELETE' });
+    let completed = false;
+    const closing = h.close().then((result) => { completed = true; return result; });
+    await tick();
+    assert.equal(h.controls.annotationResponses.length, 1, 'Same-tick close must drain accepted annotation writes before reporting success');
+    assert.equal(completed, false);
+    h.controls.annotationResponses[0].release(); await tick();
+    assert.equal(h.controls.annotationResponses.length, 2, 'Queued DELETE must send while the close gate is saving');
+    assert.equal(completed, false, 'Close must wait for the queued DELETE response');
+    h.controls.annotationResponses[1].release();
+    assert.equal(await within(closing), true);
+    await Promise.all([patch, deletion]);
+    assert.equal(h.requests[0].options.closeSave, undefined, 'The save protocol option must not reach fetch');
+    h.resume();
+  }
+  {
+    const h = await harness();
+    h.controls.annotationResponses = [];
+    const first = h.api.api('/api/jobs/A/annotations/A', { method: 'PATCH' });
+    await tick();
+    const second = h.api.api('/api/jobs/A/annotations/B', { method: 'DELETE' });
+    const closing = h.close({ intent: 'install-update' });
+    const late = h.api.api('/api/jobs/A/annotations/C', { method: 'DELETE' });
+    const background = h.api.api('/api/background', { method: 'POST' });
+    await tick();
+    assert.equal(h.controls.annotationResponses.length, 1);
+    h.controls.annotationResponses[0].release(); await tick();
+    assert.equal(h.controls.annotationResponses.length, 2, 'Install waits for annotations accepted before freezing');
+    h.controls.annotationResponses[1].release();
+    assert.equal(await within(closing), true);
+    await Promise.all([first, second]);
+    assert.equal(h.controls.annotationResponses.length, 2, 'An annotation accepted after freezing cannot bypass the gate');
+    assert(!h.requests.some(({ url }) => url === '/api/background'), 'Ordinary new writes remain frozen');
+    h.resume(); await tick();
+    assert.equal(h.controls.annotationResponses.length, 3);
+    h.controls.annotationResponses[2].release();
+    await Promise.all([late, background]);
+  }
+  for (const networkFailure of [false, true]) {
+    const h = await harness();
+    h.controls.annotationResponses = [];
+    const first = h.api.api('/api/jobs/A/annotations/A', { method: 'PATCH' });
+    const rejected = assert.rejects(first, /annotation save failed/u);
+    const second = h.api.api('/api/jobs/A/annotations/B', { method: 'DELETE' });
+    const closing = h.close();
+    await tick();
+    if (networkFailure) h.controls.annotationResponses[0].reject(new Error('annotation save failed'));
+    else h.controls.annotationResponses[0].release(false);
+    await tick();
+    assert.equal(h.controls.annotationResponses.length, 2, 'A failed accepted annotation must not poison the queue');
+    h.controls.annotationResponses[1].release();
+    assert.equal(await within(closing), false, 'HTTP and network annotation failures must block close');
+    await Promise.all([rejected, second]);
+    h.resume();
+    const retry = h.api.api('/api/jobs/A/annotations/A', { method: 'PATCH' });
+    const closingRetry = h.close();
+    await tick(); h.controls.annotationResponses[2].release();
+    assert.equal(await within(closingRetry), true, 'Resume allows the failed annotation to be retried and saved');
+    await retry;
+    h.resume();
+  }
+  for (const alreadySending of [false, true]) {
+    const h = await harness();
+    h.controls.annotationResponses = [];
+    const first = h.api.api('/api/jobs/A/annotations/A', { method: 'PATCH' });
+    if (alreadySending) await tick();
+    const second = h.api.api('/api/jobs/A/annotations/B', { method: 'DELETE' });
+    assert.equal(await within(h.close({ discard: true })), true, 'Discard must not wait on annotation promises paused by its own gate');
+    await tick();
+    assert.equal(h.controls.annotationResponses.length, alreadySending ? 1 : 0, 'Discard does not send queued annotations');
+    if (alreadySending) h.controls.annotationResponses[0].release();
+    h.resume(); await tick();
+    if (!alreadySending) { h.controls.annotationResponses[0].release(); await tick(); }
+    assert.equal(h.controls.annotationResponses.length, 2, 'Canceling discard resumes the accepted annotation queue');
+    h.controls.annotationResponses[1].release();
+    await Promise.all([first, second]);
+    assert.equal(await h.close(), true);
+    h.resume();
+  }
   {
     const h = await harness();
     h.controls.failNotes.add('A');
