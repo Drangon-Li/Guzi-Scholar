@@ -126,6 +126,7 @@ jobs:
           name: ui-results-${{ matrix.shard }}
           path: ${{ runner.temp }}/ui-shard-${{ matrix.shard }}.json
           if-no-files-found: error
+          overwrite: true
           retention-days: 7
 
   ui:
