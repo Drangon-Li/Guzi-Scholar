@@ -60,8 +60,8 @@ async function open(context, base, route = '/demo') {
   return page;
 }
 
-function legacy() {
-  return structuredClone({ version: 1, created_at: 'unchanged', library, jobs: fixture['/api/jobs'].jobs, settings: { appearance: { theme: 'dark' } }, health: {}, vocabulary: [], documents: { [jobId]: { document, translations, annotations: [{ id: 'user-annotation' }], notes: { markdown: 'Personal notes', revision: 'personal' }, chats: [{ content: 'Keep chat' }], media_layout: {} } }, pluginStorage: { 'guzi.vocabulary': { setting: 'keep' } } });
+function legacy(revision = 0) {
+  return structuredClone({ version: 1, sampleRevision: revision, created_at: 'unchanged', library, jobs: fixture['/api/jobs'].jobs, settings: { appearance: { theme: 'dark' } }, health: {}, vocabulary: [], documents: { [jobId]: { document, translations, annotations: [{ id: 'user-annotation' }], notes: { markdown: 'Personal notes', revision: 'personal' }, chats: [{ content: 'Keep chat' }], media_layout: {} } }, pluginStorage: { 'guzi.vocabulary': { setting: 'keep' } } });
 }
 
 function checkTranslations(state) {
@@ -77,7 +77,23 @@ function checkTranslations(state) {
 }
 
 async function run() {
-  assert.equal(sample.translations.length, 2);
+  assert.equal(sample.translations.length, 38);
+  assert.equal(new Set(sample.translations.map((record) => record.block_id)).size, 38);
+  assert.equal(sample.translations.reduce((count, record) => count + record.segments.length, 0), 102);
+  const tokens = (value) => (value.match(/__MY_SCHOLAR_[A-Z_]+_\d+__/g) || []).sort();
+  for (const record of sample.translations) {
+    assert.equal(record.alignment_version, 'sentence-v1', record.block_id);
+    assert(record.source_text && record.source_hash && record.text, record.block_id);
+    assert(record.source_segments.length > 0, record.block_id);
+    assert.deepEqual(record.segments.map(({ id }) => id), record.source_segments.map(({ id }) => id), record.block_id);
+    assert.equal(new Set(record.segments.map(({ id }) => id)).size, record.segments.length, record.block_id);
+    record.segments.forEach((segment, index) => {
+      assert.match(segment.id, /^s\d+-\d+$/);
+      assert(segment.text.trim(), `${record.block_id}:${segment.id}`);
+      assert.deepEqual(tokens(segment.text), tokens(record.source_segments[index].text), `${record.block_id}:${segment.id} placeholders`);
+    });
+    assert.deepEqual(tokens(record.text), tokens(record.segments.map(({ text }) => text).join(' ')), `${record.block_id} complete translation placeholders`);
+  }
   assert.equal(sample.vocabulary.length, 1);
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -95,7 +111,7 @@ async function run() {
     const initial = await stored(fresh);
     checkTranslations(initial);
     assert.equal(initial.version, 1);
-    assert.equal(initial.sampleRevision, 1);
+    assert.equal(initial.sampleRevision, 2);
     assert.equal(initial.vocabulary[0].term, 'attention');
     assert.equal(initial.settings.ai.translation.model, 'Attention 公开样例（示例）');
     assert.deepEqual(await fresh.evaluate(() => window.MyScholarDemo.readingSource()), sample.reading_source);
@@ -129,47 +145,57 @@ async function run() {
     assert.deepEqual((await stored(fresh)).vocabulary, [], 'Refresh must not restore a deleted sample term.');
     assert.equal(requests.filter((entry) => entry.path === samplePath).length, sampleLoads, 'A completed revision must not reload the static sample.');
 
-    const shared = await context();
-    const setup = await open(shared, base, '/blank');
-    const before = legacy();
-    await stored(setup, before);
-    let arrivals = 0;
-    let release;
-    const bothLoading = new Promise((resolve) => { release = resolve; });
-    await shared.route(`**${samplePath}`, async (route) => {
-      if (++arrivals === 2) release();
-      await bothLoading;
-      await route.fulfill({ json: sample });
-    });
-    const [first] = await Promise.all([open(shared, base), open(shared, base)]);
-    const upgraded = await stored(first);
-    checkTranslations(upgraded);
-    assert.equal(upgraded.vocabulary.length, 1, 'Concurrent migration must add only one term.');
-    const expected = structuredClone(before);
-    expected.documents[jobId].translations = upgraded.documents[jobId].translations;
-    expected.vocabulary = upgraded.vocabulary;
-    expected.sampleRevision = 1;
-    expected.readingSource = sample.reading_source;
-    assert.deepEqual(upgraded, expected, 'Migration must preserve all unrelated user state.');
+    for (const revision of [0, 1]) {
+      const shared = await context();
+      const setup = await open(shared, base, '/blank');
+      const before = legacy(revision);
+      await stored(setup, before);
+      let arrivals = 0;
+      let release;
+      const bothLoading = new Promise((resolve) => { release = resolve; });
+      await shared.route(`**${samplePath}`, async (route) => {
+        if (++arrivals === 2) release();
+        await bothLoading;
+        await route.fulfill({ json: sample });
+      });
+      const [first] = await Promise.all([open(shared, base), open(shared, base)]);
+      const upgraded = await stored(first);
+      checkTranslations(upgraded);
+      assert.equal(upgraded.vocabulary.length, revision === 0 ? 1 : 0, 'Only the first sample migration may seed vocabulary.');
+      const expected = structuredClone(before);
+      expected.documents[jobId].translations = upgraded.documents[jobId].translations;
+      expected.vocabulary = upgraded.vocabulary;
+      expected.sampleRevision = 2;
+      expected.readingSource = sample.reading_source;
+      assert.deepEqual(upgraded, expected, 'Migration must preserve all unrelated user state.');
+      const loads = requests.filter((entry) => entry.path === samplePath).length;
+      await first.reload();
+      await first.evaluate(() => window.MyScholarDemo.ready);
+      assert.deepEqual(await stored(first), upgraded, 'A completed upgrade must be idempotent.');
+      assert.equal(requests.filter((entry) => entry.path === samplePath).length, loads);
+    }
 
-    for (const scenario of ['same-term', 'synthetic', 'permanent', 'trash']) {
-      const currentContext = await context();
-      const page = await open(currentContext, base, '/blank');
-      const state = legacy();
-      if (scenario === 'same-term') state.vocabulary = [{ id: 'personal-term', term: ' Attention ', language: 'auto', meaning: 'Personal meaning', note: 'Personal note' }];
-      if (scenario === 'synthetic') state.documents[jobId].document = { pages: [{ elements: [{ block_id: 'synthetic-attention' }] }] };
-      if (scenario === 'permanent') { state.library.items = {}; state.library.permanently_deleted = [jobId]; state.documents = {}; state.jobs = []; }
-      if (scenario === 'trash') state.library.items[jobId].deleted_at = 'user-deleted';
-      await stored(page, state);
-      await page.goto(base + '/demo');
-      await page.evaluate(() => window.MyScholarDemo.ready);
-      const migrated = await stored(page);
-      if (scenario === 'same-term') {
-        checkTranslations(migrated);
-        assert.deepEqual(migrated.vocabulary, state.vocabulary, 'Existing normalized term must stay untouched.');
-      } else {
-        assert.deepEqual(migrated, { ...state, sampleRevision: 1 }, scenario);
-        assert.equal(await page.evaluate(() => window.MyScholarDemo.readingSource()), null, scenario);
+    for (const revision of [0, 1]) {
+      for (const scenario of ['same-term', 'edited-vocabulary', 'synthetic', 'permanent', 'trash']) {
+        const currentContext = await context();
+        const page = await open(currentContext, base, '/blank');
+        const state = legacy(revision);
+        if (scenario === 'same-term') state.vocabulary = [{ id: 'personal-term', term: ' Attention ', language: 'auto', meaning: 'Personal meaning', note: 'Personal note' }];
+        if (scenario === 'edited-vocabulary') state.vocabulary = [{ ...structuredClone(sample.vocabulary[0]), meaning: 'Edited meaning', note: 'Edited note', review: { status: 'known', review_count: 7 } }, { id: 'personal-word', term: 'query', meaning: 'Personal query definition' }];
+        if (scenario === 'synthetic') state.documents[jobId].document = { pages: [{ elements: [{ block_id: 'synthetic-attention' }] }] };
+        if (scenario === 'permanent') { state.library.items = {}; state.library.permanently_deleted = [jobId]; state.documents = {}; state.jobs = []; }
+        if (scenario === 'trash') state.library.items[jobId].deleted_at = 'user-deleted';
+        await stored(page, state);
+        await page.goto(base + '/demo');
+        await page.evaluate(() => window.MyScholarDemo.ready);
+        const migrated = await stored(page);
+        if (['same-term', 'edited-vocabulary'].includes(scenario)) {
+          checkTranslations(migrated);
+          assert.deepEqual(migrated, { ...state, sampleRevision: 2, readingSource: sample.reading_source, documents: { [jobId]: { ...state.documents[jobId], translations: migrated.documents[jobId].translations } } }, 'Vocabulary and all unrelated user state must stay untouched.');
+        } else {
+          assert.deepEqual(migrated, { ...state, sampleRevision: 2 }, scenario);
+          assert.equal(await page.evaluate(() => window.MyScholarDemo.readingSource()), null, scenario);
+        }
       }
     }
     assert(requests.every((entry) => entry.method === 'GET'), 'Initialization must use only network GET requests.');

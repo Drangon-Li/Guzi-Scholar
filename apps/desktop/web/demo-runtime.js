@@ -6,7 +6,7 @@
   const statePrefix = 'my-scholar-browser-demo-v1:';
   const databaseName = 'my-scholar-browser-demo-v1';
   const seedJobId = '8065bbad761a6255';
-  const sampleRevision = 1;
+  const sampleRevision = 2;
   const samplePath = '/web/assets/demo/attention/reading-sample.json';
   const profileId = 'browser-demo';
   const now = () => new Date().toISOString();
@@ -109,7 +109,7 @@
       const replacedBlocks = new Set(replacements.map((record) => record.block_id));
       doc.translations = [...doc.translations.filter((record) => !replacedBlocks.has(record.block_id)), ...replacements.map((record) => ({ ...clone(record), profile_id: profileId, provider: 'manual', model: '人工整理译文（示例）', demo: true }))];
       const termKey = (term) => term.normalize('NFKC').toLowerCase().trim().replace(/\s+/g, ' ');
-      for (const entry of sample.vocabulary) {
+      for (const entry of Number(state.sampleRevision || 0) === 0 ? sample.vocabulary : []) {
         if (!entry.sources.every((source) => source.job_id === seedJobId && blocks.has(source.block_id)) || state.vocabulary.some((current) => termKey(current.term) === termKey(entry.term))) continue;
         state.vocabulary.push({ ...clone(entry), created_at: now(), updated_at: now() });
       }
