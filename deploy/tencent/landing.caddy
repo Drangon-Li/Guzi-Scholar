@@ -1,0 +1,23 @@
+s.guzilab.com {
+	root * /srv/guzi-sites/scholar-landing/current
+	encode zstd gzip
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Cache-Control no-cache
+	}
+
+	file_server
+
+	handle_errors {
+		respond "{err.status_text}" {err.status_code}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

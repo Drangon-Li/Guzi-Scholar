@@ -166,6 +166,34 @@ async function run() {
 
     const paper = page.locator(`#library-view .library-card[data-job-id="${jobId}"] .library-row-name`);
     await paper.dblclick();
+    if (await page.locator('#assistant-toggle').getAttribute('aria-expanded') !== 'true') await page.locator('#assistant-toggle').click();
+    await page.locator('[data-panel="chat-panel"]').click();
+    for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(viewport);
+      if (viewport.width <= 880) {
+        await page.waitForFunction(() => document.querySelector('#assistant-toggle').getAttribute('aria-expanded') === 'false');
+        await page.locator('#assistant-toggle').click();
+      }
+      const question = `Explain attention at ${viewport.width}px`;
+      await page.locator('#chat-input').fill(question);
+      const send = page.locator('#chat-form button[type="submit"]');
+      await send.waitFor({ state: 'visible' });
+      await page.locator('#toast').waitFor({ state: 'hidden' });
+      await send.click({ trial: true });
+      const layout = await send.evaluate((button) => {
+        const rect = button.getBoundingClientRect();
+        const banner = document.querySelector('#browser-demo-banner').getBoundingClientRect();
+        const unobscured = [0.2, 0.5, 0.8].every((x) => [0.2, 0.5, 0.8].every((y) => button.contains(document.elementFromPoint(rect.left + rect.width * x, rect.top + rect.height * y))));
+        return { unobscured, inViewport: rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight, bannerAbove: banner.bottom <= rect.top };
+      });
+      assert.deepEqual(layout, { unobscured: true, inViewport: true, bannerAbove: true }, `Demo send button must remain clickable at ${viewport.width}px.`);
+      await send.click();
+      await page.locator('#chat-messages .chat-bubble.user').filter({ hasText: question }).waitFor();
+      await page.waitForFunction(() => !document.querySelector('#chat-messages .chat-bubble.assistant.is-streaming'));
+      assert.match(await page.locator('#chat-messages .chat-bubble.assistant').last().innerText(), /示例/u);
+      console.log(`Demo chat send unobscured and clickable at ${viewport.width}×${viewport.height}.`);
+    }
+    await page.setViewportSize({ width: 1460, height: 960 });
     await page.locator('[data-panel="notes-panel"]').click();
     const editor = page.locator('#notes-editor');
     await page.waitForFunction(() => document.querySelector('#notes-editor')?.contentEditable === 'true');
@@ -211,6 +239,7 @@ async function run() {
     const vocabularyPath = '/api/plugins/guzi.vocabulary/invoke';
     const vocabularyPlugin = (await read(page, '/api/plugins')).plugins.find((plugin) => plugin.id === 'guzi.vocabulary');
     assert(vocabularyPlugin?.enabled);
+    const isolatedVocabularyBefore = await write(isolatedPage, vocabularyPath, 'POST', { pluginSession: vocabularyPlugin.epoch, name: 'vocabulary_list', arguments: {} });
     const vocabulary = await write(page, vocabularyPath, 'POST', {
       pluginSession: vocabularyPlugin.epoch, name: 'vocabulary_save',
       arguments: { term: 'browser local attention', meaning: '浏览器本地词条', language: 'en', source: { job_id: jobId, quote: 'Browser local attention fixture.', surface: 'source' } },
@@ -231,7 +260,7 @@ async function run() {
     await page.locator('[data-view="vocabulary-view"]').click();
     await vocabularyFrame.locator(`[data-vocabulary-id="${vocabularyId}"] .vocabulary-meaning`).filter({ hasText: '插件 UI 编辑后的本地释义' }).waitFor();
     const isolatedVocabulary = await write(isolatedPage, vocabularyPath, 'POST', { pluginSession: vocabularyPlugin.epoch, name: 'vocabulary_list', arguments: {} });
-    assert.deepEqual(isolatedVocabulary.result.entries, []);
+    assert.deepEqual(isolatedVocabulary.result.entries, isolatedVocabularyBefore.result.entries, 'Editing a vocabulary entry must not change another browser context or its bundled sample.');
     const chat = await write(page, `/api/jobs/${jobId}/chat`, 'POST', { message: 'Explain the attention mechanism', messages: [{ role: 'user', content: 'Explain the attention mechanism' }] });
     assert.match(chat.result.text, /示例/u);
     assert(chat.result.demo || chat.demo, 'AI responses must identify the local example.');

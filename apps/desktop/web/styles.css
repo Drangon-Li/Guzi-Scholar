@@ -1918,13 +1918,16 @@ body.reader-mode .app-shell { height: calc(100vh - 60px - var(--background-tasks
 .settings-mcp-format-label { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; margin-top: 15px; }
 #settings-mcp-format { padding: 5px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); }
 
-.browser-demo-banner { position: fixed; right: max(14px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom)); z-index: 80; display: flex; align-items: center; gap: 12px; max-width: calc(100vw - 28px); padding: 8px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); color: var(--ink); box-shadow: 0 3px 16px #0002; font-size: 12px; }
+.browser-demo-banner { display: flex; align-items: center; justify-content: center; gap: 12px; width: 100%; padding: 6px max(14px, env(safe-area-inset-right)) 6px max(14px, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); background: var(--paper); color: var(--ink); font-size: 12px; }
 .browser-demo-banner button { flex-shrink: 0; }
+body.browser-demo-mode.reader-mode { display: flex; flex-direction: column; height: 100dvh; }
+body.browser-demo-mode.reader-mode > :is(.browser-demo-banner, .app-header, .background-tasks) { flex: 0 0 auto; }
+body.browser-demo-mode.reader-mode .app-shell { height: auto; flex: 1 1 0; }
 .browser-demo-ai-notice, .browser-demo-section-message { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); color: var(--text-secondary); font-size: 12px; line-height: 1.7; }
 .browser-demo-ai-notice { margin: 8px 12px; }
 .browser-demo-mode .browser-demo-unavailable-section > :not(.browser-demo-section-message) { display: none !important; }
 .browser-demo-mode [aria-disabled="true"] { opacity: .6; cursor: not-allowed; }
-@media (max-width: 600px) { .browser-demo-banner { gap: 8px; font-size: 10px; padding: 7px 9px; } }
+@media (max-width: 600px) { .browser-demo-banner { flex-wrap: wrap; gap: 4px 8px; font-size: 11px; } .browser-demo-banner > span { flex-basis: 100%; text-align: center; } .browser-demo-banner button { min-height: 44px; } }
 
 .browser-demo-invalidated-dialog { width: min(420px, calc(100vw - 40px)); padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); color: var(--ink); box-shadow: var(--shadow-window); }
 .browser-demo-invalidated-dialog::backdrop { background: #0007; }

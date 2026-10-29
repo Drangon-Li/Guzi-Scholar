@@ -10023,7 +10023,7 @@
     if (button && !button.disabled) void invokeSelectionPlugin(button.dataset.pluginSelection, button.dataset.pluginAction, button);
   });
 
-  async function openPluginSource(source) {
+  async function openPluginSource(source, { settleImages = false } = {}) {
     const job = state.jobs.find((item) => item.job_id === source?.job_id);
     if (!job || job.status !== 'completed' || state.library?.items?.[source.job_id]?.deleted_at) {
       throw new Error('来源文献已删除、在回收站中或尚不可用，请在插件中查看保留的来源快照。');
@@ -10048,6 +10048,14 @@
     if (!block || block.closest('.my-scholar-translation') || (source.page && String(source.page) !== String(page))) {
       showToast('未找到可确认的原文位置，正文可能已重排或更改。请在插件中查看保留的来源快照。', true);
       return;
+    }
+    if (settleImages) {
+      // Earlier lazy images have no reserved height and can displace the demo's initial jump.
+      const images = [...doc.images].filter((image) => block.contains(image) || block.compareDocumentPosition(image) & Node.DOCUMENT_POSITION_PRECEDING);
+      images.forEach((image) => { image.loading = 'eager'; });
+      await Promise.allSettled(images.map((image) => image.decode()));
+      await readerFrames(doc, 2);
+      if (readerMount !== mount) return;
     }
     if (!expected) {
       block.scrollIntoView({ block: 'center', behavior: reducedMotionQuery.matches ? 'auto' : 'smooth' });
@@ -15375,7 +15383,30 @@
       catch (error) { demoResetting = false; reset.disabled = false; showToast(`重置失败：${error.message}`, true); showBrowserDemoInvalidation(); }
     });
     banner.append(label, reset);
-    document.body.append(banner);
+    document.body.prepend(banner);
+    void browserDemo.readingSource().then((source) => {
+      if (!source) return;
+      const readSample = document.createElement('button');
+      readSample.id = 'browser-demo-reading-sample';
+      readSample.type = 'button';
+      readSample.className = 'tiny-button';
+      readSample.textContent = '体验逐行双语';
+      readSample.addEventListener('click', async () => {
+        readSample.disabled = true;
+        try {
+          const currentSource = await browserDemo.readingSource();
+          if (!currentSource) {
+            showToast('样例文献已移除，请先从回收站恢复，或重置测试数据。');
+            return;
+          }
+          if (!state.jobs.length) await loadLibrary();
+          setTranslationPreferences({ displayMode: 'bilingual' });
+          await openPluginSource(currentSource, { settleImages: true });
+        } catch (error) { showToast(`样例打开失败：${error.message}`, true); }
+        finally { readSample.disabled = false; }
+      });
+      banner.insertBefore(readSample, reset);
+    }).catch((error) => showToast(`样例入口加载失败：${error.message}`, true));
     const notice = document.createElement('p');
     notice.className = 'browser-demo-ai-notice';
     notice.textContent = 'AI 示例：可试用文章提问、翻译和阅读重点。回答与译文为内置演示内容，不会调用真实模型；笔记和批注仅保存在当前浏览器。';

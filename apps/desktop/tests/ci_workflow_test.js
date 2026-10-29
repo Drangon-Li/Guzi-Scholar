@@ -27,6 +27,7 @@ assert.equal(upload.if, 'always()');
 assert.equal(upload.with.name, 'ui-results-${{ matrix.shard }}');
 assert.equal(upload.with.path, '${{ runner.temp }}/ui-shard-${{ matrix.shard }}.json');
 assert.equal(upload.with['if-no-files-found'], 'error');
+assert.equal(upload.with.overwrite, true);
 
 const ui = checks.jobs.ui;
 assert.equal(ui.name, 'UI smoke tests');
