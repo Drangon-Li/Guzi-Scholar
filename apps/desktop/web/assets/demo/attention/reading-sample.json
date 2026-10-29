@@ -1,0 +1,113 @@
+{
+  "translations": [
+    {
+      "text": "我们将这一具体注意力机制称为“缩放点积注意力”（图 2）。 输入包括查询、键和值：查询与键的维度为 __MY_SCHOLAR_MATH_0__，值的维度为 __MY_SCHOLAR_MATH_1__ 我们计算查询与所有键的点积，将每个结果除以 __MY_SCHOLAR_MATH_2__，再应用 softmax 函数得到各个值的权重。",
+      "formulas": [
+        {
+          "token": "__MY_SCHOLAR_MATH_0__",
+          "tex": "dk",
+          "markup": "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"inline\"><mrow><msub><mi>d</mi><mrow><mi>k</mi></mrow></msub></mrow></math>"
+        },
+        {
+          "token": "__MY_SCHOLAR_MATH_1__",
+          "tex": "dv.",
+          "markup": "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"inline\"><mrow><msub><mi>d</mi><mrow><mi>v</mi></mrow></msub><mo>.</mo></mrow></math>"
+        },
+        {
+          "token": "__MY_SCHOLAR_MATH_2__",
+          "tex": "dk",
+          "markup": "<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"inline\"><mrow><msqrt><mrow><msub><mi>d</mi><mrow><mi>k</mi></mrow></msub></mrow></msqrt></mrow></math>"
+        }
+      ],
+      "block_id": "b-b2d707f9d75eb40282a64373",
+      "target_language": "zh",
+      "source_hash": "bbf0a183",
+      "source_text": "We call our particular attention \"Scaled Dot-Product Attention\" (Figure 2). The input consists of queries and keys of dimension __MY_SCHOLAR_MATH_0__ ,and values of dimension __MY_SCHOLAR_MATH_1__ We compute the dot products of the query with all keys, divide each by __MY_SCHOLAR_MATH_2__ ,and apply a softmax function to obtain the weights on the values.",
+      "source_segments": [
+        {
+          "id": "s0-75",
+          "text": "We call our particular attention \"Scaled Dot-Product Attention\" (Figure 2)."
+        },
+        {
+          "id": "s76-300",
+          "text": "The input consists of queries and keys of dimension __MY_SCHOLAR_MATH_0__ ,and values of dimension __MY_SCHOLAR_MATH_1__ We compute the dot products of the query with all keys, divide each by __MY_SCHOLAR_MATH_2__ ,and apply a softmax function to obtain the weights on the values."
+        }
+      ],
+      "segments": [
+        {
+          "id": "s0-75",
+          "text": "我们将这一具体注意力机制称为“缩放点积注意力”（图 2）。"
+        },
+        {
+          "id": "s76-300",
+          "text": "输入包括查询、键和值：查询与键的维度为 __MY_SCHOLAR_MATH_0__，值的维度为 __MY_SCHOLAR_MATH_1__ 我们计算查询与所有键的点积，将每个结果除以 __MY_SCHOLAR_MATH_2__，再应用 softmax 函数得到各个值的权重。"
+        }
+      ],
+      "alignment_version": "sentence-v1"
+    },
+    {
+      "text": "在实际计算中，我们将一组查询打包成矩阵 Q，同时计算它们的注意力函数。键和值也分别打包成矩阵 K 和 V。输出矩阵的计算方式如下：",
+      "formulas": [],
+      "block_id": "b-b5d24b979416df28b80fd0d6",
+      "target_language": "zh",
+      "source_hash": "1d77a4c6",
+      "source_text": "In practice, we compute the attention function on a set of queries simultaneously, packed together into a matrix Q. The keys and values are also packed together into matrices K and V. We compute the matrix of outputs as:",
+      "source_segments": [
+        {
+          "id": "s0-220",
+          "text": "In practice, we compute the attention function on a set of queries simultaneously, packed together into a matrix Q. The keys and values are also packed together into matrices K and V. We compute the matrix of outputs as:"
+        }
+      ],
+      "segments": [
+        {
+          "id": "s0-220",
+          "text": "在实际计算中，我们将一组查询打包成矩阵 Q，同时计算它们的注意力函数。键和值也分别打包成矩阵 K 和 V。输出矩阵的计算方式如下："
+        }
+      ],
+      "alignment_version": "sentence-v1"
+    }
+  ],
+  "vocabulary": [
+    {
+      "term": "attention",
+      "language": "en",
+      "meaning": "注意力机制：根据查询与键的相关性，对值进行加权组合。",
+      "note": "",
+      "tags": [
+        "Transformer",
+        "论文阅读"
+      ],
+      "sources": [
+        {
+          "job_id": "8065bbad761a6255",
+          "title": "Attention Is All You Need",
+          "source_filename": "Attention Is All You Need.pdf",
+          "source_sha256": "8065bbad761a62557b6356d0a83b59ea9efa2830798247aa696df426038a22d8",
+          "selected_text": "attention",
+          "quote": "We call our particular attention \"Scaled Dot-Product Attention\" (Figure 2).",
+          "block_id": "b-b2d707f9d75eb40282a64373",
+          "source_block_id": "b-b2d707f9d75eb40282a64373",
+          "surface": "source",
+          "page": 4,
+          "start": 23,
+          "end": 32
+        }
+      ],
+      "review": {
+        "status": "new",
+        "review_count": 0,
+        "last_reviewed_at": null
+      },
+      "details": {
+        "part_of_speech": "名词",
+        "context_explanation": "本文的缩放点积注意力将查询与键的点积按维度缩放，经 softmax 得到权重，再对值进行加权组合。"
+      },
+      "id": "demo-attention-vocabulary"
+    }
+  ],
+  "reading_source": {
+    "job_id": "8065bbad761a6255",
+    "block_id": "b-b2d707f9d75eb40282a64373",
+    "page": 4
+  }
+}

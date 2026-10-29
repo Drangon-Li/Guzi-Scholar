@@ -6,6 +6,8 @@
   const statePrefix = 'my-scholar-browser-demo-v1:';
   const databaseName = 'my-scholar-browser-demo-v1';
   const seedJobId = '8065bbad761a6255';
+  const sampleRevision = 1;
+  const samplePath = '/web/assets/demo/attention/reading-sample.json';
   const profileId = 'browser-demo';
   const now = () => new Date().toISOString();
   const clone = (value) => structuredClone(value);
@@ -97,10 +99,36 @@
     return response.json();
   }
 
+  function updateReadingSample(state, sample) {
+    if (Number(state.sampleRevision || 0) >= sampleRevision) return;
+    const doc = state.documents[seedJobId];
+    const item = state.library.items[seedJobId];
+    if (doc && item && !item.deleted_at) {
+      const blocks = new Set(list(doc.document?.pages).flatMap((page) => list(page.elements).map((block) => block.block_id)));
+      const replacements = sample.translations.filter((record) => blocks.has(record.block_id));
+      const replacedBlocks = new Set(replacements.map((record) => record.block_id));
+      doc.translations = [...doc.translations.filter((record) => !replacedBlocks.has(record.block_id)), ...replacements.map((record) => ({ ...clone(record), profile_id: profileId, provider: 'manual', model: '人工整理译文（示例）', demo: true }))];
+      const termKey = (term) => term.normalize('NFKC').toLowerCase().trim().replace(/\s+/g, ' ');
+      for (const entry of sample.vocabulary) {
+        if (!entry.sources.every((source) => source.job_id === seedJobId && blocks.has(source.block_id)) || state.vocabulary.some((current) => termKey(current.term) === termKey(entry.term))) continue;
+        state.vocabulary.push({ ...clone(entry), created_at: now(), updated_at: now() });
+      }
+      if (sample.reading_source?.job_id === seedJobId && blocks.has(sample.reading_source.block_id)) state.readingSource = clone(sample.reading_source);
+    }
+    // Store the revision even when the document was deleted or uses a synthetic fixture.
+    state.sampleRevision = sampleRevision;
+  }
+
   async function initialize() {
     await openDatabase();
-    const exists = await transaction(false, (state) => ({ output: Boolean(state?.version === 1) }));
-    if (exists) return;
+    const current = await transaction(false, (state) => ({ output: { exists: state?.version === 1, sampleRevision: Number(state?.sampleRevision || 0) } }));
+    if (current.exists && current.sampleRevision >= sampleRevision) return;
+    const sample = await publicJSON(samplePath);
+    if (!Array.isArray(sample.translations) || !Array.isArray(sample.vocabulary)) fail('公开阅读样例格式不完整，请刷新重试。', 503, 'demo_seed_failed');
+    if (current.exists) {
+      await transaction(true, (state) => { updateReadingSample(state, sample); return { state }; });
+      return;
+    }
     const [health, jobsPayload, libraryPayload, settings] = await Promise.all(['/api/health', '/api/jobs', '/api/library', '/api/settings'].map(publicJSON));
     const job = list(jobsPayload.jobs).find((entry) => entry.job_id === seedJobId);
     if (!job || !object(libraryPayload.library) || !object(libraryPayload.library.items?.[seedJobId])) fail('公开 Attention 样例不可用，请刷新重试。', 503, 'demo_seed_failed');
@@ -116,11 +144,27 @@
     safeSettings.ai_services = services();
     safeSettings.ai_status_history = [];
     const seed = { version: 1, created_at: now(), health, jobs: [job], library, settings: safeSettings, vocabulary: [], documents: { [seedJobId]: { translations: translations.translations.map((record) => ({ ...record, profile_id: profileId, demo: true, model: '公开归档译文（示例）' })), annotations: annotations.annotations, notes: { markdown: notes.markdown, revision: await sha256(notes.markdown) }, media_layout: media.media_layout, document: documentData, highlights: null } } };
-    await transaction(true, (state) => ({ state: state || seed, output: undefined }));
+    await transaction(true, (state) => {
+      const target = state || seed;
+      updateReadingSample(target, sample);
+      return { state: target };
+    });
   }
 
   const ready = enabled ? initialize() : Promise.resolve();
   ready.catch(() => {});
+
+  async function readingSource() {
+    if (!enabled) return null;
+    await ready;
+    return transaction(false, (state) => {
+      const source = state.readingSource;
+      const item = source && state.library.items[source.job_id];
+      const doc = source && state.documents[source.job_id];
+      const compatible = item && !item.deleted_at && list(doc?.document?.pages).some((page) => list(page.elements).some((block) => block.block_id === source.block_id));
+      return { output: compatible ? clone(source) : null };
+    });
+  }
 
   function snapshot(state) {
     const library = clone(state.library);
@@ -625,7 +669,8 @@
         if (!available) fail('样例已在本地清除，请重置演示以恢复。', 404);
         return nativeFetch(url.pathname + url.search, { method: 'GET', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', ...(signal ? { signal } : {}) });
       }
-      if (url.search) fail('演示 API 不接受查询参数。', 400);
+      const allTranslations = method === 'GET' && url.pathname === `/api/jobs/${seedJobId}/translations` && url.searchParams.size === 1 && url.searchParams.get('scope') === 'all';
+      if (url.search && !allTranslations) fail('演示 API 不接受此查询参数。', 400);
       let payload = {};
       if (!['GET', 'HEAD'].includes(method)) {
         const body = init && owns(init, 'body') ? init.body : request ? await request.clone().text() : '';
@@ -671,5 +716,5 @@
     for (const key of Object.keys(localStorage)) if (key.startsWith(statePrefix)) localStorage.removeItem(key);
   }
 
-  window.MyScholarDemo = Object.freeze({ enabled, statePrefix, ready, fetch: demoFetch, reset, get invalidated() { return invalidated; } });
+  window.MyScholarDemo = Object.freeze({ enabled, statePrefix, ready, fetch: demoFetch, reset, readingSource, get invalidated() { return invalidated; } });
 })();

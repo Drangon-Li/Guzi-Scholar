@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f3efe5">
+  <meta name="description" content="谷子学术：统一论文阅读格式，在原文旁提问，通过 MCP 连接个人文献库，用插件扩展自己的阅读方式。">
+  <title>谷子学术｜读论文，更顺手。</title>
+  <link rel="canonical" href="https://s.guzilab.com/">
+  <meta property="og:type" content="website">
+  <meta property="og:locale" content="zh_CN">
+  <meta property="og:site_name" content="谷子学术 · Guzi Scholar">
+  <meta property="og:title" content="谷子学术｜读论文，更顺手。">
+  <meta property="og:description" content="统一阅读格式，原文旁提问，连接个人知识库，扩展自己的阅读工具。">
+  <meta property="og:url" content="https://s.guzilab.com/">
+  <meta property="og:image" content="https://s.guzilab.com/assets/evidence/paper-reading.jpg">
+  <meta property="og:image:alt" content="谷子学术中论文正文与公式的真实阅读效果">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="assets/app-icon.png">
+  <script src="theme.js"></script>
+  <link rel="preload" href="assets/fonts/scholar-serif-500.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="assets/fonts/scholar-sans-400.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="theme.css">
+  <link rel="stylesheet" href="landing.css?v=20261029-real-translations">
+  <script defer src="landing.js?v=20261029-botanical-device"></script>
+</head>
+<body>
+  <div class="reading-light" aria-hidden="true"></div>
+  <div class="reading-lamp" aria-hidden="true">
+    <svg viewBox="0 0 240 230" focusable="false">
+      <defs><radialGradient id="bulb-halo"><stop stop-color="#ffe1a0" stop-opacity=".7"/><stop offset="1" stop-color="#ffe1a0" stop-opacity="0"/></radialGradient></defs>
+      <g id="reading-lamp-art">
+      <ellipse class="lamp-halo" cx="81" cy="157" rx="80" ry="69" fill="url(#bulb-halo)"/>
+      <g stroke="var(--lamp-outline)" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M227 41V88" stroke-width="11"/>
+        <path d="M222 59 163 29 112 106M224 68 167 42 123 111" fill="none"/>
+        <path d="m167 42 34 17M153 47l-31 51" stroke="var(--lamp-highlight)" stroke-width="1.4"/>
+        <circle cx="224" cy="63" r="8" fill="var(--lamp-shade)"/>
+        <circle cx="165" cy="35" r="8" fill="var(--lamp-shade)"/>
+        <circle cx="117" cy="108" r="7" fill="var(--lamp-shade)"/>
+        <path d="M162 33l5 4m54 24 5 4" stroke="var(--lamp-highlight)" stroke-width="1.4"/>
+        <g transform="rotate(20 87 115)">
+          <path d="M76 83v-8q12-7 24 0v9" fill="var(--lamp-shade)"/>
+          <path d="M34 132q9-18 18-35 10-15 35-15t35 15l20 35q-53 20-108 0Z" fill="var(--lamp-shade)"/>
+          <path d="M64 96q-7 12-12 26m23-32q-6 12-9 23" fill="none" stroke="var(--lamp-highlight)" stroke-width="1.3"/>
+          <ellipse cx="88" cy="132" rx="54" ry="11" fill="var(--lamp-interior)"/>
+          <ellipse class="lamp-bulb" cx="88" cy="134" rx="46" ry="7" fill="#ffe2a2" stroke="none"/>
+          <path d="M44 132q43 12 88 0" fill="none" stroke="var(--lamp-highlight)" stroke-width="1.2"/>
+        </g>
+      </g></g>
+    </svg>
+  </div>
+  <a class="skip-link" href="#main-content">跳到正文</a>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="#cover" aria-label="谷子学术首页"><img src="assets/app-icon.png" width="34" height="34" alt=""><span>谷子学术</span></a>
+      <nav class="header-links" aria-label="主导航"><a href="#format">功能</a><a href="#download">下载</a><a href="https://github.com/Drangon-Li/Guzi-Scholar">GitHub</a></nav>
+      <div class="header-actions"><label class="theme-control"><span class="sr-only">外观主题</span><select id="theme-select" aria-label="外观主题" hidden><option value="system">自动</option><option value="light">浅色</option><option value="dark">深色</option></select></label><a class="button button-small" href="https://scholar.guzilab.com/">在线体验</a></div>
+    </div>
+  </header>
+  <main id="main-content" tabindex="-1">
+    <section id="cover" class="hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <img class="hero-grain" src="assets/decor/botanical-emblem-v2.webp" width="66" height="66" alt="" decoding="async">
+        <h1 id="hero-title">读论文，更顺手。</h1>
+        <p class="hero-description">谷子学术是一款免费、开源的论文阅读工具。<br><span>统一排版，在原文旁提问，</span><span>让读过的内容成为自己的积累。</span></p>
+        <div class="actions"><a class="button" href="https://scholar.guzilab.com/">在线体验</a><a class="button button-secondary" href="https://github.com/Drangon-Li/Guzi-Scholar/releases/latest">下载 macOS 版</a></div>
+        <p class="platform-note">支持 Apple Silicon，文献与阅读成果默认保存在本机。</p>
+      </div>
+      <nav class="feature-shortcuts" aria-label="探索产品功能"><a href="#format">统一格式</a><a href="#conversation">原文旁提问</a><a href="#knowledge">个人知识库</a><a href="#plugins">插件扩展</a></nav>
+      <figure class="hero-figure">
+        <div class="device-laptop">
+          <div class="device-lid">
+            <a class="hero-preview" href="https://scholar.guzilab.com/" aria-label="打开谷子学术在线体验"><img src="assets/evidence/hero-translated-v0611.png" width="1800" height="910" alt="谷子学术 v0.6.11 真实阅读器局部：Attention 原文与中文译文逐行交错，保留论文公式" fetchpriority="high" decoding="async"></a>
+          </div>
+          <div class="device-base" aria-hidden="true"></div>
+        </div>
+        <figcaption>
+          <div class="hero-caption-main"><span>谷子学术的真实阅读界面</span><a href="https://scholar.guzilab.com/">进入在线体验 <span aria-hidden="true">↗</span></a></div>
+          <p class="evidence-note">公开 Attention 论文 · 真实桌面界面，译文人工整理。</p>
+        </figcaption>
+      </figure>
+    </section>
+
+    <section id="format" class="format-section section-width" aria-labelledby="format-title">
+      <div class="section-intro"><h2 id="format-title">不同的论文，<br>熟悉的阅读格式。</h2><p>期刊和会议的版式各不相同。谷子学术将论文整理成连续、统一的阅读页面，让注意力回到内容本身。</p></div>
+      <div class="comparison-shell showcase-window">
+        <div class="comparison-heading window-titlebar"><span>同一段论文，排版前后对照</span><span lang="en" translate="no">Attention Is All You Need</span></div>
+        <div class="comparison">
+        <figure class="source-example"><figcaption><strong>原始 PDF</strong><span>第 4 页</span></figcaption><a class="image-link" href="assets/evidence/paper-source.png" data-preview data-image-alt="Attention 论文第4页原始 PDF 段落与公式" aria-label="放大查看原始 PDF 段落"><img src="assets/evidence/paper-source.png" width="816" height="302" alt="原始 PDF 中的缩放点积注意力段落与公式" loading="lazy" decoding="async"><span class="image-hint" aria-hidden="true">放大查看</span></a></figure>
+        <figure class="reading-example"><figcaption><strong>谷子学术</strong><span>统一阅读格式</span></figcaption><a class="image-link" href="assets/evidence/paper-reading.jpg" data-preview data-image-alt="同一段正文和公式在谷子学术中的真实转换结果" aria-label="放大查看谷子学术排版结果"><img src="assets/evidence/paper-reading.jpg" width="828" height="337" alt="同一段论文在谷子学术中的真实阅读排版" loading="lazy" decoding="async"><span class="image-hint" aria-hidden="true">放大查看</span></a></figure>
+      </div>
+        <p class="section-note">复杂公式与图表，可随时对照原文核对。<a href="assets/evidence/paper-source-page.png" data-preview data-image-alt="Attention Is All You Need 原始论文第4页整页">查看原 PDF 整页</a></p>
+      </div>
+    </section>
+
+    <section id="conversation" class="feature-band" aria-labelledby="conversation-title">
+      <div class="feature-row section-width">
+        <div class="feature-copy"><h2 id="conversation-title">问题，<br>就在原文旁解决。</h2><p>读到不理解的句子，选中它，带着上下文问 AI。少一次复制和切换窗口，多一点读下去的专注。</p><ol class="operation-steps"><li>选中原文</li><li>加入 Chat</li><li>提问，继续读</li></ol><a class="text-link" href="https://scholar.guzilab.com/">带着一个问题，去试读 <span aria-hidden="true">→</span></a></div>
+        <figure class="operation-figure"><div class="media-frame showcase-window"><div class="media-heading window-titlebar"><span>阅读中的一次提问</span><span>真实操作</span></div><div class="window-media"><video id="operation-video" controls muted playsinline preload="none" poster="book/assets/selection-chat-focus-poster.jpg" width="940" height="724" aria-label="划线、加入 Chat 并发送问题的真实操作录像" aria-describedby="recording-description"><source src="book/assets/selection-chat-focus.mp4" type="video/mp4"><track kind="captions" src="assets/evidence/selection-chat.vtt" srclang="zh-CN" label="操作说明"><a href="book/assets/selection-chat-focus.mp4">下载操作录像</a></video></div></div><figcaption><span>从划线到提问，8 秒真实操作</span><button id="replay-video" type="button" hidden>重新播放</button></figcaption><p id="recording-description" class="evidence-note">录像无声，AI 回答为公开论文样例的预置演示。</p></figure>
+      </div>
+    </section>
+
+    <section id="knowledge" class="feature-row knowledge-row section-width" aria-labelledby="knowledge-title">
+      <div class="feature-copy"><h2 id="knowledge-title">读过的论文，<br>随时找得回来。</h2><p>写作时想找回某个概念？通过 MCP 连接自己的 AI 工具，检索读过的论文，结合笔记与批注回顾，再带着出处回到原文。</p><p>让每次阅读留下的线索，都能帮上下一次思考。</p><p class="feature-note">在桌面版启用 MCP，选择允许访问的能力范围。连接时需保持谷子学术运行。</p></div>
+      <div class="knowledge-evidence showcase-window"><div class="record-heading window-titlebar"><span>文献库中的线索</span><span>MCP</span></div><div class="knowledge-body"><div class="search-record"><span>示例检索</span><p lang="en" translate="no">multi-head attention</p></div><div class="source-record"><p class="source-title" lang="en" translate="no">Attention Is All You Need</p><p class="source-location">第 5 页 · Multi-Head Attention</p><blockquote lang="en">Multi-head attention allows the model to jointly attend to information from different representation subspaces at different positions.</blockquote></div><p class="evidence-note">真实 MCP 调用节选，保留原文和出处。</p><a class="text-link record-link" href="assets/evidence/mcp-read-result.json">查看调用记录 <span aria-hidden="true">→</span></a></div></div>
+    </section>
+
+    <section id="plugins" class="feature-row section-width plugin-row" aria-labelledby="plugins-title">
+      <div class="feature-copy"><h2 id="plugins-title">按你的习惯，<br>扩展阅读工具。</h2><p>安装所需插件，也可以让 AI 帮你制作自己的阅读工具。</p><p>从内置生词本开始：收藏词语时，把释义、论文原句和出处一起留下。下次遇见，连同上下文一起想起。</p><a class="text-link" href="https://github.com/Drangon-Li/Guzi-Scholar">了解插件与开源项目 <span aria-hidden="true">→</span></a></div>
+      <figure class="plugin-figure"><div class="plugin-frame showcase-window"><div class="plugin-heading window-titlebar"><span>生词本</span><span>内置插件</span></div><div class="window-media"><a class="image-link" href="assets/evidence/vocabulary-real-v0611.png" data-preview data-image-alt="生词本真实词条：释义、论文原句、标签和第4页出处" aria-label="放大查看生词本词条"><img src="assets/evidence/vocabulary-real-v0611.png" width="1042" height="706" alt="桌面版生词本中的 attention 词条，包含中文释义、论文原句和第 4 页出处" loading="lazy" decoding="async"><span class="image-hint" aria-hidden="true">放大查看</span></a></div></div><figcaption>一个词条，连着读过的上下文。</figcaption><p class="evidence-note">公开 Attention 论文 · 真实词条，释义人工整理。</p></figure>
+    </section>
+
+    <section id="download" class="download-section" aria-labelledby="download-title"><div class="download-inner"><h2 id="download-title">从下一篇论文开始。</h2><p>先在线试读，再开始自己的文献积累。</p><div class="actions"><a class="button" href="https://scholar.guzilab.com/">在线体验</a><a class="button button-secondary" href="https://github.com/Drangon-Li/Guzi-Scholar/releases/latest">下载 macOS 版</a></div><p class="download-note">macOS 版支持 Apple Silicon。安装包尚未通过 Apple 公证，首次打开请参阅 <a href="https://github.com/Drangon-Li/Guzi-Scholar#下载与平台支持">安装说明</a>。</p><p class="download-note">Windows 开发继续保留，按大版本目标推进，仅在关键版本更新。已有安装包见 <a href="https://github.com/Drangon-Li/Guzi-Scholar/releases">历史版本</a>。</p></div></section>
+
+    <section class="faq section-width" aria-labelledby="faq-title"><h2 id="faq-title">你可能还想了解</h2><div class="faq-list">
+      <details><summary>在线体验和桌面版有什么区别？</summary><p>在线体验使用公开 Attention 论文样例，笔记、批注和生词保存在当前浏览器。AI 回答与译文为预置示例。导入自己的 PDF、使用真实 AI、MCP 和插件开发等完整能力，需要安装桌面版。</p></details>
+      <details><summary>需要自己配置 AI 吗？</summary><p>需要。翻译、文章问答等功能使用你配置的服务地址、模型和 API Key。未配置 AI 时，仍可整理文献、阅读已转换内容、标注和记笔记。</p></details>
+      <details><summary>论文和笔记会上传到服务器吗？</summary><p>文献与阅读成果默认保存在本机。调用 AI 时，相关文本、上下文或主动加入的图片会发送到你配置的服务；启用远端解析时，PDF 会上传到指定服务器；在线元数据检索会发送论文标题、作者或标识符。MCP 可访问的能力由你设置。</p></details>
+      <details><summary>每一篇 PDF 都能准确转换吗？</summary><p>转换效果取决于原 PDF 和解析引擎，复杂公式、图表与多栏版面可能需要检查。你可以随时对照源文件核对，也可以按需要配置自己的远端解析服务。</p></details>
+    </div></section>
+    <section id="summary" class="reading-finale" aria-labelledby="summary-title">
+      <div class="finale-inner section-width">
+        <div class="finale-desk" aria-hidden="true"><img class="finale-illustration" src="assets/decor/reading-finale.svg" width="900" height="340" loading="lazy" decoding="async" alt=""><svg class="finale-lamp" viewBox="0 0 240 230" focusable="false"><use href="#reading-lamp-art"/></svg></div>
+        <h2 id="summary-title"><span>把读过的，</span><span>变成自己的。</span></h2>
+        <p><span>从读懂一篇论文，到积累自己的知识。</span><span>谷子学术，陪你读下去。</span></p>
+        <nav class="finale-features" aria-label="回顾谷子学术的四项能力">
+          <a href="#format">统一格式，读得舒服</a><a href="#conversation">原文旁提问，思路连贯</a><a href="#knowledge">个人知识库，积累有据</a><a href="#plugins">插件扩展，按你习惯</a>
+        </nav>
+        <div class="actions"><a class="button" href="https://scholar.guzilab.com/">从一篇论文开始</a><a class="button button-secondary" href="https://github.com/Drangon-Li/Guzi-Scholar/releases/latest">下载 macOS 版</a></div>
+      </div>
+    </section>
+  </main>
+  <footer class="site-footer section-width"><div class="footer-top"><a class="footer-brand" href="https://guzilab.com/">粟白科技 <span lang="en" translate="no">Guzi Lab</span></a><nav aria-label="页脚导航"><a href="https://github.com/Drangon-Li/Guzi-Scholar">GitHub</a><a href="https://scholar.guzilab.com/">在线体验</a><a href="assets/fonts/OFL.txt">字体许可</a><button id="motion-toggle" type="button" aria-pressed="true" hidden>动效：开</button></nav></div><div class="footer-bottom"><p>© 2026 北京粟白科技有限公司</p><p>能力来自技术，知识归于人。</p></div></footer>
+  <dialog class="image-viewer" aria-labelledby="viewer-title"><div class="viewer-bar"><h2 id="viewer-title">论文细节</h2><form method="dialog"><button class="viewer-close" aria-label="关闭大图" autofocus>关闭 <span aria-hidden="true">×</span></button></form></div><div class="viewer-canvas" tabindex="0" role="region" aria-label="论文截图，可滚动查看"><img class="viewer-image" alt=""></div><p class="viewer-caption">公开论文样例 · 可滚动查看细节</p></dialog>
+</body>
+</html>

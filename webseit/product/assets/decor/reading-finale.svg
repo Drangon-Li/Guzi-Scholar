@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 340" fill="none">
+  <g transform="translate(91 28) scale(.55)">
+  <defs>
+    <g id="finale-grain" stroke="#9b885f" stroke-width=".85" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M-.5-7.7C-4.6-8-7.4-4.9-7.1-1c.2 4.1 2.8 7.1 6.6 7.5C3.4 6.1 6.7 3 6.5-1.1 6.4-5 3.6-7.8-.5-7.7Z" fill="#c2aa70" fill-opacity=".2"/>
+      <path d="M-.7-6.2C-2.2-2.9-1.7 2.7-.5 5.7M-3.9-4.9c-1.1 2.7-.6 5.7.5 7.4M2.6-4.1c1.1 2.1 1 4.7-.1 6.8M-.5 6.5l-.4 3.6" opacity=".72"/>
+    </g>
+  </defs>
+  <g stroke="#82917c" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M91 440c18-54 35-112 38-172 2-44-4-93 7-135 10-38 29-65 53-59 32 8 37 47 26 85-9 34-29 70-44 104" stroke-width="1.7"/>
+    <path d="M95 432c19-61 34-119 35-171M137 131c10-32 29-61 49-54" stroke-width=".55" opacity=".48"/>
+    <path d="M119 331c-20-47-42-75-70-93 26 29 48 61 66 102M128 283c18-39 36-69 62-89-16 34-35 63-63 98M106 379c-17-22-33-35-53-45 15 20 31 36 49 44" fill="#a1ad94" fill-opacity=".13" stroke-width="1.1"/>
+    <path d="M116 334c-18-40-41-70-61-90M130 286c17-37 36-66 55-85M103 375c-13-17-30-30-43-37" stroke-width=".55" opacity=".7"/>
+    <path d="M169 78c-3 10-9 20-14 27m29-28c-2 17-7 29-14 42m31-33c4 14 3 28-3 45m13-26c11 12 16 29 15 44m-11-21c-3 16-11 29-22 43m23-21c8 15 8 28 3 43m-14-17c-3 15-11 28-23 39m18-18c9 13 9 27 2 42m-16-11c-2 15-8 27-17 37m10-12c5 12 3 23-4 35m-8-16c-4 12-7 20-13 30" stroke-width="1.05"/>
+    <path d="M158 99l-14 12m16-13 3 15m11-3-13 16m12-12 8 13m22-15-13 17m13-12 8 17m15 1 10 15m-10-14-6 22m-19-4-14 15m16-12 2 21m23-6 6 20m-6-17-10 22m-24-6-13 14m15-11 1 18m17-2 5 16m-6-15-9 17m-25-1-10 13m11-10 1 17m13-4-1 16m-1-13-10 13m-17-3-6 13" stroke-width=".7"/>
+  </g>
+  <g>
+    <use href="#finale-grain" transform="translate(145 111) rotate(-31) scale(0.88)"/>
+    <use href="#finale-grain" transform="translate(156 103) rotate(7) scale(0.86)"/>
+    <use href="#finale-grain" transform="translate(163 116) rotate(20) scale(0.87)"/>
+    <use href="#finale-grain" transform="translate(153 124) rotate(-13) scale(0.8)"/>
+    <use href="#finale-grain" transform="translate(162 128) rotate(-28) scale(0.93)"/>
+    <use href="#finale-grain" transform="translate(173 121) rotate(12) scale(0.96)"/>
+    <use href="#finale-grain" transform="translate(181 130) rotate(28) scale(0.89)"/>
+    <use href="#finale-grain" transform="translate(168 141) rotate(-12) scale(0.92)"/>
+    <use href="#finale-grain" transform="translate(191 127) rotate(-29) scale(1.0)"/>
+    <use href="#finale-grain" transform="translate(200 124) rotate(4) scale(0.92)"/>
+    <use href="#finale-grain" transform="translate(210 136) rotate(27) scale(0.91)"/>
+    <use href="#finale-grain" transform="translate(195 143) rotate(-12) scale(0.93)"/>
+    <use href="#finale-grain" transform="translate(204 151) rotate(14) scale(0.94)"/>
+    <use href="#finale-grain" transform="translate(221 147) rotate(-8) scale(0.94)"/>
+    <use href="#finale-grain" transform="translate(231 154) rotate(30) scale(0.86)"/>
+    <use href="#finale-grain" transform="translate(220 165) rotate(6) scale(0.92)"/>
+    <use href="#finale-grain" transform="translate(230 172) rotate(16) scale(0.82)"/>
+    <use href="#finale-grain" transform="translate(187 173) rotate(-33) scale(0.95)"/>
+    <use href="#finale-grain" transform="translate(198 169) rotate(9) scale(1.0)"/>
+    <use href="#finale-grain" transform="translate(205 184) rotate(19) scale(0.95)"/>
+    <use href="#finale-grain" transform="translate(190 191) rotate(-18) scale(0.9)"/>
+    <use href="#finale-grain" transform="translate(215 191) rotate(-10) scale(0.98)"/>
+    <use href="#finale-grain" transform="translate(224 203) rotate(20) scale(0.87)"/>
+    <use href="#finale-grain" transform="translate(211 210) rotate(9) scale(0.92)"/>
+    <use href="#finale-grain" transform="translate(220 220) rotate(27) scale(0.8)"/>
+    <use href="#finale-grain" transform="translate(174 212) rotate(-30) scale(0.96)"/>
+    <use href="#finale-grain" transform="translate(185 207) rotate(1) scale(0.93)"/>
+    <use href="#finale-grain" transform="translate(193 223) rotate(17) scale(0.91)"/>
+    <use href="#finale-grain" transform="translate(178 229) rotate(-13) scale(0.96)"/>
+    <use href="#finale-grain" transform="translate(186 242) rotate(14) scale(0.88)"/>
+    <use href="#finale-grain" transform="translate(199 237) rotate(-11) scale(0.88)"/>
+    <use href="#finale-grain" transform="translate(205 250) rotate(23) scale(0.85)"/>
+    <use href="#finale-grain" transform="translate(193 257) rotate(5) scale(0.87)"/>
+    <use href="#finale-grain" transform="translate(161 247) rotate(-25) scale(0.92)"/>
+    <use href="#finale-grain" transform="translate(172 245) rotate(8) scale(0.95)"/>
+    <use href="#finale-grain" transform="translate(178 261) rotate(22) scale(0.88)"/>
+    <use href="#finale-grain" transform="translate(164 267) rotate(-7) scale(0.91)"/>
+    <use href="#finale-grain" transform="translate(177 277) rotate(8) scale(0.86)"/>
+    <use href="#finale-grain" transform="translate(168 290) rotate(18) scale(0.79)"/>
+    <use href="#finale-grain" transform="translate(150 272) rotate(-24) scale(0.87)"/>
+    <use href="#finale-grain" transform="translate(153 287) rotate(-8) scale(0.82)"/>
+    <use href="#finale-grain" transform="translate(145 300) rotate(-13) scale(0.72)"/>
+  </g>
+  </g>
+  <g stroke="#7f8d79" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M87 302c106-2 190 1 286 0m12 0c149 2 295-3 416-1" stroke-width=".8" opacity=".5"/>
+    <path d="M245 279c65-7 137-3 211 14 64-12 129-14 196-7l6-8-10-156-196 17-203-29Z" fill="#bac1ae" fill-opacity=".07" stroke-width="1.05"/>
+    <path d="M249 110c61-9 127-1 200 25 62-24 125-32 192-22l11 162c-70-8-131-3-194 14-70-19-138-24-205-16Z" fill="#f3efe5" fill-opacity=".28" stroke-width="1.35"/>
+    <path d="M449 135c2 53 4 104 9 154m-5-147c2 49 4 93 8 137" stroke-width="1.05"/>
+    <path d="M254 117c55-6 115 2 179 23m31-1c58-21 113-27 170-20M257 279c64-6 133-1 199 17 64-15 128-18 192-10" stroke-width=".55" opacity=".58"/>
+    <path d="M447 138c-7 17-9 47-6 71m8 37c1 17 2 29 5 39" stroke-width=".6" opacity=".36"/>
+  </g>
+  <g stroke="#83907f" stroke-linecap="round" opacity=".71">
+    <path d="M281 145c44 0 87 7 126 19" stroke-width="1.5"/>
+    <path d="M282 158c45 1 88 9 127 22m-125-12c28 1 58 6 85 13m10 3 30 9m-124-13c44 3 86 10 124 23m-123-12c20 1 40 4 59 8m12 2c19 4 36 9 53 15" stroke-width=".8"/>
+    <path d="M289 221c43 2 85 10 124 22m-123-11c25 1 52 5 78 11m10 2 36 10m-123-12c42 2 83 9 123 22m-121-11c20 1 39 3 57 7" stroke-width=".8"/>
+    <path d="M481 151c35-9 73-14 113-13m-112 24c21-5 41-8 61-9m10-1c16-1 32-1 48 0m-118 21c39-8 79-11 119-9" stroke-width=".8"/>
+    <path d="M487 220c39-7 81-10 122-7m-121 18c18-4 38-6 57-7m12-1c18-1 35 0 53 1m-120 18c40-7 80-8 121-5m-119 16c26-4 52-5 77-5" stroke-width=".8"/>
+  </g>
+  <g stroke="#9e8555" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M319 174c18 3 35 6 51 11m-56 38c29 4 58 10 86 18" stroke-width="3.6" opacity=".17"/>
+    <path d="M278 179c-9 7-12 18-8 28m0-1 7-4m-7 4-3-6" stroke-width=".85"/>
+    <path d="M382 154c12-8 25-5 28 2 2 7-7 11-17 9" stroke-width=".75"/>
+    <text x="495" y="200" fill="#9e8555" stroke="none" font-family="Georgia, serif" font-size="21" font-style="italic">y = f(x)</text>
+    <path d="M625 170l20-2 1 20-9-5-10 7Z" fill="#b49c65" fill-opacity=".25" stroke-width=".8"/>
+    <path d="M628 211l20-1 1 22-9-5-10 7Z" fill="#9eac95" fill-opacity=".2" stroke="#87977e" stroke-width=".8"/>
+  </g>
+  <g stroke="#87947f" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M650 176c16 0 19-19 35-21m-35 65c35 3 33 35 61 37" stroke-width=".8" stroke-dasharray="3 5"/>
+    <path d="M678 140c28-2 65-2 102 0l3 67c-36-1-70-1-101 1Z" fill="#f3efe5" fill-opacity=".22" stroke-width="1.05"/>
+    <path d="M684 143c29-2 57-1 90 0M682 211c29-2 62-1 98 0" stroke-width=".5" opacity=".55"/>
+    <path d="M695 157c15-1 31-1 47 0m-46 12c22-1 45-1 68 0m-68 10c19-1 38 0 57 0m-56 10 30 0" stroke-width=".85" opacity=".74"/>
+    <path d="M710 241c30-1 62-1 96 2l-2 46c-33-2-64-2-92-1Z" fill="#f3efe5" fill-opacity=".2" stroke-width=".95"/>
+    <path d="M726 255c17 0 34 0 51 1m-51 10c21 0 42 0 63 1m-62 10 37 0" stroke-width=".8" opacity=".7"/>
+    <path d="M687 139l-1-10 17-1 1 11m20 101 1-9 16 1-1 9" fill="#b59d67" fill-opacity=".18" stroke="#9f8b5b" stroke-width=".8"/>
+  </g>
+  <g stroke="#9e8a5e" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M232 294l66-34 5 7-66 33-9 1Z" fill="#baa16a" fill-opacity=".18" stroke-width=".9"/>
+    <path d="M298 260l6-3 5 8-6 2m-71 27 5 6m2-7 61-30" stroke-width=".65"/>
+  </g>
+</svg>

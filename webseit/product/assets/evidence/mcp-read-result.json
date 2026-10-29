@@ -1,0 +1,44 @@
+{
+  "description": "公开 Attention 样例的一次真实 MCP 调用；以下为返回内容节选，不是 AI 生成总结。",
+  "transport": "MCP SDK / stdio",
+  "scopes": [
+    "library.read",
+    "notes.read"
+  ],
+  "document": {
+    "job_id": "8065bbad761a6255",
+    "title": "Attention Is All You Need",
+    "source": "https://scholar.guzilab.com/api/jobs/8065bbad761a6255"
+  },
+  "search_request": {
+    "method": "tools/call",
+    "params": {
+      "name": "search_library",
+      "arguments": {
+        "query": "multi-head attention",
+        "sources": [
+          "content"
+        ],
+        "limit": 5
+      }
+    }
+  },
+  "search_total": 8,
+  "read_request": {
+    "method": "tools/call",
+    "params": {
+      "name": "get_document_content",
+      "arguments": {
+        "job_id": "8065bbad761a6255",
+        "limit": 100,
+        "offset": 0
+      }
+    }
+  },
+  "returned_excerpt": {
+    "page": 5,
+    "block_id": "b-0c702cff9c206567f38d020b",
+    "text": "Multi-head attention allows the model to jointly attend to information from different representation subspaces at different positions."
+  },
+  "excerpt_is_truncated": true
+}
