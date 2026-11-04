@@ -15,11 +15,12 @@ import os
 import shutil
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from bibliography import BIBLIOGRAPHIC_FIELDS, INTEGER_FIELDS, LIST_FIELDS, empty_bibliographic_metadata
+from time_utils import utc_now
 
 SCHEMA_VERSION = 5
 SYSTEM_FOLDER_IDS = {"system-all", "system-unfiled", "system-trash"}
@@ -53,10 +54,6 @@ def _default_display() -> Dict[str, Any]:
             {"id": "title", "label": "标题", "visible": False, "system": True, "order": 5},
         ],
     }
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _default_state() -> Dict[str, Any]:

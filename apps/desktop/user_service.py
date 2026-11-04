@@ -65,6 +65,8 @@ OUTBOX_RETENTION_SECONDS = 7 * 24 * 3600
 PASSWORD_RESET_NOTICE_MAX_AGE_SECONDS = 24 * 3600
 
 
+# Deliberately not imported from time_utils: deploy/tencent/deploy.sh ships this
+# file (with ai_gateway.py and config.py) as a standalone account service.
 def utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
 

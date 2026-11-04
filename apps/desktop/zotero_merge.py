@@ -17,7 +17,7 @@ from urllib.parse import quote as urlquote, urlsplit
 
 from content_store import _active_conversion_root, _sync_content_file
 from annotation_style_sync import _sync_directory
-from pipeline import utc_now
+from time_utils import utc_now
 
 IMPORT_LOCK = threading.RLock()
 MAX_NOTES_CHARS = 2_000_000
