@@ -643,6 +643,18 @@
     return width;
   }
 
+  // Reader documents with a mouse selection drag in progress. Until the button
+  // is released the user is still adjusting the selection, so layout refreshes
+  // (assistant toggle or resize, scroll, window resize) must not open the
+  // toolbar -- and start a translation -- for a half-dragged selection; the
+  // mouseup handler shows the finished one.
+  const readerSelectionDrags = new WeakSet();
+
+  function refreshSelectionToolbar(doc = frameDocument()) {
+    if (!doc?.getSelection()?.toString().trim() || readerSelectionDrags.has(doc)) return;
+    showSelection();
+  }
+
   function finishAssistantResize(event = null) {
     if (!assistantResize.active || (event?.pointerId != null && event.pointerId !== assistantResize.pointerId)) return;
     const handle = $('#reader-sidebar-resizer');
@@ -654,7 +666,7 @@
     $('#reader-view')?.classList.remove('is-resizing-assistant');
     document.body.classList.remove('resizing-reader-assistant');
     applyAssistantWidth({ persist: true });
-    if (frameDocument()?.getSelection()?.toString().trim()) showSelection();
+    refreshSelectionToolbar();
   }
 
   function handleAssistantResizeDown(event) {
@@ -687,7 +699,7 @@
     else if (event.key === 'End') assistantPreferredWidth = maximum;
     else assistantPreferredWidth = current + (event.key === 'ArrowLeft' ? step : -step);
     applyAssistantWidth({ persist: true });
-    if (frameDocument()?.getSelection()?.toString().trim()) showSelection();
+    refreshSelectionToolbar();
   }
 
   const assistantResizer = $('#reader-sidebar-resizer');
@@ -712,9 +724,7 @@
     toggle.title = label;
     toggle.setAttribute('aria-label', label);
     if (next && !overlay) applyAssistantWidth();
-    window.setTimeout(() => {
-      if (frameDocument()?.getSelection()?.toString().trim()) showSelection();
-    }, 220);
+    window.setTimeout(() => refreshSelectionToolbar(), 220);
   }
 
   $('#assistant-toggle')?.addEventListener('click', () => {
@@ -6994,6 +7004,8 @@
       doc.head?.append(style);
     }
     doc.addEventListener('pointerdown', beginFrameTextSelection, { capture: true });
+    doc.addEventListener('pointerdown', (event) => { if (event.button === 0) readerSelectionDrags.add(doc); }, { capture: true, passive: true });
+    for (const name of ['pointerup', 'pointercancel']) doc.addEventListener(name, () => readerSelectionDrags.delete(doc), { capture: true, passive: true });
     doc.addEventListener('selectionchange', () => renderFrameTextSelection(doc));
     doc.defaultView?.addEventListener('resize', () => renderFrameTextSelection(doc, { reposition: true }), { passive: true });
     doc.addEventListener('selectstart', guardFrameSelection);
@@ -7015,8 +7027,8 @@
       if (!readerMountMatches(mount, doc)) return;
       renderFrameTextSelection(doc, { reposition: true });
       closeImageContextMenu();
-      if (doc.getSelection()?.toString().trim()) showSelection();
-      else clearSelectionPopover({ clearState: true });
+      if (!doc.getSelection()?.toString().trim()) clearSelectionPopover({ clearState: true });
+      else refreshSelectionToolbar(doc);
       const popover = doc.querySelector('.annotation-note-popover');
       if (popover?.dataset.annotationId && notePopoverHover.pinned && !popover.classList.contains('is-closing')) {
         const originalAnchor = notePopoverHover.anchor;
@@ -7181,7 +7193,7 @@
   }
   window.addEventListener('resize', () => {
     if (!assistantOverlayQuery.matches) applyAssistantWidth();
-    if (frameDocument()?.getSelection()?.toString().trim()) showSelection();
+    refreshSelectionToolbar();
   }, { passive: true });
 
   function cssEscape(value) { return window.CSS?.escape ? window.CSS.escape(value) : String(value).replace(/[^a-zA-Z0-9_-]/g, '\\$&'); }

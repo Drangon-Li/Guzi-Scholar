@@ -141,12 +141,15 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     await frame.locator('body').evaluate((node) => node.ownerDocument.getSelection().removeAllRanges());
     await page.keyboard.press('Escape');
     await idle();
+    // Dismissing the drag cancels its selection translation; count only what
+    // the hover itself requests.
+    const sentencesBeforeHover = sentences().length;
 
     await hover(mark('first-note'));
     await popup().filter({ hasText: '第一条：研究方法笔记' }).waitFor();
     assert(await popup().locator('[data-action="edit"]').isVisible(), 'A note preview exposes annotation actions');
     assert.equal(await tooltip().count(), 0, 'A note preview must not open the selection toolbar');
-    assert.equal(sentences().length, 0, `Hovering an annotation must not translate its sentence: ${JSON.stringify(sentences().map((body) => body.text))}`);
+    assert.equal(sentences().length, sentencesBeforeHover, `Hovering an annotation must not translate its sentence: ${JSON.stringify(sentences().slice(sentencesBeforeHover).map((body) => body.text))}`);
     assert.equal(await frame.locator('body').evaluate((node) => node.ownerDocument.getSelection().toString()), '', 'Note previews do not require native text selection');
     await hover(mark('second-note'));
     await popup().filter({ hasText: '第二条：独立结果笔记' }).waitFor();
@@ -160,7 +163,7 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     await page.waitForTimeout(600);
     assert.equal(await tooltip().count(), 0, 'An empty-note highlight must not open selection actions');
     assert.equal(await popup().count(), 0, 'Whitespace-only notes must not capture text hover');
-    assert.equal(sentences().length, 0);
+    assert.equal(sentences().length, sentencesBeforeHover);
     await idle();
 
     for (const [block, needle] of [['first', 'The remaining'], ['delayed', '']]) {
@@ -168,7 +171,7 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
       await page.waitForTimeout(600);
       assert.equal(await popup().count(), 0, 'A note must not capture unmarked text');
       assert.equal(await tooltip().count(), 0, 'Ordinary text hover must not expose selection actions');
-      assert.equal(sentences().length, 0, 'Ordinary text hover must not request translation');
+      assert.equal(sentences().length, sentencesBeforeHover, 'Ordinary text hover must not request translation');
       await idle();
     }
 
