@@ -41,6 +41,10 @@ AI_REQUIRES_MEMBER = str(
     os.environ.get("MY_SCHOLAR_AI_REQUIRE_MEMBER", "0")
 ).strip().lower() not in {"", "0", "false", "no", "off"}
 
+# Hosts that count as this machine for transport and origin checks. Immutable,
+# so importing it by name is safe.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
 # Guards METADATA_PENDING and the metadata generation bookkeeping in server.py.
 METADATA_STATE_LOCK = threading.RLock()
 # (job_id, phase, generation) tuples for metadata work that has been queued but
@@ -52,6 +56,7 @@ __all__ = [
     "AI_REQUIRES_MEMBER",
     "ALLOW_INSECURE_LOOPBACK_ACCOUNT",
     "API_ACCESS_TOKEN",
+    "LOOPBACK_HOSTS",
     "METADATA_PENDING",
     "METADATA_STATE_LOCK",
     "MIGRATION_CONTROL_TOKEN",

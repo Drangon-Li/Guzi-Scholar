@@ -5,6 +5,13 @@ The module owns the process-level job queues, serves the static web client,
 coordinates conversion and metadata workers, and persists per-document reader
 state. Conversion, library metadata, bibliography lookup, and AI calls remain
 behind their dedicated modules; :func:`main` is the stable CLI entrypoint.
+
+Stateless helpers live beside it: multipart parsing (multipart_form), settings
+normalization (settings_schema), legacy artifact upgrades (artifact_migrations),
+conversion publishing (conversion_artifacts), AI highlight checks
+(ai_highlights), the account client (account_client), the data-root lock
+(data_root_lock) and per-document locks (keyed_locks). Everything that reads or
+replaces this module's process state stays here.
 """
 
 from __future__ import annotations
@@ -14,12 +21,8 @@ import base64
 from contextlib import contextmanager
 from functools import wraps
 from concurrent.futures import Future
-import email.parser
-import errno
 import hashlib
 import hmac
-import html
-import io
 import json
 import math
 import mimetypes
@@ -32,8 +35,6 @@ import shutil
 import sys
 import threading
 import time
-import urllib.error
-import urllib.request
 import uuid
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,43 +42,39 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
-try:
-    import fcntl
-except ImportError:  # Windows has no fcntl; msvcrt provides the equivalent.
-    fcntl = None
-try:
-    import msvcrt
-except ImportError:  # pragma: no cover - present only on Windows
-    msvcrt = None
-
 import runtime
 from annotation_style_sync import AnnotationStyleRecoveryRequiredError, AnnotationStyleSyncError, changed_action_fields, commit_style_sync, recover_pending_transactions
-from ai import TranslationQualityError, auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, chat_context_info, is_metadata_block, reference_quick_read, review_tables, services as ai_services, status as ai_status, test_connections as ai_test_connections, translate_text, translate_text_stream, translation_profile_id, validate_translation_segments
-from ai_capabilities import discover_models, get_model_capabilities, normalize_ai_options
+from ai import TranslationQualityError, auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, chat_context_info, reference_quick_read, review_tables, services as ai_services, status as ai_status, test_connections as ai_test_connections, translate_text, translate_text_stream, translation_profile_id, validate_translation_segments
+from ai_capabilities import discover_models, normalize_ai_options
 from bibliography import is_fragmented_metadata_text, retrieve_bibliographic_metadata, retrieve_reference_evidence
-from config import AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE, TRANSLATION_PROVIDERS, resolve_ai_profile
+from config import DEFAULT_TRANSLATION_MODE, resolve_ai_profile
 from ai import test_connection as ai_test_connection, translation_target_language
 from ai import _safe_connection_error
-from translation_providers import language_code
 from content_store import MAX_NOTE_ASSET_BYTES, _active_conversion_root, _atomic_temp_path, _atomic_write_text, _ensure_content_layout, _normalize_media_layout_items, _note_image_type, _read_media_layout, _store_note_asset, _sync_content_file, _translation_key, _translation_records, _translation_records_need_persist, _write_media_layout, _write_translation_records
 # Re-exported for the tests, which reach these through the server module.
 from content_store import MAX_MEDIA_LAYOUT_ITEMS, _write_content_manifest, _write_english_snapshot  # noqa: F401
+from artifact_migrations import _deduplicate_figure_ids  # noqa: F401
+# Self-contained helpers split out of this module; none of them reads the
+# process state defined below, so tests that patch server.* still see it all.
+from account_client import AccountServiceUnavailable, _account_request, _account_service_configuration
+from ai_highlights import _highlight_signature, _is_ai_annotation, _local_highlight_candidates
+from artifact_migrations import _clean_legacy_translation_cache, _migrate_reader_html
+from conversion_artifacts import _preserve_layout_error_log, _provider_failure, _publish_conversion_attempt, _rebase_manifest_paths, _reflow_failure_error, _validate_reflow_render
+from data_root_lock import DataRootLock
+from keyed_locks import KeyedLock, KeyedLocks
+from multipart_form import _multipart_parts, _parse_multipart_form, _spool_request_body, _spooled_body
+from settings_schema import AI_PROFILE_NAMES, _annotation_actions, _annotation_colors, _appearance_settings, _chat_options, _normalize_ai_profile, _normalize_ai_settings, _normalize_ai_status_record, _parsing_settings, _public_ai_settings, _setting_bool, _setting_color
 from job_store import JOB_ID_RE, RENDER_GENERATION_RE, JobStore, ReflowCancelledError, ReflowConflictError, _read_json_file, set_artifact_migrator
 from library_store import LibraryStore, LibraryValidationError
 from vocabulary_store import VocabularyStore, VocabularyValidationError, source_snapshot
 from mcp_access import MCPAccess
 from scholar_service import CapabilityError, ScholarService, notes_snapshot, save_document_notes
 from vocabulary_ai import explain as explain_vocabulary
-from layout_pipeline import (
-    LayoutPipelineError,
-    MathRenderer,
-    mineru_worker_advice,
-    normalize_mineru_backend,
-    normalize_mineru_server_url,
-)
+from layout_pipeline import MathRenderer, mineru_worker_advice
 from parsing_providers import ProviderError, ParsingRequest, create_default_registry
-from pipeline import PipelineError, process_pdf, utc_now
-from runtime import METADATA_PENDING, METADATA_STATE_LOCK
+from pipeline import PipelineError, process_pdf
+from runtime import LOOPBACK_HOSTS, METADATA_PENDING, METADATA_STATE_LOCK
+from time_utils import utc_now
 from zotero_import import ZoteroClient, ZoteroError
 from zotero_merge import apply_import as apply_zotero_import, stage_import as stage_zotero_import
 from zotero_service import ZoteroImports, merge_import_warnings, validate_import_request, write_json as write_zotero_json
@@ -91,6 +88,7 @@ COMPONENTS_ROOT = Path(os.environ.get("MY_SCHOLAR_COMPONENTS_DIR", str(DATA_ROOT
 JOBS_ROOT = LIBRARY_ROOT / "jobs"
 MAX_UPLOAD_BYTES = int(os.environ.get("MY_SCHOLAR_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
 MAX_CHAT_IMAGE_BYTES = 5 * 1024 * 1024
+FILE_STREAM_CHUNK_BYTES = 256 * 1024
 NOTE_ASSET_PATH_RE = re.compile(r"^content/notes/assets/[a-f0-9]{64}\.(?:png|jpg|webp|gif)$")
 SETTINGS_PATH = DATA_ROOT / "settings.json"
 AI_STATUS_HISTORY_PATH = DATA_ROOT / "ai-status-history.json"
@@ -116,9 +114,12 @@ PARSING_PROVIDER_LOCK = threading.RLock()
 PARSING_PROVIDERS: Any = None
 PARSING_INSTALL_THREAD: Optional[threading.Thread] = None
 PARSING_INSTALL_CANCEL_EVENT: Optional[threading.Event] = None
+# Generation per job with queued or running metadata work; pruned by the worker
+# once a job has none left (see _metadata_worker).
 METADATA_GENERATIONS: Dict[str, int] = {}
-METADATA_JOB_LOCKS: Dict[str, threading.RLock] = {}
-JOB_MUTATION_LOCKS: Dict[str, threading.RLock] = {}
+# Per-document locks, dropped again once no thread holds or waits for them.
+METADATA_JOB_LOCKS = KeyedLocks()
+JOB_MUTATION_LOCKS = KeyedLocks()
 ACCOUNT_FILE = DATA_ROOT / "account.json"
 ACCOUNT_LOCK = threading.RLock()
 LANDING_FILE = Path(os.environ.get("MY_SCHOLAR_LANDING_FILE", "")).expanduser() if os.environ.get("MY_SCHOLAR_LANDING_FILE") else None
@@ -128,17 +129,10 @@ MIGRATION_QUIESCING = False
 MIGRATION_ACTIVE_REQUESTS = 0
 MIGRATION_ACTIVE_MUTATIONS = 0
 CAPABILITY_INIT_LOCK = threading.RLock()
-LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
-class AccountServiceUnavailable(PipelineError):
-    """The account endpoint is unavailable or violates transport policy."""
-
-
-def _job_mutation_lock(job_id: str) -> threading.RLock:
-    canonical_id = str(job_id or "").strip()
-    with METADATA_STATE_LOCK:
-        return JOB_MUTATION_LOCKS.setdefault(canonical_id, threading.RLock())
+def _job_mutation_lock(job_id: str) -> KeyedLock:
+    return JOB_MUTATION_LOCKS.lock(str(job_id or "").strip())
 
 
 def _assert_annotation_style_writable() -> None:
@@ -177,134 +171,9 @@ def _locked_job_method(method: Any) -> Any:
     return wrapped
 
 
-class DataRootLock:
-    """Hold one writer process per state or library directory."""
-
-    def __init__(self, data_root: Path) -> None:
-        self.path = Path(data_root) / ".my-scholar.lock"
-        self.handle: Optional[Any] = None
-
-    # Windows locks a byte range rather than the whole file, so the guard byte
-    # sits past any owner text the lock file holds.
-    WINDOWS_LOCK_OFFSET = 4096
-
-    def _lock_handle(self, handle: Any) -> None:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return
-        if msvcrt is not None:
-            handle.seek(self.WINDOWS_LOCK_OFFSET)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            return
-        raise RuntimeError("当前平台不支持 My Scholar 数据目录锁。")
-
-    def _unlock_handle(self, handle: Any) -> None:
-        if fcntl is not None:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        elif msvcrt is not None:
-            handle.seek(self.WINDOWS_LOCK_OFFSET)
-            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-
-    def acquire(self) -> None:
-        if fcntl is None and msvcrt is None:
-            raise RuntimeError("当前平台不支持 My Scholar 数据目录锁。")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        handle = self.path.open("a+", encoding="utf-8")
-        try:
-            self._lock_handle(handle)
-        except OSError as exc:
-            handle.seek(0)
-            owner = handle.read().strip()
-            handle.close()
-            # Windows reports a busy range as EACCES/EDEADLOCK depending on the
-            # runtime; both mean another instance owns the library.
-            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
-                detail = f"（进程 {owner}）" if owner else ""
-                raise RuntimeError(f"这个文献库已由另一个 My Scholar 实例打开{detail}。") from exc
-            raise
-        handle.seek(0)
-        handle.truncate()
-        handle.write(str(os.getpid()))
-        handle.flush()
-        os.fsync(handle.fileno())
-        self.handle = handle
-
-    def release(self) -> None:
-        if not self.handle:
-            return
-        try:
-            self._unlock_handle(self.handle)
-        finally:
-            self.handle.close()
-            self.handle = None
-
-
 def _runtime_lock_roots(data_root: Path = DATA_ROOT, library_root: Path = LIBRARY_ROOT) -> List[Path]:
     roots = {Path(data_root).expanduser().resolve(), Path(library_root).expanduser().resolve()}
     return sorted(roots, key=lambda root: os.fsencode(str(root)))
-
-
-class _MultipartFile:
-    """One multipart field, mirroring the slice of the removed
-    ``cgi.FieldStorage`` interface this server uses."""
-
-    def __init__(self, filename: str, data: bytes) -> None:
-        self.filename = filename
-        self.data = data
-        self.file = io.BytesIO(data)
-
-
-def _decode_multipart_text(value: str) -> str:
-    """Restore UTF-8 header text from the latin-1 parsing round-trip.
-
-    Browsers send multipart filenames as raw UTF-8 bytes; the removed ``cgi``
-    module decoded them as UTF-8 and this keeps that behavior.
-    """
-    try:
-        return value.encode("latin-1").decode("utf-8")
-    except UnicodeError:
-        return value
-
-
-def _disposition_param(disposition: str, name: str) -> str:
-    """Read one Content-Disposition parameter from an already-decoded header.
-
-    ``Message.get_param`` replaces surrogateescape bytes with U+FFFD before we
-    can restore them, so the parameter is taken from the raw header instead.
-    """
-    quoted = re.search(rf'(?<![\w-]){name}\s*=\s*"((?:[^"\\]|\\.)*)"', disposition, re.IGNORECASE)
-    if quoted:
-        return re.sub(r"\\(.)", r"\1", quoted.group(1))
-    plain = re.search(rf"(?<![\w-]){name}\s*=\s*([^;\r\n]+)", disposition, re.IGNORECASE)
-    return plain.group(1).strip() if plain else ""
-
-
-def _parse_multipart_form(rfile: Any, content_type: str, content_length: int) -> Dict[str, List[_MultipartFile]]:
-    """Parse multipart/form-data with the stdlib email parser.
-
-    ``cgi`` was removed in Python 3.13. The body is decoded as latin-1 so
-    every byte maps to one code point: headers stay plain ``str`` (compat32
-    wraps surrogateescape headers in lossy ``Header`` objects), and
-    ``get_payload(decode=True)`` restores binary payloads byte-exactly via
-    its raw-unicode-escape fallback.
-    """
-    body = rfile.read(content_length)
-    message = email.parser.Parser().parsestr(
-        "Content-Type: " + content_type + "\r\nMIME-Version: 1.0\r\n\r\n" + body.decode("latin-1")
-    )
-    if not message.is_multipart():
-        raise PipelineError("请使用 multipart/form-data 上传字段 file。")
-    fields: Dict[str, List[_MultipartFile]] = {}
-    for part in message.get_payload():
-        disposition = _decode_multipart_text(str(part.get("Content-Disposition", "")))
-        field_name = _disposition_param(disposition, "name")
-        if not field_name:
-            continue
-        payload = part.get_payload(decode=True)
-        fields.setdefault(field_name, []).append(
-            _MultipartFile(_disposition_param(disposition, "filename"), payload if isinstance(payload, bytes) else b"")
-        )
-    return fields
 
 
 # Account state, settings and compatibility migrations. Per-document content
@@ -315,38 +184,6 @@ def _read_account_state() -> Dict[str, Any]:
     with ACCOUNT_LOCK:
         data = _read_json_file(ACCOUNT_FILE, {})
     return data if isinstance(data, dict) else {}
-
-
-def _account_service_configuration(url: Optional[str] = None) -> Dict[str, Any]:
-    candidate = str(runtime.ACCOUNT_SERVICE_URL if url is None else url).strip().rstrip("/")
-    if not candidate:
-        return {"available": False, "secure": False, "error": "尚未配置账号服务。"}
-    try:
-        parsed = urlsplit(candidate)
-        _ = parsed.port
-    except ValueError:
-        return {"available": False, "secure": False, "error": "账号服务地址格式无效。"}
-    hostname = str(parsed.hostname or "").lower()
-    if not hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-        return {"available": False, "secure": False, "error": "账号服务地址格式无效。"}
-    if parsed.scheme == "https":
-        return {"available": True, "secure": True, "server": candidate}
-    if parsed.scheme == "http" and hostname in LOOPBACK_HOSTS:
-        if runtime.ALLOW_INSECURE_LOOPBACK_ACCOUNT:
-            return {
-                "available": True,
-                "secure": False,
-                "development_only": True,
-                "server": candidate,
-            }
-        return {
-            "available": False,
-            "secure": False,
-            "error": "本地 HTTP 账号服务仅供开发；请显式设置 MY_SCHOLAR_ALLOW_INSECURE_LOOPBACK_ACCOUNT=1。",
-        }
-    if parsed.scheme == "http":
-        return {"available": False, "secure": False, "error": "账号服务必须使用 HTTPS，已拒绝通过明文 HTTP 发送凭据。"}
-    return {"available": False, "secure": False, "error": "账号服务必须使用 HTTPS。"}
 
 
 def _write_account_state(state: Optional[Dict[str, Any]]) -> None:
@@ -374,64 +211,6 @@ def _write_account_state(state: Optional[Dict[str, Any]]) -> None:
                 pass
         finally:
             temporary.unlink(missing_ok=True)
-
-
-class _AccountRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(
-        self,
-        req: urllib.request.Request,
-        fp: Any,
-        code: int,
-        msg: str,
-        headers: Any,
-        newurl: str,
-    ) -> Optional[urllib.request.Request]:
-        current = urlsplit(req.full_url)
-        redirected = urlsplit(newurl)
-        try:
-            current_port = current.port or (443 if current.scheme == "https" else 80)
-            redirected_port = redirected.port or (443 if redirected.scheme == "https" else 80)
-        except ValueError as exc:
-            raise urllib.error.URLError("账号服务返回了无效的重定向地址。") from exc
-        same_origin = (
-            current.scheme,
-            current.hostname,
-            current_port,
-        ) == (
-            redirected.scheme,
-            redirected.hostname,
-            redirected_port,
-        )
-        if not same_origin or not _account_service_configuration(newurl).get("available"):
-            raise urllib.error.URLError("账号服务尝试跳转到不安全或不同来源的地址。")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-def _account_request(path: str, *, method: str = "GET", token: str = "", payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    configuration = _account_service_configuration()
-    if not configuration.get("available"):
-        raise AccountServiceUnavailable(str(configuration.get("error") or "账号服务当前不可用。"))
-    headers = {"Content-Type": "application/json"}
-    if token:
-        headers["Authorization"] = "Bearer " + token
-    request = urllib.request.Request(
-        runtime.ACCOUNT_SERVICE_URL + path,
-        data=json.dumps(payload or {}, ensure_ascii=False).encode("utf-8") if method == "POST" else None,
-        headers=headers,
-        method=method,
-    )
-    try:
-        with urllib.request.build_opener(_AccountRedirectHandler()).open(request, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8", errors="replace"))
-    except urllib.error.HTTPError as exc:
-        try:
-            detail = json.loads(exc.read().decode("utf-8", errors="replace")).get("error", "")
-        except Exception:
-            detail = ""
-        raise PipelineError(detail or f"账号服务错误（HTTP {exc.code}）。") from exc
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise AccountServiceUnavailable("无法安全连接账号服务器，请检查网络或 HTTPS 服务配置。") from exc
-    return data if isinstance(data, dict) else {}
 
 
 def _local_usage_bytes(force: bool = False) -> int:
@@ -492,6 +271,9 @@ def _chat_image_context(job_dir: Path, value: Any) -> Optional[Dict[str, str]]:
         raise PipelineError("图片路径无效。") from exc
     if not target.is_file():
         raise PipelineError("图片资源不存在。")
+    # Reject oversized crops before reading them into memory.
+    if target.stat().st_size > MAX_CHAT_IMAGE_BYTES:
+        raise PipelineError("图片为空或超过 5 MB。")
     data = target.read_bytes()
     if not data or len(data) > MAX_CHAT_IMAGE_BYTES:
         raise PipelineError("图片为空或超过 5 MB。")
@@ -509,32 +291,6 @@ def _chat_image_context(job_dir: Path, value: Any) -> Optional[Dict[str, str]]:
 def _stored_settings() -> Dict[str, Any]:
     data = _read_json_file(SETTINGS_PATH, {})
     return data if isinstance(data, dict) else {}
-
-
-def _normalize_ai_status_record(value: Any) -> Optional[Dict[str, Any]]:
-    if not isinstance(value, dict):
-        return None
-    checked_at = str(value.get("checkedAt") or value.get("checked_at") or "").strip()
-    results = value.get("results")
-    if not checked_at or not isinstance(results, dict):
-        return None
-    normalized: Dict[str, Dict[str, Any]] = {}
-    for service in ("translation", "chat"):
-        result = results.get(service)
-        if not isinstance(result, dict):
-            result = {}
-        ok = result.get("ok") is True or result.get("success") is True or result.get("status") == "ok"
-        safe: Dict[str, Any] = {"ok": ok}
-        try:
-            elapsed = max(0, int(float(result.get("elapsed_ms"))))
-        except (TypeError, ValueError, OverflowError):
-            elapsed = None
-        if elapsed is not None:
-            safe["elapsed_ms"] = elapsed
-        if not ok:
-            safe["error"] = str(result.get("error") or result.get("message") or "连接失败")[:180]
-        normalized[service] = safe
-    return {"checkedAt": checked_at, "results": normalized}
 
 
 def _ai_status_history() -> List[Dict[str, Any]]:
@@ -569,92 +325,6 @@ def _record_ai_status(results: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
-def _setting_bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    return str(value).strip().lower() not in {"", "0", "false", "no", "off"}
-
-
-ANNOTATION_COLOR_KINDS = ("highlight", "underline")
-
-
-def _setting_color(value: Any, default: str = "#f59e0b") -> str:
-    candidate = str(value or "").strip()
-    return candidate if re.fullmatch(r"#[0-9a-fA-F]{6}", candidate) else default
-
-
-def _parsing_backend(value: Any) -> str:
-    """An unset choice defers to MY_SCHOLAR_MINERU_BACKEND, then to the default."""
-    return normalize_mineru_backend(value.get("backend") if isinstance(value, dict) else None)
-
-
-def _parsing_server_url(value: Any, *, strict: bool) -> str:
-    """Validate the layout server address, rejecting anything but http(s).
-
-    Reads are lenient: a stored value that is somehow invalid must not take the
-    whole settings endpoint down with it. Writes reject it so it never lands.
-    """
-    raw = value.get("server_url") if isinstance(value, dict) else None
-    try:
-        return normalize_mineru_server_url(raw)
-    except LayoutPipelineError as exc:
-        if strict:
-            raise PipelineError(str(exc)) from exc
-        return ""
-
-
-def _parsing_settings(value: Any, *, strict: bool = False) -> Dict[str, str]:
-    return {"backend": _parsing_backend(value), "server_url": _parsing_server_url(value, strict=strict)}
-
-
-def _annotation_colors(value: Any, fallback: str) -> Dict[str, str]:
-    """Remember the last colour picked for each annotation kind."""
-    stored = value if isinstance(value, dict) else {}
-    return {kind: _setting_color(stored.get(kind), fallback) for kind in ANNOTATION_COLOR_KINDS}
-
-
-BUILTIN_ANNOTATION_ACTIONS = ("highlight", "highlight_note", "underline", "underline_note", "copy", "chat")
-
-
-def _annotation_actions(value: Any, *, strict: bool = False) -> Dict[str, Any]:
-    stored = value if isinstance(value, dict) else {}
-    show_shortcut_hints = _setting_bool(stored.get("show_shortcut_hints"), True)
-    hidden = stored.get("hidden_builtin", [])
-    custom = stored.get("custom", [])
-    if not isinstance(hidden, list) or not isinstance(custom, list):
-        if strict:
-            raise PipelineError("选区工具栏的按钮配置必须是列表。")
-        return {"hidden_builtin": [], "custom": [], "show_shortcut_hints": show_shortcut_hints}
-    if strict and len(custom) > 32:
-        raise PipelineError("最多可配置 32 个自定义标记。")
-    actions = []
-    seen = set()
-    for item in custom[:32]:
-        if not isinstance(item, dict):
-            if strict:
-                raise PipelineError("自定义标记格式无效。")
-            continue
-        action_id = str(item.get("id") or "").strip()
-        label = str(item.get("label") or "").strip()
-        kind = str(item.get("kind") or "highlight")
-        color = str(item.get("color") or "#f59e0b")
-        valid = (re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", action_id)
-                 and action_id not in seen and 0 < len(label) <= 40
-                 and kind in ANNOTATION_COLOR_KINDS
-                 and re.fullmatch(r"#[0-9a-fA-F]{6}", color))
-        if not valid:
-            if strict:
-                raise PipelineError("自定义标记需要唯一 ID、1–40 字名称、有效颜色及高亮或划线类型。")
-            continue
-        seen.add(action_id)
-        actions.append({"id": action_id, "label": label, "kind": kind, "color": color,
-                        "enabled": _setting_bool(item.get("enabled"), True)})
-    return {"hidden_builtin": [name for name in BUILTIN_ANNOTATION_ACTIONS if name in hidden],
-            "custom": actions, "show_shortcut_hints": show_shortcut_hints}
-
-
 def _annotation_action_snapshot(value: Dict[str, Any]) -> Dict[str, str]:
     action_id = str(value.get("action_id") or "").strip()
     label = str(value.get("label") or "").strip()
@@ -673,130 +343,6 @@ def _annotation_payload(annotations: list, **fields: Any) -> Dict[str, Any]:
     return {"annotations": annotations, "annotation_style_revision": int(_stored_settings().get("annotation_style_revision", 0)), **fields}
 
 
-APPEARANCE_DEFAULTS = {
-    "app_font": "system",
-    "reader_font": "academic",
-    "accent": "amber",
-}
-APPEARANCE_CHOICES = {
-    "app_font": frozenset({"system", "pingfang", "songti"}),
-    "reader_font": frozenset({"academic", "songti", "georgia", "sans"}),
-    "accent": frozenset({"amber", "blue", "emerald", "violet", "rose", "graphite"}),
-}
-
-
-def _appearance_settings(value: Any, *, base: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    result = dict(APPEARANCE_DEFAULTS)
-    if isinstance(base, dict):
-        for name, choices in APPEARANCE_CHOICES.items():
-            candidate = str(base.get(name) or "").strip().lower()
-            if candidate in choices:
-                result[name] = candidate
-    if not isinstance(value, dict):
-        return dict(APPEARANCE_DEFAULTS)
-    for name, choices in APPEARANCE_CHOICES.items():
-        if name not in value:
-            continue
-        candidate = str(value.get(name) or "").strip().lower()
-        result[name] = candidate if candidate in choices else APPEARANCE_DEFAULTS[name]
-    return result
-
-
-AI_PROFILE_LIMITS = {"base_url": 2048, "model": 256, "api_key": 4096}
-
-
-def _normalize_ai_profile(value: Any, current: Any = None, *, service: str = "chat") -> Dict[str, Any]:
-    """Validate one user-owned OpenAI-compatible profile.
-
-    API keys are write-only from the UI: an empty key keeps the existing one,
-    while ``clear_api_key`` explicitly removes it. This avoids echoing secrets
-    through the settings endpoint while still allowing users to rotate them.
-    """
-    incoming = value if isinstance(value, dict) else {}
-    existing = current if isinstance(current, dict) else {}
-    result: Dict[str, Any] = {
-        "base_url": str(incoming.get("base_url", existing.get("base_url", "")) or "").strip().rstrip("/"),
-        "model": str(incoming.get("model", existing.get("model", "")) or "").strip(),
-        "api_key": str(existing.get("api_key", "") or "").strip(),
-    }
-    try:
-        result.update(normalize_ai_options({**existing, **incoming}, strict=True))
-    except ValueError as exc:
-        raise PipelineError(str(exc)) from exc
-    if service == "translation":
-        provider = str(incoming.get("provider", existing.get("provider", "openai-compatible")) or "openai-compatible").strip().lower()
-        if provider not in TRANSLATION_PROVIDERS:
-            raise PipelineError("翻译提供商无效。知网尚无可核实的官方公开翻译 API。")
-        result["provider"] = provider
-        if provider != existing.get("provider", "openai-compatible"):
-            # OpenAI and DeepL both call their token api_key, but those tokens
-            # belong to different services and must not travel across providers.
-            result["api_key"] = ""
-        try:
-            result["source_language"] = language_code(str(incoming.get("source_language", existing.get("source_language", "auto")) or "auto"), source=True)
-            result["target_language"] = language_code(str(incoming.get("target_language", existing.get("target_language", "zh")) or "zh"))
-        except ValueError as exc:
-            raise PipelineError(str(exc)) from exc
-        tier = str(incoming.get("deepl_tier", existing.get("deepl_tier", "free")) or "free").strip().lower()
-        if tier not in {"free", "pro"}:
-            raise PipelineError("DeepL 套餐必须为 free 或 pro。")
-        result["deepl_tier"] = tier
-        for field in ("access_key_id", "secret_access_key"):
-            result[field] = str(incoming.get(field) or existing.get(field) or "").strip()
-            if _setting_bool(incoming.get("clear_" + field), False):
-                result[field] = ""
-            if len(result[field]) > 4096:
-                raise PipelineError("翻译凭据配置过长。")
-        candidate_mode = str(incoming.get("mode", existing.get("mode", DEFAULT_TRANSLATION_MODE)) or "").strip().lower()
-        if candidate_mode not in AI_TRANSLATION_MODES:
-            raise PipelineError("翻译协议模式无效。")
-        result["mode"] = candidate_mode
-    if "api_key" in incoming and str(incoming.get("api_key") or "").strip():
-        result["api_key"] = str(incoming.get("api_key")).strip()
-    if _setting_bool(incoming.get("clear_api_key"), False):
-        result["api_key"] = ""
-    if result["base_url"]:
-        parsed = urlsplit(result["base_url"])
-        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise PipelineError("AI Base URL 必须是没有凭据、查询参数或片段的 HTTP(S) 地址。")
-        if parsed.scheme == "http" and str(parsed.hostname).lower() not in LOOPBACK_HOSTS:
-            raise PipelineError("远程 AI Base URL 必须使用 HTTPS；仅本机服务允许 HTTP。")
-    for field, limit in AI_PROFILE_LIMITS.items():
-        if len(result[field]) > limit:
-            raise PipelineError(f"AI {field} 配置过长。")
-    return result
-
-
-def _normalize_ai_settings(value: Any, current: Any = None) -> Dict[str, Dict[str, Any]]:
-    incoming = value if isinstance(value, dict) else {}
-    existing = current if isinstance(current, dict) else {}
-    return {
-        service: _normalize_ai_profile(incoming.get(service), existing.get(service), service=service)
-        for service in ("translation", "chat")
-    }
-
-
-def _public_ai_settings(value: Any) -> Dict[str, Dict[str, Any]]:
-    profiles = _normalize_ai_settings(value)
-    return {
-        service: {
-            "base_url": profile["base_url"],
-            "model": profile["model"],
-            "api_key_configured": bool(profile["api_key"]),
-            **normalize_ai_options(profile),
-            "capabilities": get_model_capabilities(profile),
-            **({
-                "mode": profile["mode"], "provider": profile["provider"],
-                "source_language": profile["source_language"], "target_language": profile["target_language"],
-                "deepl_tier": profile["deepl_tier"],
-                "access_key_id_configured": bool(profile["access_key_id"]),
-                "secret_access_key_configured": bool(profile["secret_access_key"]),
-            } if service == "translation" else {}),
-        }
-        for service, profile in profiles.items()
-    }
-
-
 def _persist_settings(data: Dict[str, Any]) -> None:
     _assert_annotation_style_writable()
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -813,23 +359,6 @@ def _persist_settings(data: Dict[str, Any]) -> None:
             pass
     finally:
         temporary.unlink(missing_ok=True)
-
-
-AI_PROFILE_NAMES = frozenset({"translation", "chat"})
-
-
-def _chat_options(value: Any) -> Dict[str, Any]:
-    if value is None:
-        return {}
-    allowed = {"reasoning_effort", "thinking_budget", "context_window"}
-    if not isinstance(value, dict) or set(value) - allowed:
-        raise PipelineError("会话设置仅支持推理强度、思考预算和上下文窗口。")
-    overrides = {key: item for key, item in value.items() if item is not None}
-    try:
-        normalized = normalize_ai_options(overrides, strict=True)
-    except ValueError as exc:
-        raise PipelineError(str(exc)) from exc
-    return {key: normalized[key] for key in overrides}
 
 
 def _copy_ai_profile(source: str, target: str) -> Dict[str, Any]:
@@ -1011,340 +540,6 @@ def _job_context(job_dir: Path, limit: int = 14000) -> str:
     return "\n\n".join(chunks)[:limit]
 
 
-def _highlight_signature(block_id: Any, quote: Any, category: Any) -> str:
-    material = "\n".join((str(block_id or "").strip(), str(category or "method").strip(), str(quote or "").strip()))
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
-
-
-_LOCAL_HIGHLIGHT_MARKERS = {
-    "research_goal": ("we present", "we propose", "this paper", "our goal", "we aim"),
-    "method": ("pre-training", "pretraining", "pretrain", "encoder", "transformer", "fine-tun", "optimiz", "task"),
-    "innovation": ("unified", "multiway", "novel", "first", "introduce", "stagewise", "general-purpose"),
-    "conclusion": ("experimental results", "results demonstrate", "achieves", "outperforms", "state-of-the-art", "improves", "competitive performance"),
-}
-
-
-def _local_highlight_candidates(blocks: List[dict], limit: int = 8) -> List[Dict[str, Any]]:
-    """Create conservative, verbatim highlights when the optional model is empty."""
-    candidates: List[tuple[Dict[str, Any], Dict[str, int]]] = []
-    for block in blocks:
-        raw_text = str(block.get("text", "")).strip()
-        text = re.sub(r"<[^>]+>", "", raw_text).strip()
-        if len(text) < 120 or is_metadata_block(block, text) or any(marker in text for marker in ("MMLab", "Corresponding author")):
-            continue
-        quote = re.split(r"(?<=[.!?。！？])\s+", text)[0][:300].strip()
-        lower = text.lower()
-        scores = {category: sum(lower.count(marker) for marker in markers) for category, markers in _LOCAL_HIGHLIGHT_MARKERS.items()}
-        candidates.append(({
-            "block_id": block.get("block_id"),
-            "quote": quote,
-            "category": "method",
-            "reason": "本地规则候选（未调用模型）",
-        }, scores))
-    if not candidates:
-        return []
-
-    selected: List[Dict[str, Any]] = []
-    used_blocks: set[str] = set()
-    category_order = ("research_goal", "method", "innovation", "conclusion")
-    for category in category_order:
-        ranked = sorted(
-            candidates,
-            key=lambda pair: (pair[1].get(category, 0), max(pair[1].values()), len(str(pair[0].get("quote", "")))),
-            reverse=True,
-        )
-        chosen = next((pair for pair in ranked if str(pair[0].get("block_id")) not in used_blocks and pair[1].get(category, 0) > 0), None)
-        if chosen is None:
-            chosen = next((pair for pair in ranked if str(pair[0].get("block_id")) not in used_blocks), None)
-        if chosen is None:
-            continue
-        item = dict(chosen[0])
-        item["category"] = category
-        selected.append(item)
-        used_blocks.add(str(item.get("block_id")))
-
-    remaining = sorted(candidates, key=lambda pair: (max(pair[1].values()), len(str(pair[0].get("quote", "")))), reverse=True)
-    for candidate, _scores in remaining:
-        if len(selected) >= limit:
-            break
-        block_id = str(candidate.get("block_id"))
-        if block_id in used_blocks:
-            continue
-        selected.append(dict(candidate))
-        used_blocks.add(block_id)
-    return selected[:limit]
-
-
-def _metadata_block_ids(job_dir: Path) -> set[str]:
-    data = _read_json_file(_active_conversion_root(job_dir) / "document.json", {})
-    identifiers: set[str] = set()
-    for page in data.get("pages", []) if isinstance(data, dict) and isinstance(data.get("pages"), list) else []:
-        for item in page.get("elements", []) if isinstance(page, dict) else []:
-            if isinstance(item, dict) and item.get("translation_excluded") == "metadata" and item.get("block_id"):
-                identifiers.add(str(item["block_id"]))
-    return identifiers
-
-
-def _clean_legacy_translation_cache(job_dir: Path) -> None:
-    metadata_ids = _metadata_block_ids(job_dir)
-    if not metadata_ids or not (job_dir / "translations.json").is_file():
-        return
-    records = _translation_records(job_dir)
-    filtered = [item for item in records if str(item.get("block_id", "")) not in metadata_ids]
-    if len(filtered) != len(records):
-        _write_translation_records(job_dir, filtered)
-
-
-_LEGACY_READER_STYLE_MARKER = "/* my-scholar:continuous-reader-migration-v6 */"
-_LEGACY_READER_STYLE = r"""
-/* my-scholar:continuous-reader-migration-v6 */
-/* my-scholar:continuous-reader-migration-v5 (compatibility marker) */
-/* my-scholar:continuous-reader-migration-v4 (compatibility marker) */
-/* Existing jobs may have been rendered by the pre-continuous reader. Keep
-   their ids and data-page anchors, but remove presentation-only page cards,
-   navigation chrome, and internal audit disclosures from the reading surface. */
-html, body { background: var(--paper, #fff) !important; }
-:root { --accent: #d97706 !important; --accent-dark: #a65305 !important; --highlight-orange: #f59e0b !important; --user-highlight: #f59e0b !important; --muted: #756b60 !important; --line: #e7ded2 !important; --soft: #fbf6ed !important; }
-a, .citation, .cross-reference { color: var(--accent, #d97706) !important; }
-.block-selected { outline-color: var(--accent, #d97706) !important; }
-.my-scholar-underline:not([data-user-color="true"]) { text-decoration-color: var(--highlight-orange, #f59e0b) !important; }
-*, *::before, *::after { -webkit-user-select: none !important; user-select: none !important; }
-input, textarea, [contenteditable="true"] { -webkit-user-select: text !important; user-select: text !important; }
-.reader-shell { width: 100% !important; max-width: none !important; margin: 0 !important; padding: 0 24px 72px !important; background: var(--paper, #fff) !important; }
-.reader-layout { display: block !important; }
-.reader-nav { display: none !important; }
-.reader-content { max-width: 1080px !important; margin: 0 auto !important; padding: 32px 0 48px !important; background: var(--paper, #fff) !important; font-family: var(--paper-font, "Times New Roman", Times, serif) !important; font-size: calc(18px * var(--reader-font-scale, 1)) !important; line-height: var(--reader-line-height, 1.72) !important; -webkit-user-select: text !important; user-select: text !important; }
-.reader-content p, .reader-content li, .reader-content figcaption, .reader-content .translation-text { line-height: inherit !important; }
-.reader-content, .reader-content * { -webkit-user-select: text !important; user-select: text !important; }
-.reader-content button, .reader-content button *, .reader-content input, .reader-content textarea, .reader-content select, .reader-content summary, .reader-content .paragraph-translate-trigger, .reader-content .paragraph-translate-trigger *, .reader-content .annotation-note-trigger, .reader-content .annotation-note-trigger *, .reader-content .annotation-note-popover, .reader-content .annotation-note-popover * { -webkit-user-select: none !important; user-select: none !important; }
-.reader-content .annotation-note-popover .annotation-note-editor[contenteditable="true"], .reader-content .annotation-note-popover .annotation-note-editor[contenteditable="true"] * { -webkit-user-select: text !important; user-select: text !important; }
-.my-scholar-highlight[data-user-color="true"] { background: color-mix(in srgb, var(--user-highlight, #f59e0b) 32%, transparent) !important; box-shadow: inset 0 -.09em 0 color-mix(in srgb, var(--user-highlight, #f59e0b) 62%, transparent) !important; }
-.my-scholar-underline[data-user-color="true"] { text-decoration-color: var(--user-highlight, #f59e0b) !important; }
-.pdf-page { margin: 0 !important; padding: 0 clamp(30px, 5vw, 74px) !important; border: 0 !important; border-radius: 0 !important; box-shadow: none !important; background: var(--paper, #fff) !important; }
-.pdf-page + .pdf-page { padding-top: 0 !important; border-top: 0 !important; }
-.page-label { position: absolute !important; width: 1px !important; height: 1px !important; margin: -1px !important; padding: 0 !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; white-space: nowrap !important; border: 0 !important; }
-.source-crop, .page-source, .table-structure, .table-review-badge { display: none !important; }
-.pdf-figure, .pdf-table { background: transparent !important; }
-.pdf-table { border: 0 !important; padding: 0 !important; }
-.pdf-table .table-source-primary { padding: 0 0 8px !important; }
-.pdf-table .table-source-primary img { width: auto !important; max-width: 100% !important; height: auto !important; }
-.pdf-table.table-image-missing .table-source-missing { margin: 8px 0 !important; color: var(--muted, #6f7d8d) !important; }
-.references { list-style: none !important; padding-left: 0 !important; }
-.my-scholar-translation { border-left: 0 !important; padding-left: 0 !important; background: transparent !important; }
-.translation-text .translation-math { display: inline-block; margin: 0 .08em; vertical-align: -.16em; }
-.translation-math-fallback { display: inline-block; white-space: nowrap; }
-@media (max-width: 760px) {
-  .reader-shell { padding: 0 16px 48px !important; }
-  .reader-content { padding-top: 22px !important; padding-bottom: 32px !important; }
-  .pdf-page { padding-left: 16px !important; padding-right: 16px !important; }
-}
-@media (prefers-color-scheme: dark) {
-  :root { --accent: #f3b34c !important; --accent-dark: #ffd07a !important; --highlight-orange: #f3b34c !important; --user-highlight: #f3b34c !important; --ink: #dcdcde !important; --muted: #b9ad9d !important; --line: #55462f !important; --paper: #1e2124 !important; --soft: #32281a !important; }
-  a, .citation, .cross-reference { color: var(--accent, #f3b34c) !important; }
-}
-"""
-
-
-_TABLE_FIGURE_RE = re.compile(
-    r'(?P<open><figure\b[^>]*class=["\'][^"\']*\bpdf-table\b[^"\']*["\'][^>]*>)'
-    r'(?P<body>.*?)'
-    r'(?P<close></figure\s*>)',
-    flags=re.IGNORECASE | re.DOTALL,
-)
-
-
-def _table_image_markup(fragment: str) -> str:
-    """Extract an existing crop link without exposing legacy table markup."""
-    linked = re.search(
-        r'<a\b[^>]*class=["\'][^"\']*\basset-link\b[^"\']*["\'][^>]*>.*?<img\b[^>]*>.*?</a\s*>',
-        fragment,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if linked:
-        return linked.group(0)
-    image = re.search(r'<img\b[^>]*>', fragment, flags=re.IGNORECASE)
-    return image.group(0) if image else ""
-
-
-def _add_class(tag: str, class_name: str) -> str:
-    def replace(match: re.Match[str]) -> str:
-        classes = match.group(2).split()
-        if class_name not in classes:
-            classes.append(class_name)
-        return f"{match.group(1)}{' '.join(classes)}{match.group(3)}"
-
-    return re.sub(
-        r'(class=["\'])([^"\']*)(["\'])',
-        replace,
-        tag,
-        count=1,
-        flags=re.IGNORECASE,
-    )
-
-
-def _migrate_legacy_table_figures(document: str) -> str:
-    """Promote old hidden table crops and remove semantic tables from HTML."""
-
-    def replace(match: re.Match[str]) -> str:
-        opening = match.group("open")
-        body = match.group("body")
-        primary = re.search(
-            r'<(?:div|section)\b[^>]*class=["\'][^"\']*\btable-source-primary\b[^"\']*["\'][^>]*>.*?</(?:div|section)\s*>',
-            body,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        source_crop = re.search(
-            r'<(?:details|div|section)\b[^>]*class=["\'][^"\']*\bsource-crop\b[^"\']*["\'][^>]*>.*?</(?:details|div|section)\s*>',
-            body,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        crop_markup = _table_image_markup(primary.group(0) if primary else "")
-        if not crop_markup and source_crop:
-            crop_markup = _table_image_markup(source_crop.group(0))
-
-        # Remove the old crop/structured wrappers and any semantic table. The
-        # structured candidate remains available in document.json for search
-        # and review, but never becomes the reading renderer.
-        body = re.sub(
-            r'<(?:details|div|section)\b[^>]*class=["\'][^"\']*\b(?:table-source-primary|source-crop|table-structure|table-scroll)\b[^"\']*["\'][^>]*>.*?</(?:details|div|section)\s*>',
-            "",
-            body,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        body = re.sub(r'<table\b.*?</table\s*>', "", body, flags=re.IGNORECASE | re.DOTALL)
-
-        if crop_markup:
-            primary_html = f'<div class="table-source-primary table-image-only">{crop_markup}</div>'
-            caption_end = re.search(r'</figcaption\s*>', body, flags=re.IGNORECASE)
-            if caption_end:
-                body = body[:caption_end.end()] + primary_html + body[caption_end.end():]
-            else:
-                body = primary_html + body
-            opening = _add_class(opening, "table-image-only")
-            opening = re.sub(r'\btable-semantic-fallback\b', '', opening, flags=re.IGNORECASE)
-        else:
-            missing = '<div class="table-source-missing">表格图像暂不可用</div>'
-            caption_end = re.search(r'</figcaption\s*>', body, flags=re.IGNORECASE)
-            if caption_end:
-                body = body[:caption_end.end()] + missing + body[caption_end.end():]
-            else:
-                body = missing + body
-            opening = _add_class(opening, "table-image-missing")
-        return opening + body + match.group("close")
-
-    return _TABLE_FIGURE_RE.sub(replace, document)
-
-
-_FIGURE_ID_RE = re.compile(
-    r'(?P<open><figure\b[^>]*?\bid=["\'](?P<id>[^"\']+)["\'][^>]*>)(?P<body>.*?)</figure\s*>',
-    flags=re.IGNORECASE | re.DOTALL,
-)
-
-
-def _deduplicate_figure_ids(document: str) -> str:
-    matches = list(_FIGURE_ID_RE.finditer(document))
-    groups: Dict[str, List[int]] = {}
-    for index, match in enumerate(matches):
-        groups.setdefault(match.group("id"), []).append(index)
-    replacements: Dict[int, str] = {}
-    used_ids = {match.group("id") for match in matches}
-    for anchor, indexes in groups.items():
-        if len(indexes) < 2:
-            continue
-        number = re.search(r"(\d+)$", anchor)
-        expected = number.group(1) if number else ""
-
-        def score(index: int, expected: str = expected) -> tuple[int, int]:
-            body = matches[index].group("body")
-            caption_match = re.search(r"<figcaption\b[^>]*>(.*?)</figcaption\s*>", body, flags=re.IGNORECASE | re.DOTALL)
-            caption = re.sub(r"<[^>]+>", " ", caption_match.group(1) if caption_match else "")
-            caption = re.sub(r"\s+", " ", html.unescape(caption)).strip()
-            explicit = bool(expected and re.search(rf"\b(?:Figure|Fig\.?|Table)\s*{re.escape(expected)}\b", caption, flags=re.IGNORECASE))
-            return (1000 if explicit else 0, len(caption))
-
-        canonical = max(indexes, key=score)
-        suffix = 1
-        for index in indexes:
-            if index == canonical:
-                continue
-            candidate = f"{anchor}-duplicate-{suffix}"
-            while candidate in used_ids:
-                suffix += 1
-                candidate = f"{anchor}-duplicate-{suffix}"
-            replacements[index] = candidate
-            used_ids.add(candidate)
-            suffix += 1
-    if not replacements:
-        return document
-    cursor = 0
-    chunks: List[str] = []
-    for index, match in enumerate(matches):
-        chunks.append(document[cursor:match.start()])
-        block = match.group(0)
-        if index in replacements:
-            opening = match.group("open")
-            opening = re.sub(
-                rf'(\bid=["\']){re.escape(match.group("id"))}(["\'])',
-                rf'\g<1>{replacements[index]}\g<2>',
-                opening,
-                count=1,
-                flags=re.IGNORECASE,
-            )
-            block = opening + match.group("body") + "</figure>"
-        chunks.append(block)
-        cursor = match.end()
-    chunks.append(document[cursor:])
-    return "".join(chunks)
-
-
-def _migrate_reader_html(job_dir: Path) -> bool:
-    """Bring pre-continuous reader HTML into the current presentation shell."""
-    path = job_dir / "document.html"
-    if not path.is_file():
-        return False
-    try:
-        document = path.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    had_migration_style = _LEGACY_READER_STYLE_MARKER in document
-    original = document
-    # Older exports put the page navigator and audit crops directly in the
-    # DOM. Remove those presentation-only blocks instead of merely hiding
-    # them, so accessibility/search cannot surface an internal fallback.
-    document = re.sub(
-        r'<nav\b[^>]*class=["\'][^"\']*\breader-nav\b[^"\']*["\'][^>]*>.*?</nav\s*>',
-        "",
-        document,
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    document = _migrate_legacy_table_figures(document)
-    document = _deduplicate_figure_ids(document)
-    for class_name in ("source-crop", "page-source", "table-structure"):
-        document = re.sub(
-            rf'<(?:details|div|section)\b[^>]*class=["\'][^"\']*\b{class_name}\b[^"\']*["\'][^>]*>.*?</(?:details|div|section)\s*>',
-            "",
-            document,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-    if had_migration_style:
-        migrated = document
-    else:
-        closing = re.search(r"</style>", document, flags=re.IGNORECASE)
-        if closing:
-            migrated = document[:closing.start()] + _LEGACY_READER_STYLE + document[closing.start():]
-        else:
-            head = re.search(r"</head>", document, flags=re.IGNORECASE)
-            style = f"<style>{_LEGACY_READER_STYLE}</style>"
-            migrated = document[:head.start()] + style + document[head.start():] if head else style + document
-    if migrated == original:
-        return False
-    try:
-        path.write_text(migrated, encoding="utf-8")
-    except OSError:
-        return False
-    return True
-
-
 def _sync_ai_annotations(job_dir: Path, result: Dict[str, Any]) -> None:
     _assert_annotation_style_writable()
     suggestions = result.get("highlights") if isinstance(result, dict) else None
@@ -1418,15 +613,6 @@ def _sync_ai_annotations(job_dir: Path, result: Dict[str, Any]) -> None:
         cleaned.append(item)
     if changed:
         _atomic_write_text(path, json.dumps(cleaned, ensure_ascii=False, indent=2))
-
-
-def _is_ai_annotation(item: Dict[str, Any]) -> bool:
-    source = str(item.get("source") or "").strip().lower()
-    if source == "ai":
-        return True
-    if source == "manual":
-        return False
-    return item.get("kind") == "highlight" and item.get("start") is None and item.get("end") is None
 
 
 def _migrate_job_artifacts(job_dir: Path, manifest: Dict[str, Any]) -> Dict[str, Any]:
@@ -1632,8 +818,9 @@ def _initialize_runtime_stores() -> None:
     STORE = JobStore(JOBS_ROOT)
     LIBRARY = LibraryStore(LIBRARY_ROOT)
     STORE.recover_permanent_delete_journals(LIBRARY)
-    LIBRARY.sync_jobs(STORE.list())
-    for record in STORE.list():
+    records = STORE.list()
+    LIBRARY.sync_jobs(records)
+    for record in records:
         _apply_requested_folders(record)
 
 
@@ -1841,9 +1028,8 @@ def _metadata_needs_local_abstract_backfill(metadata: Any) -> bool:
     )
 
 
-def _metadata_job_lock(job_id: str) -> threading.RLock:
-    with METADATA_STATE_LOCK:
-        return METADATA_JOB_LOCKS.setdefault(job_id, threading.RLock())
+def _metadata_job_lock(job_id: str) -> KeyedLock:
+    return METADATA_JOB_LOCKS.lock(job_id)
 
 
 def _enqueue_metadata(job_id: str, online: bool, phase: str, *, force: bool = False) -> bool:
@@ -1936,60 +1122,11 @@ def _metadata_worker() -> None:
         finally:
             with METADATA_STATE_LOCK:
                 METADATA_PENDING.discard((job_id, phase, generation))
+                # Nothing queued or running still carries a generation for this
+                # job, so its counter can restart from zero next time.
+                if not any(pending[0] == job_id for pending in METADATA_PENDING):
+                    METADATA_GENERATIONS.pop(job_id, None)
             METADATA_QUEUE.task_done()
-
-
-def _publish_conversion_attempt(job_dir: Path, attempt_dir: Path) -> None:
-    """Publish a complete conversion, with the manifest as the commit marker."""
-    manifest_path = attempt_dir / "manifest.json"
-    if not manifest_path.is_file():
-        raise PipelineError("转换没有生成完成清单。")
-    stale_root = job_dir / "work" / f"stale-{attempt_dir.name}-{uuid.uuid4().hex[:8]}"
-    stale_root.mkdir(parents=True, exist_ok=False)
-    entries = [entry for entry in attempt_dir.iterdir() if entry.name != "manifest.json"]
-    try:
-        for entry in entries:
-            target = job_dir / entry.name
-            if target.exists():
-                os.replace(target, stale_root / entry.name)
-            os.replace(entry, target)
-        target_manifest = job_dir / "manifest.json"
-        if target_manifest.exists():
-            os.replace(target_manifest, stale_root / "manifest.json")
-        os.replace(manifest_path, target_manifest)
-        try:
-            directory_fd = os.open(job_dir, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except OSError:
-            pass
-    except Exception:
-        raise
-    else:
-        shutil.rmtree(stale_root, ignore_errors=True)
-        try:
-            attempt_dir.rmdir()
-        except OSError:
-            pass
-
-
-def _rebase_manifest_paths(value: Any, attempt_dir: Path, job_dir: Path) -> Any:
-    """Point manifest paths at the published directory, not the attempt one.
-
-    Rewriting the serialized JSON would silently no-op on Windows, where
-    json.dumps escapes the backslashes in the path being searched for.
-    """
-    old = str(attempt_dir)
-    new = str(job_dir)
-    if isinstance(value, str):
-        return new + value[len(old):] if value.startswith(old) else value
-    if isinstance(value, dict):
-        return {key: _rebase_manifest_paths(item, attempt_dir, job_dir) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_rebase_manifest_paths(item, attempt_dir, job_dir) for item in value]
-    return value
 
 
 def _run_conversion_job(job_id: str, source_name: str) -> None:
@@ -2089,20 +1226,6 @@ def _conversion_worker() -> None:
             CONVERSION_QUEUE.task_done()
 
 
-def _validate_reflow_render(render_dir: Path) -> Dict[str, Any]:
-    required = ("manifest.json", "document.html", "document.json", "document-ir.json", "validation.json", "source.pdf")
-    missing = [name for name in required if not (render_dir / name).is_file()]
-    if missing:
-        raise PipelineError("重新排版产物不完整：" + "、".join(missing))
-    validation = _read_json_file(render_dir / "validation.json", {})
-    if not isinstance(validation, dict) or validation.get("status") not in {"PASS", "REVIEW"}:
-        raise PipelineError("重新排版校验未通过，当前阅读版本未受影响。")
-    manifest = _read_json_file(render_dir / "manifest.json", {})
-    if not isinstance(manifest, dict):
-        raise PipelineError("重新排版没有生成有效清单。")
-    return manifest
-
-
 def _reflow_cancel_event(job_id: str, generation: int) -> threading.Event:
     key = (str(job_id), int(generation))
     with REFLOW_CANCEL_LOCK:
@@ -2135,12 +1258,6 @@ def _active_parsing_provider() -> Any:
     registry = _parsing_provider_registry()
     remote = registry.get("remote-guzi")
     return remote if getattr(remote, "configured", lambda: False)() is True else registry.get("local-mineru")
-
-
-def _provider_failure(capability: Dict[str, Any]) -> ProviderError:
-    code = str(capability.get("reason_code") or capability.get("state") or "not_installed")
-    message = str(capability.get("message") or "版面解析服务当前不可用。")
-    return ProviderError(message, code=code, details={"provider": capability})
 
 
 def _ensure_provider_configuration_idle(action: str) -> None:
@@ -2180,34 +1297,6 @@ def _run_provider_import(provider_id: str, source: Path) -> None:
     finally:
         with PARSING_PROVIDER_LOCK:
             PARSING_INSTALL_THREAD = None
-
-
-def _reflow_failure_error(exc: BaseException, preserved: Optional[Path]) -> str:
-    """The stored message, naming the transcript when one was kept."""
-    message = str(exc)
-    if preserved is not None:
-        message = f"{message}（解析日志：{preserved.name}）"
-    return message[:500]
-
-
-def _preserve_layout_error_log(attempt_dir: Path, renders_root: Path, generation: int) -> Optional[Path]:
-    """Copy a failed attempt's MinerU transcript out before the attempt is removed.
-
-    The transcript is written inside the attempt directory, which the failure
-    path deletes, so until now the only run that kept a log was the one that
-    succeeded -- the one nobody needs to read.
-    """
-    source = attempt_dir / "layout" / "mineru.log"
-    target = renders_root / f"layout-error-{generation}.log"
-    try:
-        if not source.is_file() or source.stat().st_size == 0:
-            return None
-        renders_root.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-    except OSError as error:
-        print(f"[reflow] 无法保留 generation {generation} 的 MinerU 日志：{error}", flush=True)
-        return None
-    return target
 
 
 def _run_reflow_job(job_id: str, source_name: str, generation: int) -> None:
@@ -2433,27 +1522,51 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return
         print("[http] " + message, flush=True)
 
+    def _send_body_headers(self, content_type: str, length: int, status: int, disposition: Optional[str], immutable: bool) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(length))
+        if getattr(self, "command", "GET") not in {"GET", "HEAD"}:
+            self.send_header("Connection", "close")
+            self.close_connection = True
+        # Render generations are content-addressed (sha256 asset names and
+        # a monotonically increasing generation), so they can be cached
+        # forever; everything else stays uncacheable to avoid stale data.
+        self.send_header("Cache-Control", "immutable, max-age=31536000" if immutable else "no-store")
+        if disposition:
+            self.send_header("Content-Disposition", disposition)
+        self.end_headers()
+
     def _send_bytes(self, body: bytes, content_type: str, status: int = HTTPStatus.OK, *, disposition: Optional[str] = None, immutable: bool = False) -> bool:
         try:
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            if getattr(self, "command", "GET") not in {"GET", "HEAD"}:
-                self.send_header("Connection", "close")
-                self.close_connection = True
-            # Render generations are content-addressed (sha256 asset names and
-            # a monotonically increasing generation), so they can be cached
-            # forever; everything else stays uncacheable to avoid stale data.
-            self.send_header("Cache-Control", "immutable, max-age=31536000" if immutable else "no-store")
-            if disposition:
-                self.send_header("Content-Disposition", disposition)
-            self.end_headers()
+            self._send_body_headers(content_type, len(body), status, disposition, immutable)
             self.wfile.write(body)
             return True
         except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             # A renderer can close a request while an image/translation is in
             # flight (for example when switching document tabs). This is a
             # normal client lifecycle event, not a server failure.
+            return False
+
+    def _send_file_stream(self, handle: Any, content_type: str, *, disposition: Optional[str] = None, immutable: bool = False) -> bool:
+        """Stream an open file in fixed chunks so a large PDF never sits in memory
+        whole; concurrent reader requests previously each held a full copy."""
+        try:
+            remaining = os.fstat(handle.fileno()).st_size
+            self._send_body_headers(content_type, remaining, HTTPStatus.OK, disposition, immutable)
+            # Send exactly the advertised length: a log that grows while it is
+            # served must not overrun Content-Length on a keep-alive socket.
+            while remaining > 0:
+                chunk = handle.read(min(FILE_STREAM_CHUNK_BYTES, remaining))
+                if not chunk:
+                    # The file shrank underneath us; the response is short, so
+                    # the connection cannot be reused for another request.
+                    self.close_connection = True
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+            return True
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
             return False
 
     def _send_json(self, payload: Any, status: int = HTTPStatus.OK) -> bool:
@@ -2504,7 +1617,13 @@ class ScholarHandler(BaseHTTPRequestHandler):
         elif path.suffix.lower() == ".js":
             content_type = "text/javascript; charset=utf-8"
         disposition = f'attachment; filename="{path.name}"' if download else None
-        self._send_bytes(path.read_bytes(), content_type, disposition=disposition, immutable=immutable)
+        try:
+            handle = path.open("rb")
+        except FileNotFoundError:
+            self._send_error_json("资源不存在。", HTTPStatus.NOT_FOUND)
+            return
+        with handle:
+            self._send_file_stream(handle, content_type, disposition=disposition, immutable=immutable)
 
     def _serve_web_asset(self, relative: str) -> None:
         try:
@@ -4212,47 +3331,45 @@ class ScholarHandler(BaseHTTPRequestHandler):
         if "multipart/form-data" not in content_type:
             self._send_error_json("请使用 multipart/form-data 上传字段 file。")
             return
-        try:
-            form = _parse_multipart_form(self.rfile, content_type, content_length)
-            item = next((entry for entry in form.get("file", []) if entry.filename), None)
-            if item is None:
-                raise PipelineError("没有找到名为 file 的 PDF 文件字段。")
-            filename = os.path.basename(str(item.filename))
-            if not filename.lower().endswith(".pdf"):
-                raise PipelineError("当前版本只接受 .pdf 文件。")
-            folder_values = form.get("folder_id", [])
-            folder_id = folder_values[0].data.decode("utf-8", "replace").strip() if folder_values else ""
-        except (ValueError, KeyError, TypeError, PipelineError) as exc:
-            self._send_error_json(str(exc))
-            return
-
-        if folder_id:
-            try:
-                LIBRARY.validate_user_folder(folder_id)
-            except LibraryValidationError as exc:
-                self._send_error_json(str(exc))
-                return
-
         incoming_dir: Optional[Path] = None
         try:
+            # The request is spooled to disk and the PDF copied out of it in
+            # bounded reads, so an upload never sits in process memory: the
+            # peak is one 1 MB chunk instead of the whole body.
             incoming_dir = STORE.new_incoming_directory()
-            staged_path = incoming_dir / "upload.pdf.part"
-            digest = hashlib.sha256()
-            size = 0
-            with staged_path.open("wb") as handle:
-                while True:
-                    chunk = item.file.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    size += len(chunk)
-                    if size > MAX_UPLOAD_BYTES:
-                        raise PipelineError(f"文件过大，当前上限为 {MAX_UPLOAD_BYTES // (1024 * 1024)} MB。")
-                    digest.update(chunk)
-                    handle.write(chunk)
-                if size <= 0:
-                    raise PipelineError("上传的 PDF 文件为空。")
-                handle.flush()
-                os.fsync(handle.fileno())
+            body_path = incoming_dir / "request.body"
+            if _spool_request_body(self.rfile, content_length, body_path) < content_length:
+                # The client went away mid-upload; never import a cut-off PDF.
+                self.close_connection = True
+                raise PipelineError("上传未完成：连接在传输途中断开。")
+            with _spooled_body(body_path) as body:
+                form = _multipart_parts(body, content_type)
+                item = next((part for part in form.get("file", []) if part.filename), None)
+                if item is None:
+                    raise PipelineError("没有找到名为 file 的 PDF 文件字段。")
+                filename = os.path.basename(str(item.filename))
+                if not filename.lower().endswith(".pdf"):
+                    raise PipelineError("当前版本只接受 .pdf 文件。")
+                folder_values = form.get("folder_id", [])
+                folder_id = folder_values[0].read(body).decode("utf-8", "replace").strip() if folder_values else ""
+                if folder_id:
+                    LIBRARY.validate_user_folder(folder_id)
+                staged_path = incoming_dir / "upload.pdf.part"
+                digest = hashlib.sha256()
+                size = 0
+                with staged_path.open("wb") as handle:
+                    for chunk in item.iter_chunks(body):
+                        size += len(chunk)
+                        if size > MAX_UPLOAD_BYTES:
+                            raise PipelineError(f"文件过大，当前上限为 {MAX_UPLOAD_BYTES // (1024 * 1024)} MB。")
+                        digest.update(chunk)
+                        handle.write(chunk)
+                    if size <= 0:
+                        raise PipelineError("上传的 PDF 文件为空。")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            # Closed above; Windows cannot delete a file that is still open.
+            body_path.unlink()
             record, deduplicated = STORE.commit_staged_upload(
                 incoming_dir,
                 filename,
@@ -4261,7 +3378,9 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 folder_id,
             )
             incoming_dir = None
-        except (OSError, PipelineError, ValueError) as exc:
+        # KeyError/TypeError/ValueError (incl. LibraryValidationError) cover
+        # form and folder validation, which used to run before staging.
+        except (KeyError, OSError, PipelineError, TypeError, ValueError) as exc:
             if incoming_dir is not None:
                 shutil.rmtree(incoming_dir, ignore_errors=True)
             self._send_error_json(str(exc))

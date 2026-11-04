@@ -23,7 +23,6 @@ import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
@@ -33,6 +32,7 @@ from mineru_discovery import discover_mineru
 from toolchain_paths import tool_path_candidates
 from pymupdf_runtime import load_fitz
 from subprocess_runtime import hidden_subprocess_options, stop_windows_process_tree
+from time_utils import utc_now
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -372,10 +372,6 @@ class LayoutPipelineCancelled(LayoutPipelineError):
 def _raise_if_cancelled(cancel_event: Any) -> None:
     if cancel_event is not None and cancel_event.is_set():
         raise LayoutPipelineCancelled("AI 重排已取消。")
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _read_text(path: Path) -> str:

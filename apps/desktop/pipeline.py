@@ -16,7 +16,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -24,6 +23,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from document_ir import odl_to_ir, pdf_page_sizes, render_pages, serializable_ir
 from mineru_discovery import discover_mineru
 from subprocess_runtime import hidden_subprocess_options
+from time_utils import utc_now
 from toolchain_paths import tool_path_candidates
 
 
@@ -58,10 +58,6 @@ CONVERSION_OUTPUT_NAMES = {
 # Shared paths, subprocess helpers and normalized output utilities.
 class PipelineError(RuntimeError):
     """An expected, user-facing conversion failure."""
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def safe_stem(filename: str) -> str:

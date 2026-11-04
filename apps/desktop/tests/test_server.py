@@ -25,6 +25,8 @@ sys.path.insert(0, str(ROOT))
 from pipeline import PipelineError  # noqa: E402
 from library_store import LibraryStore  # noqa: E402
 import server as server_module  # noqa: E402
+import account_client  # noqa: E402
+import data_root_lock  # noqa: E402
 from ai import TranslationQualityError  # noqa: E402
 from server import AI_STATUS_HISTORY_LIMIT, DataRootLock, MAX_CHAT_IMAGE_BYTES, MAX_NOTE_ASSET_BYTES, JobStore, ScholarHandler, _ai_status_history, _chat_image_context, _copy_ai_profile, _deduplicate_figure_ids, _migrate_job_artifacts, _note_image_type, _public_job, _public_settings, _record_ai_status, _runtime_lock_roots, _store_note_asset, _sync_ai_annotations, _translation_key, _translation_records, _write_content_manifest, _write_settings, _write_translation_records  # noqa: E402
 
@@ -1105,6 +1107,95 @@ class ReaderPerformanceTest(unittest.TestCase):
             (job_dir / "translations.json").write_text(json.dumps([record]), encoding="utf-8")
             self.assertTrue(server_module._translation_records_need_persist(job_dir))
 
+    def test_served_files_stream_in_chunks_with_exact_length(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-stream-") as temp:
+            source = Path(temp) / "source.pdf"
+            payload = b"%PDF-1.4\n" + os.urandom(server_module.FILE_STREAM_CHUNK_BYTES * 2 + 17)
+            source.write_bytes(payload)
+            handler = self._bytes_handler()
+            with patch.object(Path, "read_bytes", side_effect=AssertionError("served files must not be read whole")):
+                handler._serve_file(source, download=True)
+            headers = dict(handler.headers_sent)
+            self.assertEqual(handler.wfile.getvalue(), payload)
+            self.assertEqual(headers["Content-Length"], str(len(payload)))
+            self.assertEqual(headers["Content-Type"], "application/pdf")
+            self.assertEqual(headers["Content-Disposition"], 'attachment; filename="source.pdf"')
+            self.assertEqual(headers["Cache-Control"], "no-store")
+
+    def test_streamed_file_never_overruns_its_advertised_length(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="my-scholar-stream-grow-") as temp:
+            log = Path(temp) / "converter.log"
+            log.write_bytes(b"first line\n")
+            handler = self._bytes_handler()
+            with log.open("rb") as handle:
+                with log.open("ab") as writer:
+                    writer.write(b"appended while serving\n")
+                    writer.flush()
+                    # fstat sees the grown size; append once more after headers.
+                    original_headers = handler._send_body_headers
+
+                    def grow_after_headers(*args: Any) -> None:
+                        original_headers(*args)
+                        writer.write(b"late append\n")
+                        writer.flush()
+
+                    handler._send_body_headers = grow_after_headers
+                    handler._send_file_stream(handle, "text/plain; charset=utf-8")
+            advertised = int(dict(handler.headers_sent)["Content-Length"])
+            self.assertEqual(len(handler.wfile.getvalue()), advertised)
+            self.assertEqual(handler.wfile.getvalue(), b"first line\nappended while serving\n")
+
+
+class MultipartFormTest(unittest.TestCase):
+    BOUNDARY = "----WebKitFormBoundaryGuziTest"
+
+    def _parse(self, body: bytes, content_type: Optional[str] = None) -> dict:
+        content_type = content_type or f"multipart/form-data; boundary={self.BOUNDARY}"
+        form = server_module._parse_multipart_form(io.BytesIO(body), content_type, len(body))
+        return {name: [(item.filename, item.data, item.file.read()) for item in items] for name, items in form.items()}
+
+    def _body(self, *parts: bytes, close: bool = True) -> bytes:
+        delimiter = b"--" + self.BOUNDARY.encode()
+        out = b"".join(delimiter + b"\r\n" + part + b"\r\n" for part in parts)
+        return out + (delimiter + b"--\r\n" if close else b"")
+
+    def test_binary_pdf_and_utf8_filename_round_trip(self) -> None:
+        pdf = b"%PDF-1.7\r\n" + bytes(range(256)) * 64 + b"\r\n--" + self.BOUNDARY.encode() + b"X\r\n"
+        body = self._body(
+            b'Content-Disposition: form-data; name="folder_id"\r\n\r\nfolder-1',
+            'Content-Disposition: form-data; name="file"; filename="注意力 论文.pdf"\r\nContent-Type: application/pdf\r\n\r\n'.encode("utf-8") + pdf,
+        )
+        form = self._parse(body)
+        self.assertEqual(form["folder_id"], [("", b"folder-1", b"folder-1")])
+        self.assertEqual(form["file"], [("注意力 论文.pdf", pdf, pdf)])
+
+    def test_cjk_filename_with_0x85_continuation_byte_is_not_split(self) -> None:
+        # 全 encodes as E5 85 A8; latin-1 decodes 0x85 to U+0085 (NEL), which
+        # str.splitlines() would treat as a header line break.
+        filename = "全文 Transformer….pdf"
+        self.assertIn(b"\x85", filename.encode("utf-8"))
+        body = self._body(f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n\r\n%PDF'.encode("utf-8"))
+        self.assertEqual(self._parse(body)["file"], [(filename, b"%PDF", b"%PDF")])
+
+    def test_quoted_boundary_lf_lines_and_nameless_parts(self) -> None:
+        body = (
+            f"--{self.BOUNDARY}\nContent-Disposition: form-data\n\nskip\n"
+            f'--{self.BOUNDARY}\ncontent-disposition: form-data; name="file"; filename="a.pdf"\n\n%PDF\n'
+            f"--{self.BOUNDARY}--\n"
+        ).encode()
+        form = self._parse(body, f'multipart/form-data; boundary="{self.BOUNDARY}"')
+        self.assertEqual(form, {"file": [("a.pdf", b"%PDF", b"%PDF")]})
+
+    def test_truncated_body_keeps_parsed_parts(self) -> None:
+        body = self._body(b'Content-Disposition: form-data; name="file"; filename="a.pdf"\r\n\r\n%PDF partial', close=False)
+        self.assertEqual(self._parse(body)["file"][0][1], b"%PDF partial")
+
+    def test_missing_boundary_is_rejected(self) -> None:
+        body = self._body(b'Content-Disposition: form-data; name="file"; filename="a.pdf"\r\n\r\n%PDF')
+        for content_type in ("multipart/form-data", f"multipart/form-data; boundary=other-{self.BOUNDARY}"):
+            with self.assertRaisesRegex(PipelineError, "multipart/form-data"):
+                self._parse(body, content_type)
+
 
 class TranslateStreamTest(unittest.TestCase):
     @staticmethod
@@ -1667,7 +1758,7 @@ class AccountProxyTest(unittest.TestCase):
     def test_remote_http_account_request_is_rejected_before_network_io(self) -> None:
         with (
             patch.object(server_module.runtime, "ACCOUNT_SERVICE_URL", "http://accounts.example.test"),
-            patch.object(server_module.urllib.request, "build_opener") as build_opener,
+            patch.object(account_client.urllib.request, "build_opener") as build_opener,
             self.assertRaisesRegex(server_module.AccountServiceUnavailable, "必须使用 HTTPS"),
         ):
             server_module._account_request("/api/auth/login", method="POST", payload={"password": "secret"})
@@ -3050,7 +3141,7 @@ class DataRootLockPlatformTest(unittest.TestCase):
             fake_fcntl = MagicMock()
             fake_fcntl.LOCK_EX, fake_fcntl.LOCK_NB, fake_fcntl.LOCK_UN = 2, 4, 8
             fake_fcntl.flock.side_effect = lambda fd, flags: calls.append(flags)
-            with patch.object(server_module, "fcntl", fake_fcntl), patch.object(server_module, "msvcrt", None):
+            with patch.object(data_root_lock, "fcntl", fake_fcntl), patch.object(data_root_lock, "msvcrt", None):
                 lock.acquire()
                 self.assertEqual(calls, [6])
                 self.assertEqual((Path(temp) / ".my-scholar.lock").read_text(encoding="utf-8"), str(os.getpid()))
@@ -3069,7 +3160,7 @@ class DataRootLockPlatformTest(unittest.TestCase):
                 handles.append(mode)
 
             fake_msvcrt.locking.side_effect = record
-            with patch.object(server_module, "fcntl", None), patch.object(server_module, "msvcrt", fake_msvcrt):
+            with patch.object(data_root_lock, "fcntl", None), patch.object(data_root_lock, "msvcrt", fake_msvcrt):
                 lock.acquire()
                 offsets.append(fake_msvcrt.locking.call_args.args[2])
                 lock.release()
@@ -3080,7 +3171,7 @@ class DataRootLockPlatformTest(unittest.TestCase):
     def test_unsupported_platform_raises(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-lock-none-") as temp:
             lock = DataRootLock(Path(temp))
-            with patch.object(server_module, "fcntl", None), patch.object(server_module, "msvcrt", None):
+            with patch.object(data_root_lock, "fcntl", None), patch.object(data_root_lock, "msvcrt", None):
                 with self.assertRaises(RuntimeError):
                     lock.acquire()
 
@@ -3091,7 +3182,7 @@ class DataRootLockPlatformTest(unittest.TestCase):
             fake_msvcrt = MagicMock()
             fake_msvcrt.LK_NBLCK, fake_msvcrt.LK_UNLCK = 1, 0
             fake_msvcrt.locking.side_effect = OSError(errno.EDEADLK, "locked")
-            with patch.object(server_module, "fcntl", None), patch.object(server_module, "msvcrt", fake_msvcrt):
+            with patch.object(data_root_lock, "fcntl", None), patch.object(data_root_lock, "msvcrt", fake_msvcrt):
                 with self.assertRaises(RuntimeError) as caught:
                     lock.acquire()
             self.assertIn("4321", str(caught.exception))

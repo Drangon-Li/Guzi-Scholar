@@ -15,7 +15,7 @@ import socket
 import threading
 import time
 import unicodedata
-from datetime import datetime, timezone
+from datetime import datetime
 from difflib import SequenceMatcher
 from http.client import HTTPException, HTTPSConnection
 from pathlib import Path
@@ -24,6 +24,7 @@ from urllib.parse import quote, urlencode, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from xml.etree import ElementTree
 from pymupdf_runtime import load_fitz
+from time_utils import utc_now
 
 
 BIBLIOGRAPHIC_FIELDS = (
@@ -69,10 +70,6 @@ PROVIDER_SEMAPHORES: Dict[str, threading.BoundedSemaphore] = {}
 
 
 # Local PDF/document extraction and field normalization.
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
 def empty_bibliographic_metadata() -> Dict[str, Any]:
     return {
         "fields": {field: ([] if field in LIST_FIELDS else None if field in INTEGER_FIELDS else "") for field in BIBLIOGRAPHIC_FIELDS},

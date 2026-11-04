@@ -261,6 +261,17 @@ const note = { id: 'process-source-note', block_id: 'process-0', surface: 'paper
         return null;
       };
       const overlaps = (a, b) => Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1;
+      // Geometry is inspected in the state that is actually painted. Animation
+      // frame callbacks run in registration order, so a sampler queued in the
+      // previous frame runs before the reader's own relayout, which an image
+      // load between frames queues for this frame; measuring there reported a
+      // half-updated layout that was corrected before paint. ResizeObserver
+      // callbacks run after every animation frame callback and layout, right
+      // before paint, so a probe resized once per frame inspects that state.
+      const paintProbe = doc.createElement('div');
+      paintProbe.setAttribute('aria-hidden', 'true');
+      paintProbe.style.cssText = 'position:fixed;left:-10px;top:0;width:1px;height:1px;visibility:hidden;pointer-events:none;contain:strict';
+      doc.documentElement.append(paintProbe);
       let previous;
       function sample(now) {
         if (metrics.stopped) return;
@@ -269,6 +280,11 @@ const note = { id: 'process-source-note', block_id: 'process-0', surface: 'paper
           (metrics.phaseDeltas[metrics.phase] ||= []).push(now - previous);
         }
         previous = now; metrics.frames += 1;
+        paintProbe.style.width = `${1 + metrics.frames % 2}px`;
+        view.requestAnimationFrame(sample);
+      }
+      function inspect() {
+        if (metrics.stopped) return;
         const blocks = [...content.querySelectorAll('.reader-sentence-pairs')];
         const newlyTranslated = blocks.filter((block) => !metrics.checkedBlocks.has(block.dataset.blockId));
         const visible = blocks.filter((block) => { const rect = block.getBoundingClientRect(); return rect.bottom > 0 && rect.top < view.innerHeight; });
@@ -315,8 +331,8 @@ const note = { id: 'process-source-note', block_id: 'process-0', surface: 'paper
           metrics.observer = new view.MutationObserver((changes) => { metrics.settledMutations += changes.filter((change) => change.type !== 'attributes' || !['class', 'data-annotation-drawing'].includes(change.attributeName)).length; });
           metrics.observer.observe(block, { childList: true, subtree: true, characterData: true });
         }
-        view.requestAnimationFrame(sample);
       }
+      new view.ResizeObserver(inspect).observe(paintProbe);
       view.requestAnimationFrame(sample);
     });
     if (tracePath) {
