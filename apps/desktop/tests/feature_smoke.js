@@ -609,7 +609,11 @@ let page;
   const currentSessionSwitcher = page.locator('#open-chat-history');
   if (await currentSessionSwitcher.getAttribute('data-chat-session-id') !== secondSessionId || await currentSessionSwitcher.getAttribute('aria-haspopup') !== 'menu') throw new Error('Current Chat session switcher did not expose its management target');
   await page.locator('#chat-current-session-title').click({ button: 'right' });
-  const currentSessionMenuGeometry = await page.locator('#chat-session-menu:not([hidden])').evaluate((menu) => {
+  // Measure each menu once its pop-in animation has settled: the spring easing
+  // briefly overshoots the final position, so a mid-animation rect can cross
+  // the viewport margin even though the placed menu never does.
+  const currentSessionMenuGeometry = await page.locator('#chat-session-menu:not([hidden])').evaluate(async (menu) => {
+    await Promise.all(menu.getAnimations().map((animation) => animation.finished.catch(() => {})));
     const rect = menu.getBoundingClientRect();
     const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + Math.min(rect.height / 2, 24));
     return { parentId: menu.parentElement?.id || '', position: getComputedStyle(menu).position, top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left, hit: Boolean(target && menu.contains(target)) };
@@ -628,7 +632,8 @@ let page;
     const rect = button.getBoundingClientRect();
     button.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: Math.round(rect.left + Math.min(rect.width / 2, 40)), clientY: window.innerHeight - 2 }));
   });
-  const flippedSessionMenu = await page.locator('#chat-session-menu:not([hidden])').evaluate((menu) => {
+  const flippedSessionMenu = await page.locator('#chat-session-menu:not([hidden])').evaluate(async (menu) => {
+    await Promise.all(menu.getAnimations().map((animation) => animation.finished.catch(() => {})));
     const rect = menu.getBoundingClientRect();
     const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + Math.min(rect.height / 2, 24));
     return { placement: menu.dataset.placement || '', top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left, hit: Boolean(target && menu.contains(target)) };

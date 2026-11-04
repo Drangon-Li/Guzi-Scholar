@@ -1399,13 +1399,17 @@
     menu.style.removeProperty('left');
     menu.style.width = Number.isFinite(width) ? `${Math.max(1, Math.min(window.innerWidth - padding * 2, width))}px` : '';
     menu.style.maxHeight = `${Math.max(44, Math.min(maximumHeight, window.innerHeight - padding * 2))}px`;
-    let menuRect = menu.getBoundingClientRect();
+    // Layout size, not getBoundingClientRect(): a menu's pop-in animation is
+    // already scaled down when it opens, and placing the shrunken box let a
+    // flipped menu settle inside the viewport padding once the animation ended.
+    const menuSize = () => ({ width: menu.offsetWidth, height: menu.offsetHeight });
+    let menuRect = menuSize();
     const spaceAbove = Math.max(0, anchorTop - padding);
     const spaceBelow = Math.max(0, window.innerHeight - anchorBottom - padding);
     const placeAbove = spaceBelow < menuRect.height + gap && spaceAbove > spaceBelow;
     const availableHeight = Math.max(44, (placeAbove ? spaceAbove : spaceBelow) - gap);
     menu.style.maxHeight = `${Math.min(maximumHeight, availableHeight)}px`;
-    menuRect = menu.getBoundingClientRect();
+    menuRect = menuSize();
     const rawLeft = Number.isFinite(preferredLeft) ? preferredLeft : pointerAnchored ? pointerX : anchorRect.left;
     const rawTop = placeAbove ? anchorTop - menuRect.height - gap : anchorBottom + gap;
     const left = Math.max(padding, Math.min(window.innerWidth - menuRect.width - padding, rawLeft));
@@ -2889,8 +2893,9 @@
   function positionRowMenu(row, menu) {
     if (!row || !menu || !row.classList.contains('menu-open')) return;
     const rowRect = row.getBoundingClientRect();
-    const menuHeight = menu.getBoundingClientRect().height;
-    const menuWidth = menu.getBoundingClientRect().width;
+    // Layout size: the menu's pop-in animation scales it while it opens.
+    const menuHeight = menu.offsetHeight;
+    const menuWidth = menu.offsetWidth;
     const gap = 4;
     const padding = 8;
     const anchorX = Number(menu.dataset.anchorX); const anchorY = Number(menu.dataset.anchorY);

@@ -146,7 +146,7 @@ ${Object.entries(texts).map(([id, text]) => `<p data-block-id="${id}" data-page=
     await popup().filter({ hasText: '第一条：研究方法笔记' }).waitFor();
     assert(await popup().locator('[data-action="edit"]').isVisible(), 'A note preview exposes annotation actions');
     assert.equal(await tooltip().count(), 0, 'A note preview must not open the selection toolbar');
-    assert.equal(sentences().length, 0, 'Hovering an annotation must not translate its sentence');
+    assert.equal(sentences().length, 0, `Hovering an annotation must not translate its sentence: ${JSON.stringify(sentences().map((body) => body.text))}`);
     assert.equal(await frame.locator('body').evaluate((node) => node.ownerDocument.getSelection().toString()), '', 'Note previews do not require native text selection');
     await hover(mark('second-note'));
     await popup().filter({ hasText: '第二条：独立结果笔记' }).waitFor();
