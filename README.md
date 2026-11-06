@@ -181,6 +181,8 @@ macOS Release workflow 会自动准备 Temurin JDK 21、Python 3.11、`certifi`�
 
 默认 Release 只构建 macOS 产物，并要求对应版本的签名、资产完整性检查及真实 macOS 升级验收通过后才能发布。Windows CI 只接受手动触发；纳入大版本计划的 Windows 候选版本，仍须完成 Windows 构建和升级验收后才能发布。
 
+产品页 s.guzilab.com 不在这个仓库里，由维护者另行管理。发布新版本后，维护者会把安装包同步到国内下载镜像 `download.guzilab.com`，并更新产品页上的下载链接；这一步不需要改动本仓库。
+
 ## 项目结构
 
 ```text
