@@ -15,8 +15,6 @@ data/
 config.local.json
 remote-parser.config.json
 developer.tokens.json
-deploy/tencent/account.env
-deploy/tencent/ai.tokens.json
 *.pem
 *.key
 *.p12

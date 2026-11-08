@@ -15,4 +15,4 @@ npm run dev      # 启动桌面应用
 npm run check    # 语法检查 + 自动发现的 Python 单元测试
 ```
 
-桌面应用需要 Python 3.9+。自行运行 `user_service.py` 或执行完整测试时，解释器还必须提供 `hashlib.scrypt`；运行测试时请确保 PATH 中的 `python3` 指向兼容解释器。
+桌面应用需要 Python 3.9+。执行完整测试时，解释器还必须提供 `hashlib.scrypt`；运行测试时请确保 PATH 中的 `python3` 指向兼容解释器。
