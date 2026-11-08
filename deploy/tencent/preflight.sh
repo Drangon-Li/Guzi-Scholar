@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly REMOTE=tencent
-readonly EXPECTED_HOST=82.156.152.27
+readonly REMOTE=tencent-2
+readonly EXPECTED_HOST=82.157.59.128
 readonly EXPECTED_CADDY_VERSION=v2.11.4
-readonly LEGACY_SOURCE_DB=/home/ubuntu/my-scholar-account/users.db
-readonly CANONICAL_SOURCE_DB=/var/lib/guzi-scholar/account/users.db
+readonly PUBLIC_HOST=guzilab.com
+readonly CANONICAL_SOURCE_DB=/home/guzi/data/guzi-scholar/account/users.db
 SOURCE_DB=
 SOURCE_DB_EXPLICIT=0
 ALLOW_VALID_CERT_WITHOUT_ACME=0
@@ -29,11 +29,7 @@ if [[ "$CONFIGURED_HOST" != "$EXPECTED_HOST" ]]; then
   exit 78
 fi
 if [[ $SOURCE_DB_EXPLICIT -ne 1 ]]; then
-  if ssh "$REMOTE" sudo -n test -f "$CANONICAL_SOURCE_DB"; then
-    SOURCE_DB=$CANONICAL_SOURCE_DB
-  else
-    SOURCE_DB=$LEGACY_SOURCE_DB
-  fi
+  SOURCE_DB=$CANONICAL_SOURCE_DB
 fi
 if [[ ! "$SOURCE_DB" =~ ^/[A-Za-z0-9_./-]+$ ]]; then
   echo "[preflight] source database path contains unsupported characters" >&2
@@ -41,11 +37,11 @@ if [[ ! "$SOURCE_DB" =~ ^/[A-Za-z0-9_./-]+$ ]]; then
 fi
 
 echo "[preflight] target=$REMOTE host=$CONFIGURED_HOST source_db=$SOURCE_DB"
-ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" bash -s -- "$SOURCE_DB" "$EXPECTED_CADDY_VERSION" "$EXPECTED_HOST" "$ALLOW_VALID_CERT_WITHOUT_ACME" <<'REMOTE'
+ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" bash -s -- "$SOURCE_DB" "$EXPECTED_CADDY_VERSION" "$PUBLIC_HOST" "$ALLOW_VALID_CERT_WITHOUT_ACME" <<'REMOTE'
 set -Eeuo pipefail
 SOURCE_DB=$1
 EXPECTED_CADDY_VERSION=$2
-EXPECTED_HOST=$3
+PUBLIC_HOST=$3
 ALLOW_VALID_CERT_WITHOUT_ACME=$4
 
 if ! sudo -n true; then
@@ -79,14 +75,19 @@ if [[ "$CADDY_VERSION" != "$EXPECTED_CADDY_VERSION" ]]; then
   exit 69
 fi
 getent passwd caddy >/dev/null || {
-  echo "[preflight] the packaged Caddy service user is missing" >&2
+  echo "[preflight] the Caddy service user is missing" >&2
   exit 69
 }
-if sudo -n test -L /etc/guzi-scholar/ai.tokens.json || ! sudo -n test -f /etc/guzi-scholar/ai.tokens.json; then
-  echo "[preflight] provision the real /etc/guzi-scholar/ai.tokens.json out of band before deployment" >&2
+# Caddy serves every site on this server; deployment only checks that its configuration still loads.
+sudo -n caddy validate --config /home/tools/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || {
+  echo "[preflight] the server-wide Caddy configuration does not validate" >&2
+  exit 69
+}
+if sudo -n test -L /home/guzi/config/guzi-scholar/ai.tokens.json || ! sudo -n test -f /home/guzi/config/guzi-scholar/ai.tokens.json; then
+  echo "[preflight] provision the real /home/guzi/config/guzi-scholar/ai.tokens.json out of band before deployment" >&2
   exit 66
 fi
-TOKENS_META=$(sudo -n stat -c '%a:%U:%G' /etc/guzi-scholar/ai.tokens.json)
+TOKENS_META=$(sudo -n stat -c '%a:%U:%G' /home/guzi/config/guzi-scholar/ai.tokens.json)
 case "$TOKENS_META" in
   600:root:root|640:root:guzi-account) ;;
   *)
@@ -94,7 +95,7 @@ case "$TOKENS_META" in
     exit 78
     ;;
 esac
-sudo -n python3 - /etc/guzi-scholar/ai.tokens.json <<'PY'
+sudo -n python3 - /home/guzi/config/guzi-scholar/ai.tokens.json <<'PY'
 import json
 import pathlib
 import sys
@@ -139,17 +140,6 @@ if quick_check != "ok" or not {"users", "sessions"}.issubset(tables) or users < 
 print(f"[preflight] database ok users={users} path={sys.argv[1]}")
 PY
 
-for PATH_REQUIRED in \
-  /home/ubuntu/my-scholar-web/app/server.py \
-  /home/ubuntu/my-scholar-web/app/landing.html \
-  /home/ubuntu/my-scholar-web/data; do
-  [[ -e "$PATH_REQUIRED" ]] || {
-    echo "[preflight] showcase path is missing: $PATH_REQUIRED" >&2
-    exit 66
-  }
-done
-systemctl cat my-scholar-account.service >/dev/null
-systemctl cat my-scholar-web.service >/dev/null
 if ! curl --fail --silent --show-error --max-time 10 https://acme-v02.api.letsencrypt.org/directory >/dev/null; then
   if [[ "$ALLOW_VALID_CERT_WITHOUT_ACME" -ne 1 ]]; then
     echo "[preflight] ACME directory is unreachable; refusing deployment without the explicit valid-certificate fallback" >&2
@@ -160,27 +150,28 @@ if ! curl --fail --silent --show-error --max-time 10 https://acme-v02.api.letsen
     [[ ! -e "$CERT_FILE" ]] || unlink -- "$CERT_FILE"
   }
   trap cleanup_cert EXIT
-  if ! openssl s_client -connect 127.0.0.1:443 -servername "$EXPECTED_HOST" </dev/null 2>/dev/null \
+  if ! openssl s_client -connect 127.0.0.1:443 -servername "$PUBLIC_HOST" </dev/null 2>/dev/null \
     | openssl x509 -outform PEM >"$CERT_FILE"; then
     echo "[preflight] unable to read the currently served certificate" >&2
     exit 69
   fi
-  if ! openssl x509 -in "$CERT_FILE" -checkend 432000 -noout >/dev/null; then
-    echo "[preflight] ACME is unreachable and the current certificate has less than five days remaining" >&2
+  # guzilab.com uses the short-lived ACME profile, so a healthy certificate often has only a few days left.
+  if ! openssl x509 -in "$CERT_FILE" -checkend 86400 -noout >/dev/null; then
+    echo "[preflight] ACME is unreachable and the current certificate expires within a day" >&2
     exit 69
   fi
-  if ! openssl x509 -in "$CERT_FILE" -text -noout | grep -F "IP Address:$EXPECTED_HOST" >/dev/null; then
-    echo "[preflight] current certificate does not cover the release IP" >&2
+  if ! openssl x509 -in "$CERT_FILE" -text -noout | grep -F "DNS:$PUBLIC_HOST" >/dev/null; then
+    echo "[preflight] current certificate does not cover $PUBLIC_HOST" >&2
     exit 69
   fi
-  echo "[preflight] warning: ACME is unreachable; proceeding with an explicit fallback because the correct IP certificate has at least five days remaining" >&2
+  echo "[preflight] warning: ACME is unreachable; proceeding with an explicit fallback because the $PUBLIC_HOST certificate is still valid for at least a day" >&2
   cleanup_cert
   trap - EXIT
 fi
 
 echo "[preflight] os=$PRETTY_NAME ram_kib=$MEMORY_KB root_available_kib=$AVAILABLE_KB caddy=$CADDY_VERSION"
 echo "[preflight] current listeners on managed ports:"
-sudo -n ss -H -ltnp '( sport = :80 or sport = :443 or sport = :8081 or sport = :8478 or sport = :8480 )' || true
+sudo -n ss -H -ltnp '( sport = :80 or sport = :443 or sport = :8478 or sport = :8480 )' || true
 REMOTE
 
 echo "[preflight] passed"

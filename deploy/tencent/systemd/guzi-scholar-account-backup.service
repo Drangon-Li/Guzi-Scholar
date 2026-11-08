@@ -1,7 +1,7 @@
 [Unit]
 Description=Create and verify a consistent Guzi Scholar account database backup
 After=local-fs.target
-ConditionPathExists=/var/lib/guzi-scholar/account/users.db
+ConditionPathExists=/home/guzi/data/guzi-scholar/account/users.db
 
 [Service]
 Type=oneshot
@@ -10,7 +10,7 @@ Group=guzi-account
 UMask=0077
 RuntimeDirectory=guzi-scholar-account-backup
 RuntimeDirectoryMode=0700
-ExecStart=/usr/local/sbin/guzi-scholar-account-backup
+ExecStart=/home/guzi/services/guzi-scholar/sbin/guzi-scholar-account-backup
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
@@ -18,8 +18,9 @@ PrivateTmp=true
 PrivateDevices=true
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/backups/guzi-scholar/account /var/lib/guzi-scholar/account
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/guzi/services/guzi-scholar/sbin
+BindPaths=/home/guzi/backups/guzi-scholar/account /home/guzi/data/guzi-scholar/account
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX
 LockPersonality=true

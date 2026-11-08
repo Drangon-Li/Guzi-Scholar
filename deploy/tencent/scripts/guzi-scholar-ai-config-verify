@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 
 if [[ $# -ne 1 ]]; then
-  echo "usage: guzi-scholar-ai-config-verify /etc/guzi-scholar/ai.tokens.json" >&2
+  echo "usage: guzi-scholar-ai-config-verify /home/guzi/config/guzi-scholar/ai.tokens.json" >&2
   exit 64
 fi
 
 TOKENS_PATH=$1
-if [[ "$TOKENS_PATH" != /etc/guzi-scholar/ai.tokens.json || ! -f "$TOKENS_PATH" || -L "$TOKENS_PATH" ]]; then
+if [[ "$TOKENS_PATH" != /home/guzi/config/guzi-scholar/ai.tokens.json || ! -f "$TOKENS_PATH" || -L "$TOKENS_PATH" ]]; then
   echo "[verify-ai] expected a regular non-symlink server token file at $TOKENS_PATH" >&2
   exit 66
 fi

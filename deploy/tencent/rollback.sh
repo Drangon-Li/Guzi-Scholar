@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly REMOTE=tencent
-readonly EXPECTED_HOST=82.156.152.27
+readonly REMOTE=tencent-2
+readonly EXPECTED_HOST=82.157.59.128
 SNAPSHOT_ID=
 ASSUME_YES=0
 
@@ -29,7 +29,7 @@ if [[ "$CONFIGURED_HOST" != "$EXPECTED_HOST" ]]; then
   echo "[rollback] ssh $REMOTE resolves to '$CONFIGURED_HOST', expected $EXPECTED_HOST" >&2
   exit 78
 fi
-ssh "$REMOTE" "sudo -n test -f '/var/backups/guzi-scholar/deployments/$SNAPSHOT_ID/complete'" || {
+ssh "$REMOTE" "sudo -n test -f '/home/guzi/backups/guzi-scholar/deployments/$SNAPSHOT_ID/complete'" || {
   echo "[rollback] snapshot does not exist or is incomplete: $SNAPSHOT_ID" >&2
   exit 66
 }
@@ -42,6 +42,6 @@ if [[ $ASSUME_YES -ne 1 ]]; then
   fi
 fi
 
-ssh "$REMOTE" sudo -n /usr/local/sbin/guzi-scholar-rollback "$SNAPSHOT_ID"
-ssh "$REMOTE" "systemctl --no-pager --full status my-scholar-account.service my-scholar-web.service caddy.service 2>/dev/null | head -n 50 || true"
+ssh "$REMOTE" sudo -n /home/guzi/services/guzi-scholar/sbin/guzi-scholar-rollback "$SNAPSHOT_ID"
+ssh "$REMOTE" "systemctl --no-pager --full status guzi-scholar-account.service guzi-scholar-ai.service 2>/dev/null | head -n 50 || true"
 echo "[rollback] completed snapshot=$SNAPSHOT_ID; verify the restored public endpoint before further changes"

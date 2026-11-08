@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly DB_PATH=${GUZI_SCHOLAR_BACKUP_DB_PATH:-/var/lib/guzi-scholar/account/users.db}
-readonly BACKUP_DIR=${GUZI_SCHOLAR_BACKUP_DIR:-/var/backups/guzi-scholar/account}
+readonly DB_PATH=${GUZI_SCHOLAR_BACKUP_DB_PATH:-/home/guzi/data/guzi-scholar/account/users.db}
+readonly BACKUP_DIR=${GUZI_SCHOLAR_BACKUP_DIR:-/home/guzi/backups/guzi-scholar/account}
 readonly LOCK_PATH=${GUZI_SCHOLAR_BACKUP_LOCK_PATH:-/run/guzi-scholar-account-backup/backup.lock}
-readonly DB_VERIFY=${GUZI_SCHOLAR_BACKUP_DB_VERIFY:-/usr/local/sbin/guzi-scholar-db-verify}
+readonly DB_VERIFY=${GUZI_SCHOLAR_BACKUP_DB_VERIFY:-/home/guzi/services/guzi-scholar/sbin/guzi-scholar-db-verify}
 readonly KEEP_DAYS=30
 readonly KEEP_MIN=14
 

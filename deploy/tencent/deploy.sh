@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly REMOTE=tencent
-readonly EXPECTED_HOST=82.156.152.27
-readonly LEGACY_SOURCE_DB=/home/ubuntu/my-scholar-account/users.db
-readonly CANONICAL_SOURCE_DB=/var/lib/guzi-scholar/account/users.db
+readonly REMOTE=tencent-2
+readonly EXPECTED_HOST=82.157.59.128
+readonly PUBLIC_HOST=guzilab.com
+readonly CANONICAL_SOURCE_DB=/home/guzi/data/guzi-scholar/account/users.db
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd -P)
 SOURCE_DB=
@@ -40,11 +40,7 @@ if [[ "$CONFIGURED_HOST" != "$EXPECTED_HOST" ]]; then
   exit 78
 fi
 if [[ $SOURCE_DB_EXPLICIT -ne 1 ]]; then
-  if ssh "$REMOTE" sudo -n test -f "$CANONICAL_SOURCE_DB"; then
-    SOURCE_DB=$CANONICAL_SOURCE_DB
-  else
-    SOURCE_DB=$LEGACY_SOURCE_DB
-  fi
+  SOURCE_DB=$CANONICAL_SOURCE_DB
 fi
 if [[ ! "$SOURCE_DB" =~ ^/[A-Za-z0-9_./-]+$ ]]; then
   echo "[deploy] invalid source database path" >&2
@@ -59,8 +55,12 @@ if ! python3 -I -B "$REPO_ROOT/apps/desktop/user_service.py" --help | grep -q 'c
   exit 78
 fi
 
+# The legacy macOS beta update channel is optional. Without a manifest here, the server keeps serving
+# the live release's updates/ unchanged.
 UPDATE_MANIFEST="$SCRIPT_DIR/updates/macos/arm64/beta.json"
-read -r UPDATE_DMG_NAME UPDATE_DMG_SHA UPDATE_VERSION < <(python3 - "$UPDATE_MANIFEST" <<'PY'
+UPDATE_DMG_NAME=
+if [[ -f "$UPDATE_MANIFEST" ]]; then
+read -r UPDATE_DMG_NAME UPDATE_DMG_SHA UPDATE_VERSION < <(python3 - "$UPDATE_MANIFEST" "$PUBLIC_HOST" <<'PY'
 import json
 import pathlib
 import re
@@ -72,7 +72,7 @@ url = urllib.parse.urlsplit(payload.get("download_url", ""))
 name = pathlib.PurePosixPath(url.path).name
 if (
     url.scheme != "https"
-    or url.netloc != "82.156.152.27"
+    or url.netloc != sys.argv[2]
     or pathlib.PurePosixPath(url.path).parent != pathlib.PurePosixPath("/updates/macos/arm64")
     or url.query
     or url.fragment
@@ -101,6 +101,9 @@ fi
 if [[ "$ACTUAL_UPDATE_DMG_SHA" != "$UPDATE_DMG_SHA" ]]; then
   echo "[deploy] update manifest SHA-256 does not match the built DMG" >&2
   exit 78
+fi
+else
+  echo "[deploy] no update manifest in deploy/tencent/updates; the live updates/ directory will be carried forward"
 fi
 
 PREFLIGHT_ARGS=(--source-db "$SOURCE_DB")
@@ -134,12 +137,16 @@ install -m 0644 "$REPO_ROOT/apps/desktop/user_service.py" "$STAGE/account/user_s
 install -m 0644 "$REPO_ROOT/apps/desktop/ai_gateway.py" "$STAGE/account/ai_gateway.py"
 install -m 0644 "$REPO_ROOT/apps/desktop/config.py" "$STAGE/account/config.py"
 cp -R "$SCRIPT_DIR/." "$STAGE/deployment/"
-install -m 0644 "$UPDATE_DMG_SOURCE" "$STAGE/deployment/updates/macos/arm64/$UPDATE_DMG_NAME"
+CHECKSUM_FILES=(account/user_service.py account/ai_gateway.py account/config.py)
+if [[ -n "$UPDATE_DMG_NAME" ]]; then
+  install -m 0644 "$UPDATE_DMG_SOURCE" "$STAGE/deployment/updates/macos/arm64/$UPDATE_DMG_NAME"
+  CHECKSUM_FILES+=("deployment/updates/macos/arm64/$UPDATE_DMG_NAME")
+fi
 git -C "$REPO_ROOT" rev-parse HEAD >"$STAGE/revision.txt" 2>/dev/null || printf 'unknown\n' >"$STAGE/revision.txt"
 if command -v sha256sum >/dev/null; then
-  (cd "$STAGE" && sha256sum account/user_service.py account/ai_gateway.py account/config.py "deployment/updates/macos/arm64/$UPDATE_DMG_NAME" >SHA256SUMS)
+  (cd "$STAGE" && sha256sum "${CHECKSUM_FILES[@]}" >SHA256SUMS)
 else
-  (cd "$STAGE" && shasum -a 256 account/user_service.py account/ai_gateway.py account/config.py "deployment/updates/macos/arm64/$UPDATE_DMG_NAME" >SHA256SUMS)
+  (cd "$STAGE" && shasum -a 256 "${CHECKSUM_FILES[@]}" >SHA256SUMS)
 fi
 tar -czf "$ARCHIVE" -C "$STAGE" .
 
@@ -164,7 +171,7 @@ if "$SCRIPT_DIR/verify.sh"; then
 else
   VERIFY_STATUS=$?
   echo "[deploy] verification failed; restoring snapshot $RELEASE_ID" >&2
-  if ! ssh "$REMOTE" sudo -n /usr/local/sbin/guzi-scholar-rollback "$RELEASE_ID"; then
+  if ! ssh "$REMOTE" sudo -n /home/guzi/services/guzi-scholar/sbin/guzi-scholar-rollback "$RELEASE_ID"; then
     echo "[deploy] automatic rollback failed; use deploy/tencent/rollback.sh $RELEASE_ID" >&2
     exit 70
   fi

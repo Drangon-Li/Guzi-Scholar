@@ -1,16 +1,20 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-readonly TARGET_DB=/var/lib/guzi-scholar/account/users.db
-readonly RELEASE_ROOT=/opt/guzi-scholar/releases
-readonly SNAPSHOT_ROOT=/var/backups/guzi-scholar/deployments
+readonly TARGET_DB=/home/guzi/data/guzi-scholar/account/users.db
+readonly RELEASE_ROOT=/home/guzi/services/guzi-scholar/releases
+readonly SNAPSHOT_ROOT=/home/guzi/backups/guzi-scholar/deployments
 readonly EXPECTED_CADDY_VERSION=v2.11.4
+# Caddy serves every site on this server; this installer only validates it and never edits it.
+readonly CADDY_MAIN=/home/tools/caddy/Caddyfile
+readonly SERVICE_ROOT=/home/guzi/services/guzi-scholar
+readonly SBIN_DIR=$SERVICE_ROOT/sbin
+readonly PUBLIC_HOST=guzilab.com
 
 RELEASE_ID=
 BUNDLE_ROOT=
-SOURCE_DB=/home/ubuntu/my-scholar-account/users.db
+SOURCE_DB=$TARGET_DB
 LEGACY_ACCOUNT_UNIT=my-scholar-account.service
-LEGACY_SHOWCASE_UNIT=my-scholar-web.service
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -18,7 +22,6 @@ while [[ $# -gt 0 ]]; do
     --bundle-root) BUNDLE_ROOT=${2:-}; shift 2 ;;
     --source-db) SOURCE_DB=${2:-}; shift 2 ;;
     --legacy-account-unit) LEGACY_ACCOUNT_UNIT=${2:-}; shift 2 ;;
-    --legacy-showcase-unit) LEGACY_SHOWCASE_UNIT=${2:-}; shift 2 ;;
     *) echo "[install] unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -31,7 +34,7 @@ if [[ ! "$RELEASE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
   echo "[install] invalid release id" >&2
   exit 64
 fi
-if [[ ! "$LEGACY_ACCOUNT_UNIT" =~ ^[A-Za-z0-9_.@-]+\.service$ || ! "$LEGACY_SHOWCASE_UNIT" =~ ^[A-Za-z0-9_.@-]+\.service$ ]]; then
+if [[ ! "$LEGACY_ACCOUNT_UNIT" =~ ^[A-Za-z0-9_.@-]+\.service$ ]]; then
   echo "[install] invalid legacy unit name" >&2
   exit 64
 fi
@@ -54,17 +57,15 @@ if [[ ! -f "$SOURCE_DB" || ! -f "$BUNDLE_ROOT/account/user_service.py" || ! -f "
   exit 66
 fi
 for REQUIRED in \
-  Caddyfile account.env.example \
+  account.env.example \
   systemd/guzi-scholar-account.service \
   systemd/guzi-scholar-ai.service \
-  systemd/guzi-scholar-showcase.service \
   systemd/guzi-scholar-account-backup.service \
   systemd/guzi-scholar-account-backup.timer \
   scripts/guzi-scholar-db-verify \
   scripts/guzi-scholar-ai-config-verify \
-	  scripts/guzi-scholar-account-backup \
-	  scripts/remote-rollback.sh \
-	  updates/macos/arm64/beta.json; do
+  scripts/guzi-scholar-account-backup \
+  scripts/remote-rollback.sh; do
   [[ -f "$BUNDLE_ROOT/deployment/$REQUIRED" ]] || {
     echo "[install] bundle is missing deployment/$REQUIRED" >&2
     exit 66
@@ -82,7 +83,13 @@ if [[ "$CADDY_VERSION" != "$EXPECTED_CADDY_VERSION" ]]; then
   echo "[install] Caddy $EXPECTED_CADDY_VERSION is required, found $CADDY_VERSION" >&2
   exit 69
 fi
-caddy adapt --config "$BUNDLE_ROOT/deployment/Caddyfile" --adapter caddyfile >/dev/null
+caddy validate --config "$CADDY_MAIN" --adapter caddyfile >/dev/null
+# The legacy macOS beta update channel is optional: ship a new manifest and DMG when the bundle has them,
+# otherwise carry the live release's updates/ forward unchanged.
+BUNDLED_UPDATES=0
+UPDATE_DMG_NAME=
+if [[ -f "$BUNDLE_ROOT/deployment/updates/macos/arm64/beta.json" ]]; then
+BUNDLED_UPDATES=1
 python3 - "$BUNDLE_ROOT/deployment/updates/macos/arm64/beta.json" <<'PY'
 import json
 import pathlib
@@ -98,7 +105,7 @@ assert payload == {
 }
 assert isinstance(payload.get("version"), str) and payload["version"]
 PY
-UPDATE_DMG_NAME=$(python3 - "$BUNDLE_ROOT/deployment/updates/macos/arm64/beta.json" "$BUNDLE_ROOT/deployment/updates/macos/arm64" <<'PY'
+UPDATE_DMG_NAME=$(python3 - "$BUNDLE_ROOT/deployment/updates/macos/arm64/beta.json" "$BUNDLE_ROOT/deployment/updates/macos/arm64" "$PUBLIC_HOST" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -113,7 +120,7 @@ url = urllib.parse.urlsplit(payload.get("download_url", ""))
 name = pathlib.PurePosixPath(url.path).name
 if (
     url.scheme != "https"
-    or url.netloc != "82.156.152.27"
+    or url.netloc != sys.argv[3]
     or pathlib.PurePosixPath(url.path).parent != pathlib.PurePosixPath("/updates/macos/arm64")
     or url.query
     or url.fragment
@@ -135,6 +142,7 @@ if digest.hexdigest() != expected:
 print(name)
 PY
 )
+fi
 if ! python3 -I -B "$BUNDLE_ROOT/account/user_service.py" --help | grep -q 'create-invite'; then
   echo "[install] refusing to deploy an account build without create-invite" >&2
   exit 78
@@ -144,12 +152,12 @@ if [[ -e "$RELEASE_ROOT/$RELEASE_ID" ]]; then
   echo "[install] immutable release already exists: $RELEASE_ID" >&2
   exit 73
 fi
-if [[ -e /opt/guzi-scholar/current && ! -L /opt/guzi-scholar/current ]]; then
-  echo "[install] /opt/guzi-scholar/current exists but is not a symlink" >&2
+if [[ -e "$SERVICE_ROOT/current" && ! -L "$SERVICE_ROOT/current" ]]; then
+  echo "[install] $SERVICE_ROOT/current exists but is not a symlink" >&2
   exit 73
 fi
-if [[ ! -f /etc/guzi-scholar/ai.tokens.json || -L /etc/guzi-scholar/ai.tokens.json ]]; then
-  echo "[install] provision /etc/guzi-scholar/ai.tokens.json out of band before deployment" >&2
+if [[ ! -f /home/guzi/config/guzi-scholar/ai.tokens.json || -L /home/guzi/config/guzi-scholar/ai.tokens.json ]]; then
+  echo "[install] provision /home/guzi/config/guzi-scholar/ai.tokens.json out of band before deployment" >&2
   exit 66
 fi
 PROBE_TOKENS=$(mktemp /tmp/guzi-scholar-ai-probe.XXXXXX)
@@ -157,7 +165,7 @@ cleanup_probe_tokens() {
   [[ ! -e "${PROBE_TOKENS:-}" ]] || unlink -- "$PROBE_TOKENS"
 }
 trap cleanup_probe_tokens EXIT
-install -o root -g root -m 0600 /etc/guzi-scholar/ai.tokens.json "$PROBE_TOKENS"
+install -o root -g root -m 0600 /home/guzi/config/guzi-scholar/ai.tokens.json "$PROBE_TOKENS"
 if ! MY_SCHOLAR_DEVELOPER_TOKENS_FILE="$PROBE_TOKENS" \
   python3 -B "$BUNDLE_ROOT/account/ai_gateway.py" probe --timeout 20 >/dev/null; then
   exit 69
@@ -237,39 +245,33 @@ fi
 install -d -o root -g root -m 0700 "$SNAPSHOT" "$SNAPSHOT/files" "$SNAPSHOT/services"
 printf '%s\n' "$SOURCE_DB" >"$SNAPSHOT/source-db-path"
 printf '%s\n' "$LEGACY_ACCOUNT_UNIT" >"$SNAPSHOT/legacy-account-unit"
-printf '%s\n' "$LEGACY_SHOWCASE_UNIT" >"$SNAPSHOT/legacy-showcase-unit"
-chmod 0600 "$SNAPSHOT/source-db-path" "$SNAPSHOT/legacy-account-unit" "$SNAPSHOT/legacy-showcase-unit"
-if [[ -d /etc/guzi-scholar ]]; then
+chmod 0600 "$SNAPSHOT/source-db-path" "$SNAPSHOT/legacy-account-unit"
+if [[ -d /home/guzi/config/guzi-scholar ]]; then
   echo present >"$SNAPSHOT/etc-dir.state"
-  stat -c '%a:%U:%G' /etc/guzi-scholar >"$SNAPSHOT/etc-dir.metadata"
+  stat -c '%a:%U:%G' /home/guzi/config/guzi-scholar >"$SNAPSHOT/etc-dir.metadata"
 else
   echo absent >"$SNAPSHOT/etc-dir.state"
 fi
 
-save_file /etc/caddy/Caddyfile caddyfile
-save_file /etc/guzi-scholar/account.env account-env
-save_file /etc/guzi-scholar/ai.tokens.json ai-tokens
+save_file /home/guzi/config/guzi-scholar/account.env account-env
+save_file /home/guzi/config/guzi-scholar/ai.tokens.json ai-tokens
 save_file /etc/systemd/system/guzi-scholar-account.service account-unit
 save_file /etc/systemd/system/guzi-scholar-ai.service ai-unit
-save_file /etc/systemd/system/guzi-scholar-showcase.service showcase-unit
 save_file /etc/systemd/system/guzi-scholar-account-backup.service backup-service
 save_file /etc/systemd/system/guzi-scholar-account-backup.timer backup-timer
-save_file /usr/local/sbin/guzi-scholar-db-verify db-verify
-save_file /usr/local/sbin/guzi-scholar-ai-config-verify ai-config-verify
-save_file /usr/local/sbin/guzi-scholar-account-backup db-backup
-save_file /usr/local/sbin/guzi-scholar-rollback rollback-script
+save_file /home/guzi/services/guzi-scholar/sbin/guzi-scholar-db-verify db-verify
+save_file /home/guzi/services/guzi-scholar/sbin/guzi-scholar-ai-config-verify ai-config-verify
+save_file /home/guzi/services/guzi-scholar/sbin/guzi-scholar-account-backup db-backup
+save_file /home/guzi/services/guzi-scholar/sbin/guzi-scholar-rollback rollback-script
 
 capture_service "$LEGACY_ACCOUNT_UNIT" legacy-account
-capture_service "$LEGACY_SHOWCASE_UNIT" legacy-showcase
 capture_service guzi-scholar-account.service account
 capture_service guzi-scholar-ai.service ai
-capture_service guzi-scholar-showcase.service showcase
 capture_service guzi-scholar-account-backup.timer backup-timer
-capture_service caddy.service caddy
 
-if [[ -L /opt/guzi-scholar/current ]]; then
+if [[ -L "$SERVICE_ROOT/current" ]]; then
   echo symlink >"$SNAPSHOT/current.state"
-  readlink -- /opt/guzi-scholar/current >"$SNAPSHOT/current.target"
+  readlink -- "$SERVICE_ROOT/current" >"$SNAPSHOT/current.target"
 else
   echo absent >"$SNAPSHOT/current.state"
 fi
@@ -376,42 +378,44 @@ if [[ $(getent passwd guzi-account | cut -d: -f7) != /usr/sbin/nologin ]]; then
   false
 fi
 
-install -d -o root -g root -m 0755 /opt/guzi-scholar "$RELEASE_ROOT"
+install -d -o root -g root -m 0755 "$SERVICE_ROOT" "$RELEASE_ROOT" "$SBIN_DIR"
 install -d -o root -g root -m 0755 "$RELEASE_ROOT/$RELEASE_ID"
 install -d -o root -g root -m 0755 "$RELEASE_ROOT/$RELEASE_ID/account"
-install -d -o root -g root -m 0755 "$RELEASE_ROOT/$RELEASE_ID/updates" "$RELEASE_ROOT/$RELEASE_ID/updates/macos" "$RELEASE_ROOT/$RELEASE_ID/updates/macos/arm64"
 install -o root -g root -m 0444 "$BUNDLE_ROOT/account/user_service.py" "$RELEASE_ROOT/$RELEASE_ID/account/user_service.py"
 install -o root -g root -m 0444 "$BUNDLE_ROOT/account/ai_gateway.py" "$RELEASE_ROOT/$RELEASE_ID/account/ai_gateway.py"
 install -o root -g root -m 0444 "$BUNDLE_ROOT/account/config.py" "$RELEASE_ROOT/$RELEASE_ID/account/config.py"
-install -o root -g root -m 0444 "$BUNDLE_ROOT/deployment/updates/macos/arm64/beta.json" "$RELEASE_ROOT/$RELEASE_ID/updates/macos/arm64/beta.json"
-install -o root -g root -m 0444 "$BUNDLE_ROOT/deployment/updates/macos/arm64/$UPDATE_DMG_NAME" "$RELEASE_ROOT/$RELEASE_ID/updates/macos/arm64/$UPDATE_DMG_NAME"
-install -d -o root -g guzi-account -m 0710 /etc/guzi-scholar
-if [[ ! -e /etc/guzi-scholar/account.env ]]; then
-  install -o root -g root -m 0600 "$BUNDLE_ROOT/deployment/account.env.example" /etc/guzi-scholar/account.env
+if [[ $BUNDLED_UPDATES -eq 1 ]]; then
+  install -d -o root -g root -m 0755 "$RELEASE_ROOT/$RELEASE_ID/updates" "$RELEASE_ROOT/$RELEASE_ID/updates/macos" "$RELEASE_ROOT/$RELEASE_ID/updates/macos/arm64"
+  install -o root -g root -m 0444 "$BUNDLE_ROOT/deployment/updates/macos/arm64/beta.json" "$RELEASE_ROOT/$RELEASE_ID/updates/macos/arm64/beta.json"
+  install -o root -g root -m 0444 "$BUNDLE_ROOT/deployment/updates/macos/arm64/$UPDATE_DMG_NAME" "$RELEASE_ROOT/$RELEASE_ID/updates/macos/arm64/$UPDATE_DMG_NAME"
+elif [[ -d "$SERVICE_ROOT/current/updates" ]]; then
+  cp --archive -- "$(realpath -e -- "$SERVICE_ROOT/current/updates")" "$RELEASE_ROOT/$RELEASE_ID/updates"
 fi
-chown root:root /etc/guzi-scholar/account.env
-chmod 0600 /etc/guzi-scholar/account.env
-if [[ ! -f /etc/guzi-scholar/ai.tokens.json || -L /etc/guzi-scholar/ai.tokens.json ]]; then
-  echo "[install] provision /etc/guzi-scholar/ai.tokens.json out of band before deployment" >&2
+install -d -o root -g guzi-account -m 0710 /home/guzi/config/guzi-scholar
+if [[ ! -e /home/guzi/config/guzi-scholar/account.env ]]; then
+  install -o root -g root -m 0600 "$BUNDLE_ROOT/deployment/account.env.example" /home/guzi/config/guzi-scholar/account.env
+fi
+chown root:root /home/guzi/config/guzi-scholar/account.env
+chmod 0600 /home/guzi/config/guzi-scholar/account.env
+if [[ ! -f /home/guzi/config/guzi-scholar/ai.tokens.json || -L /home/guzi/config/guzi-scholar/ai.tokens.json ]]; then
+  echo "[install] provision /home/guzi/config/guzi-scholar/ai.tokens.json out of band before deployment" >&2
   false
 fi
-chown root:guzi-account /etc/guzi-scholar/ai.tokens.json
-chmod 0640 /etc/guzi-scholar/ai.tokens.json
+chown root:guzi-account /home/guzi/config/guzi-scholar/ai.tokens.json
+chmod 0640 /home/guzi/config/guzi-scholar/ai.tokens.json
 
-install -d -o guzi-account -g guzi-account -m 0700 /var/lib/guzi-scholar/account
-install -d -o guzi-account -g guzi-account -m 0700 /var/backups/guzi-scholar/account
-install -d -o root -g caddy -m 0755 /srv/guzi-sites /srv/guzi-sites/company
+install -d -o guzi-account -g guzi-account -m 0700 /home/guzi/data/guzi-scholar/account
+install -d -o guzi-account -g guzi-account -m 0700 /home/guzi/backups/guzi-scholar/account
 
-install -o root -g root -m 0755 "$BUNDLE_ROOT/deployment/scripts/guzi-scholar-db-verify" /usr/local/sbin/guzi-scholar-db-verify
-install -o root -g root -m 0755 "$BUNDLE_ROOT/deployment/scripts/guzi-scholar-ai-config-verify" /usr/local/sbin/guzi-scholar-ai-config-verify
-install -o root -g root -m 0755 "$BUNDLE_ROOT/deployment/scripts/guzi-scholar-account-backup" /usr/local/sbin/guzi-scholar-account-backup
-install -o root -g root -m 0755 "$BUNDLE_ROOT/deployment/scripts/remote-rollback.sh" /usr/local/sbin/guzi-scholar-rollback
+install -o root -g root -m 0755 "$BUNDLE_ROOT/deployment/scripts/guzi-scholar-db-verify" /home/guzi/services/guzi-scholar/sbin/guzi-scholar-db-verify
+install -o root -g root -m 0755 "$BUNDLE_ROOT/deployment/scripts/guzi-scholar-ai-config-verify" /home/guzi/services/guzi-scholar/sbin/guzi-scholar-ai-config-verify
+install -o root -g root -m 0755 "$BUNDLE_ROOT/deployment/scripts/guzi-scholar-account-backup" /home/guzi/services/guzi-scholar/sbin/guzi-scholar-account-backup
+install -o root -g root -m 0755 "$BUNDLE_ROOT/deployment/scripts/remote-rollback.sh" /home/guzi/services/guzi-scholar/sbin/guzi-scholar-rollback
 install -o root -g root -m 0644 "$BUNDLE_ROOT/deployment/systemd/guzi-scholar-account.service" /etc/systemd/system/guzi-scholar-account.service
 install -o root -g root -m 0644 "$BUNDLE_ROOT/deployment/systemd/guzi-scholar-ai.service" /etc/systemd/system/guzi-scholar-ai.service
-install -o root -g root -m 0644 "$BUNDLE_ROOT/deployment/systemd/guzi-scholar-showcase.service" /etc/systemd/system/guzi-scholar-showcase.service
 install -o root -g root -m 0644 "$BUNDLE_ROOT/deployment/systemd/guzi-scholar-account-backup.service" /etc/systemd/system/guzi-scholar-account-backup.service
 install -o root -g root -m 0644 "$BUNDLE_ROOT/deployment/systemd/guzi-scholar-account-backup.timer" /etc/systemd/system/guzi-scholar-account-backup.timer
-/usr/local/sbin/guzi-scholar-ai-config-verify /etc/guzi-scholar/ai.tokens.json
+/home/guzi/services/guzi-scholar/sbin/guzi-scholar-ai-config-verify /home/guzi/config/guzi-scholar/ai.tokens.json
 
 systemctl stop guzi-scholar-ai.service "$LEGACY_ACCOUNT_UNIT" guzi-scholar-account.service >/dev/null 2>&1 || true
 for UNIT in guzi-scholar-ai.service "$LEGACY_ACCOUNT_UNIT" guzi-scholar-account.service; do
@@ -435,10 +439,10 @@ if [[ "$FINAL_SOURCE_USERS" -lt "$SOURCE_USERS" ]]; then
   echo "[install] final snapshot lost users" >&2
   false
 fi
-FINAL_CANDIDATE=/var/lib/guzi-scholar/account/.users-migration.sqlite3
+FINAL_CANDIDATE=/home/guzi/data/guzi-scholar/account/.users-migration.sqlite3
 install -o guzi-account -g guzi-account -m 0600 "$SNAPSHOT/source-db-final.sqlite3" "$FINAL_CANDIDATE"
 python3 -I -B "$RELEASE_ROOT/$RELEASE_ID/account/user_service.py" list-users --db "$FINAL_CANDIDATE" >/dev/null
-/usr/local/sbin/guzi-scholar-db-verify "$FINAL_CANDIDATE"
+/home/guzi/services/guzi-scholar/sbin/guzi-scholar-db-verify "$FINAL_CANDIDATE"
 if [[ $(user_count "$FINAL_CANDIDATE") -ne "$FINAL_SOURCE_USERS" ]]; then
   echo "[install] final migration changed the user count" >&2
   false
@@ -450,27 +454,16 @@ done
 mv -- "$FINAL_CANDIDATE" "$TARGET_DB"
 chown guzi-account:guzi-account "$TARGET_DB"
 chmod 0600 "$TARGET_DB"
-ln -sfn -- "$RELEASE_ROOT/$RELEASE_ID" /opt/guzi-scholar/current
+ln -sfn -- "releases/$RELEASE_ID" "$SERVICE_ROOT/current"
 
-systemctl stop "$LEGACY_SHOWCASE_UNIT" guzi-scholar-showcase.service >/dev/null 2>&1 || true
-install -o root -g root -m 0644 "$BUNDLE_ROOT/deployment/Caddyfile" /etc/caddy/Caddyfile
-caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 systemctl daemon-reload
-systemctl disable "$LEGACY_ACCOUNT_UNIT" "$LEGACY_SHOWCASE_UNIT" >/dev/null 2>&1 || true
+systemctl disable "$LEGACY_ACCOUNT_UNIT" >/dev/null 2>&1 || true
 systemctl enable --now guzi-scholar-account.service
 systemctl enable --now guzi-scholar-ai.service
-systemctl enable --now guzi-scholar-showcase.service
 systemctl enable --now guzi-scholar-account-backup.timer
-systemctl enable caddy.service
-if systemctl is-active --quiet caddy.service; then
-  systemctl reload caddy.service
-else
-  systemctl start caddy.service
-fi
 
 curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8478/api/health >/dev/null
 curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8480/health >/dev/null
-curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8081/api/health >/dev/null
 systemctl start guzi-scholar-account-backup.service
 echo "$RELEASE_ID" >"$SNAPSHOT/deployed"
 chmod 0600 "$SNAPSHOT/deployed"

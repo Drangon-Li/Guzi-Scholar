@@ -2,7 +2,6 @@
 Description=Guzi Scholar authenticated AI gateway
 After=network-online.target guzi-scholar-account.service
 Wants=network-online.target
-Requires=guzi-scholar-account.service
 StartLimitIntervalSec=120
 StartLimitBurst=5
 
@@ -11,19 +10,19 @@ Type=simple
 User=guzi-account
 Group=guzi-account
 UMask=0077
-WorkingDirectory=/opt/guzi-scholar/current/account
-Environment=MY_SCHOLAR_DEVELOPER_TOKENS_FILE=/etc/guzi-scholar/ai.tokens.json
-ExecStartPre=/usr/local/sbin/guzi-scholar-db-verify /var/lib/guzi-scholar/account/users.db
-ExecStartPre=/usr/local/sbin/guzi-scholar-ai-config-verify /etc/guzi-scholar/ai.tokens.json
-ExecStart=/usr/bin/python3 -B /opt/guzi-scholar/current/account/ai_gateway.py serve --db /var/lib/guzi-scholar/account/users.db --host 127.0.0.1 --port 8480
+WorkingDirectory=/home/guzi/services/guzi-scholar/current/account
+Environment=MY_SCHOLAR_DEVELOPER_TOKENS_FILE=/home/guzi/config/guzi-scholar/ai.tokens.json
+ExecStartPre=/home/guzi/services/guzi-scholar/sbin/guzi-scholar-db-verify /home/guzi/data/guzi-scholar/account/users.db
+ExecStartPre=/home/guzi/services/guzi-scholar/sbin/guzi-scholar-ai-config-verify /home/guzi/config/guzi-scholar/ai.tokens.json
+ExecStart=/usr/bin/python3 -B /home/guzi/services/guzi-scholar/current/account/ai_gateway.py serve --db /home/guzi/data/guzi-scholar/account/users.db --host 127.0.0.1 --port 8480
 Restart=on-failure
 RestartSec=3s
 TimeoutStartSec=30s
 TimeoutStopSec=130s
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/lib/guzi-scholar/account
-ReadOnlyPaths=/etc/guzi-scholar/ai.tokens.json
+ProtectHome=tmpfs
+BindReadOnlyPaths=/home/guzi/services/guzi-scholar /home/guzi/config/guzi-scholar/ai.tokens.json
+BindPaths=/home/guzi/data/guzi-scholar/account
 PrivateTmp=true
 PrivateDevices=true
 NoNewPrivileges=true
