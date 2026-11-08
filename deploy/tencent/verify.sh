@@ -17,7 +17,8 @@ fi
 
 ssh "$REMOTE" bash -s <<'REMOTE'
 set -Eeuo pipefail
-for UNIT in guzi-scholar-account.service guzi-scholar-ai.service guzi-scholar-account-backup.timer caddy.service; do
+# The account service (port 8478) is paused and is not part of a release.
+for UNIT in guzi-scholar-ai.service guzi-scholar-account-backup.timer caddy.service; do
   systemctl is-active --quiet "$UNIT" || {
     echo "[verify] inactive service: $UNIT" >&2
     exit 69
@@ -29,7 +30,6 @@ sudo -n caddy validate --config /home/tools/caddy/Caddyfile --adapter caddyfile 
 [[ $(sudo -n stat -c '%a:%U:%G' /home/guzi/data/guzi-scholar/account) == 700:guzi-account:guzi-account ]]
 [[ $(sudo -n stat -c '%a:%U:%G' /home/guzi/data/guzi-scholar/account/users.db) == 600:guzi-account:guzi-account ]]
 [[ $(sudo -n stat -c '%a:%U:%G' /home/guzi/backups/guzi-scholar/account) == 700:guzi-account:guzi-account ]]
-[[ $(sudo -n stat -c '%a:%U:%G' /home/guzi/config/guzi-scholar/account.env) == 600:root:root ]]
 [[ $(sudo -n stat -c '%a:%U:%G' /home/guzi/config/guzi-scholar/ai.tokens.json) == 640:root:guzi-account ]]
 sudo -n /home/guzi/services/guzi-scholar/sbin/guzi-scholar-db-verify /home/guzi/data/guzi-scholar/account/users.db
 sudo -n /home/guzi/services/guzi-scholar/sbin/guzi-scholar-ai-config-verify /home/guzi/config/guzi-scholar/ai.tokens.json
@@ -43,7 +43,7 @@ assert payload.get("ok") is True
 assert all(payload.get("services", {}).get(name, {}).get("ok") is True for name in ("translation", "chat"))
 ' <<<"$AI_PROBE"
 
-for SPEC in '8478 127.0.0.1:8478' '8480 127.0.0.1:8480'; do
+for SPEC in '8480 127.0.0.1:8480'; do
   set -- $SPEC
   PORT=$1
   EXPECTED=$2
@@ -58,7 +58,6 @@ for SPEC in '8478 127.0.0.1:8478' '8480 127.0.0.1:8480'; do
   }
 done
 
-curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8478/api/health >/dev/null
 curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8480/health >/dev/null
 
 # The legacy macOS beta update channel is optional; when present, its DMG must match the manifest.
@@ -106,7 +105,7 @@ sudo -n /home/guzi/services/guzi-scholar/sbin/guzi-scholar-db-verify "$LATEST" >
 echo "[verify] remote services, permissions, listeners, live database and latest backup are valid"
 REMOTE
 
-for SPEC in '8478 /api/health' '8480 /health'; do
+for SPEC in '8480 /health'; do
   set -- $SPEC
   PORT=$1
   PATHNAME=$2
@@ -121,7 +120,7 @@ HTTPS_LOCAL_READY=0
 for ATTEMPT in $(seq 1 40); do
   if ssh "$REMOTE" curl --resolve "$PUBLIC_HOST:443:127.0.0.1" \
     --fail --silent --show-error --connect-timeout 3 --max-time 5 \
-    "https://$PUBLIC_HOST/api/health" >/dev/null 2>&1; then
+    "https://$PUBLIC_HOST/ai/health" >/dev/null 2>&1; then
     HTTPS_LOCAL_READY=1
     break
   fi
@@ -131,18 +130,11 @@ if [[ $HTTPS_LOCAL_READY -ne 1 ]]; then
   echo "[verify] Caddy does not serve $PUBLIC_HOST locally with a usable certificate" >&2
   exit 69
 fi
-if ! ACCOUNT_HEALTH=$(curl --noproxy '*' --fail --silent --show-error \
-  --connect-timeout 5 --max-time 15 "https://$PUBLIC_HOST/api/health"); then
-  echo "[verify] public HTTPS account health on $PUBLIC_HOST is unreachable" >&2
+if ! curl --noproxy '*' --fail --silent --show-error \
+  --connect-timeout 5 --max-time 15 "https://$PUBLIC_HOST/ai/health" >/dev/null; then
+  echo "[verify] public HTTPS AI health on $PUBLIC_HOST is unreachable" >&2
   exit 69
 fi
-/usr/bin/python3 -c '
-import json, sys
-payload = json.loads(sys.stdin.read())
-assert payload.get("ok") is True
-assert payload.get("service") == "my-scholar-account"
-' <<<"$ACCOUNT_HEALTH"
-curl --noproxy '*' --fail --silent --show-error --max-time 15 "https://$PUBLIC_HOST/ai/health" >/dev/null
 if UPDATE_MANIFEST=$(curl --noproxy '*' --fail --silent --show-error --max-time 10 "https://$PUBLIC_HOST/updates/macos/arm64/beta.json" 2>/dev/null); then
   /usr/bin/python3 -c '
 import json, sys
@@ -179,4 +171,4 @@ if openssl x509 -in "$CERT_FILE" -checkend 691200 -noout >/dev/null; then
 fi
 openssl x509 -in "$CERT_FILE" -text -noout | grep -F "DNS:$PUBLIC_HOST" >/dev/null
 
-echo "[verify] HTTPS on $PUBLIC_HOST, short-lived certificate, account and AI APIs, and exposure checks passed"
+echo "[verify] HTTPS on $PUBLIC_HOST, short-lived certificate, AI API, and exposure checks passed"

@@ -43,5 +43,5 @@ if [[ $ASSUME_YES -ne 1 ]]; then
 fi
 
 ssh "$REMOTE" sudo -n /home/guzi/services/guzi-scholar/sbin/guzi-scholar-rollback "$SNAPSHOT_ID"
-ssh "$REMOTE" "systemctl --no-pager --full status guzi-scholar-account.service guzi-scholar-ai.service 2>/dev/null | head -n 50 || true"
+ssh "$REMOTE" "systemctl --no-pager --full status guzi-scholar-ai.service 2>/dev/null | head -n 50 || true"
 echo "[rollback] completed snapshot=$SNAPSHOT_ID; verify the restored public endpoint before further changes"

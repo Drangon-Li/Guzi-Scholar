@@ -34,9 +34,7 @@ const verify = fs.readFileSync(path.join(deployRoot, 'verify.sh'), 'utf8');
 const rollback = fs.readFileSync(path.join(deployRoot, 'scripts', 'remote-rollback.sh'), 'utf8');
 const dbVerify = fs.readFileSync(path.join(deployRoot, 'scripts', 'guzi-scholar-db-verify'), 'utf8');
 const backupScript = fs.readFileSync(path.join(deployRoot, 'scripts', 'guzi-scholar-account-backup'), 'utf8');
-const accountUnit = fs.readFileSync(path.join(deployRoot, 'systemd', 'guzi-scholar-account.service'), 'utf8');
 const backupUnit = fs.readFileSync(path.join(deployRoot, 'systemd', 'guzi-scholar-account-backup.service'), 'utf8');
-const accountEnv = fs.readFileSync(path.join(deployRoot, 'account.env.example'), 'utf8');
 const deployReadme = fs.readFileSync(path.join(deployRoot, 'README.md'), 'utf8');
 const privacy = fs.readFileSync(path.join(desktopRoot, 'web', 'legal', 'privacy.html'), 'utf8');
 const betaTerms = fs.readFileSync(path.join(desktopRoot, 'web', 'legal', 'beta-terms.html'), 'utf8');
@@ -66,7 +64,7 @@ assert.ok(
   install.indexOf('systemd-run --quiet --wait --collect --pipe') < install.indexOf('echo complete >"$SNAPSHOT/complete"'),
   'the hardened backup service must pass an isolated preflight before service switching is allowed',
 );
-assert.match(verify, /json\.loads\(sys\.stdin\.read\(\)\)[\s\S]*my-scholar-account/u, 'health checks must parse JSON instead of matching formatting');
+assert.match(verify, /json\.loads\(sys\.stdin\.read\(\)\)[\s\S]*"translation", "chat"/u, 'health checks must parse JSON instead of matching formatting');
 assert.match(verify, /ai_gateway\.py probe --timeout 20/u, 'post-deploy verification must call both real providers');
 assert.match(verify, /curl --noproxy '\*'[\s\S]*http:\/\/\$REMOTE_HOST:\$PORT\$PATHNAME/u, 'public exposure checks must perform real direct HTTP probes');
 assert.match(verify, /--resolve "\$PUBLIC_HOST:443:127\.0\.0\.1"[\s\S]*HTTPS_LOCAL_READY/u, 'certificate readiness must be separated from public firewall reachability');
@@ -86,30 +84,18 @@ assert.match(dbVerify, /"input_units"/u, 'database verification must require per
 assert.match(dbVerify, /"email_challenges"/u, 'database verification must require email challenges');
 assert.match(dbVerify, /"mail_outbox"/u, 'database verification must require the durable mail outbox');
 assert.match(dbVerify, /"email",\s*"email_verified_at"/u, 'database verification must require verified user emails');
-assert.match(accountUnit, /^EnvironmentFile=\/home\/guzi\/config\/guzi-scholar\/account\.env$/mu, 'account secrets file must be mandatory');
-assert.doesNotMatch(accountUnit, /^EnvironmentFile=-/mu, 'account service must not ignore a missing secrets file');
+for (const [name, script] of [['installer', install], ['rollback', rollback], ['verify', verify]]) {
+  assert.doesNotMatch(script, /systemctl (enable|start)[^\n]*guzi-scholar-account\.service|127\.0\.0\.1:8478|account\.env/u, `the ${name} must not manage the paused account service`);
+}
+assert.match(install, /guzi-scholar-account\.service is running but this tool no longer manages it/u, 'the installer must refuse to migrate the database while the paused account service runs');
+assert.ok(!fs.existsSync(path.join(deployRoot, 'systemd', 'guzi-scholar-account.service')), 'the paused account service unit must not be shipped');
+assert.match(deploy, /user_service\.py" --help >\/dev\/null/u, 'the AI gateway dependency user_service.py must still be importable');
 assert.match(accountService, /"email-preflight"/u, 'account CLI must expose the systemd email preflight');
 assert.match(accountService, /MY_SCHOLAR_REQUIRE_EMAIL_AUTH/u, 'account service must implement a production email-auth requirement');
 assert.ok(
   accountService.indexOf('if options.command == "email-preflight":') < accountService.indexOf('store = AccountStore('),
   'email preflight must return before opening or migrating the account database',
 );
-assert.ok(
-  accountUnit.indexOf('user_service.py email-preflight') < accountUnit.indexOf('guzi-scholar-db-verify'),
-  'offline email configuration must fail closed before database verification',
-);
-assert.match(accountEnv, /^MY_SCHOLAR_EMAIL_ENABLED=1$/mu, 'beta email verification must be enabled');
-assert.match(accountEnv, /^MY_SCHOLAR_REQUIRE_EMAIL_AUTH=1$/mu, 'production beta registration must fail closed when email auth is unavailable');
-assert.match(accountEnv, /^MY_SCHOLAR_SMTP_HOST=smtp\.163\.com$/mu, '163 SMTP host must be explicit');
-assert.match(accountEnv, /^MY_SCHOLAR_SMTP_PORT=465$/mu, 'SMTP must use the implicit TLS port');
-assert.match(accountEnv, /^MY_SCHOLAR_SMTP_SECURITY=ssl$/mu, 'SMTP must require implicit TLS');
-assert.match(accountEnv, /^MY_SCHOLAR_SMTP_USERNAME=guzilab_notify@163\.com$/mu, 'SMTP auth user must be the notification mailbox');
-assert.match(accountEnv, /^MY_SCHOLAR_SMTP_FROM=guzilab_notify@163\.com$/mu, 'SMTP sender must match the authenticated mailbox');
-assert.match(accountEnv, /^MY_SCHOLAR_SMTP_REPLY_TO=guzilab@163\.com$/mu, 'user replies must go to the support mailbox');
-assert.match(accountEnv, /^MY_SCHOLAR_SMTP_PASSWORD=$/mu, 'the SMTP authorization password must stay blank in the repository');
-assert.match(accountEnv, /^MY_SCHOLAR_EMAIL_CODE_SECRET=$/mu, 'the email-code secret must stay blank in the repository');
-assert.doesNotMatch(accountEnv, /STARTTLS|MY_SCHOLAR_SMTP_PORT=587/iu, 'the 163 profile must not silently fall back to STARTTLS');
-assert.match(deployReadme, /email-preflight[\s\S]*does not connect to SMTP or send a message/u, 'deployment docs must explain the offline preflight boundary');
 assert.match(privacy, /版本：2026-08-06-email/u, 'privacy policy must expose the current email-account version');
 assert.match(privacy, /网易 163 邮箱服务/u, 'privacy policy must identify the mail processor');
 assert.match(privacy, /guzilab_notify@163\.com/u, 'privacy policy must identify the notification sender');
@@ -120,7 +106,7 @@ assert.match(betaTerms, /一次性恢复码/u, 'beta terms must preserve the rec
 assert.match(backupUnit, /RuntimeDirectory=guzi-scholar-account-backup/u, 'backup locks need a writable private runtime directory');
 assert.match(backupUnit, /User=guzi-account[\s\S]*Group=guzi-account/u, 'backups must run as the database service account');
 assert.match(backupUnit, /^BindPaths=.*\/home\/guzi\/data\/guzi-scholar\/account/mu, 'SQLite must be able to maintain WAL metadata while backing up');
-for (const unit of ['guzi-scholar-account.service', 'guzi-scholar-ai.service', 'guzi-scholar-account-backup.service']) {
+for (const unit of ['guzi-scholar-ai.service', 'guzi-scholar-account-backup.service']) {
   const text = fs.readFileSync(path.join(deployRoot, 'systemd', unit), 'utf8');
   assert.match(text, /^ProtectHome=tmpfs$/mu, `${unit} must hide /home except for its bound paths`);
 }

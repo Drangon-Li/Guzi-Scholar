@@ -50,10 +50,8 @@ if [[ $ALLOW_DIRTY -ne 1 && -n $(git -C "$REPO_ROOT" status --porcelain --untrac
   echo "[deploy] worktree is dirty; review it and pass --allow-dirty only for an intentional beta build" >&2
   exit 78
 fi
-if ! python3 -I -B "$REPO_ROOT/apps/desktop/user_service.py" --help | grep -q 'create-invite'; then
-  echo "[deploy] account service does not expose create-invite; invitation-only registration is not ready" >&2
-  exit 78
-fi
+# The account service is paused; user_service.py still ships because ai_gateway.py imports it.
+python3 -I -B "$REPO_ROOT/apps/desktop/user_service.py" --help >/dev/null
 
 # The legacy macOS beta update channel is optional. Without a manifest here, the server keeps serving
 # the live release's updates/ unchanged.
@@ -181,4 +179,3 @@ fi
 ssh "$REMOTE" "find '$REMOTE_STAGE' -depth -delete; unlink -- '$REMOTE_ARCHIVE'"
 REMOTE_STAGED=0
 echo "[deploy] completed release=$RELEASE_ID snapshot=$RELEASE_ID"
-echo "[deploy] create an invitation explicitly with the deployed user_service.py CLI after reviewing its --help"

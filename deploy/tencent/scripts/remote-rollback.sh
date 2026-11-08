@@ -88,14 +88,12 @@ restore_activity() {
   fi
 }
 
-LEGACY_ACCOUNT_UNIT=$(read_value "$SNAPSHOT/legacy-account-unit" my-scholar-account.service)
-for UNIT in guzi-scholar-account-backup.timer guzi-scholar-ai.service guzi-scholar-account.service; do
+# The account service is paused and not managed by these scripts.
+for UNIT in guzi-scholar-account-backup.timer guzi-scholar-ai.service; do
   systemctl stop "$UNIT" >/dev/null 2>&1 || true
 done
 
-restore_file /home/guzi/config/guzi-scholar/account.env account-env
 restore_file /home/guzi/config/guzi-scholar/ai.tokens.json ai-tokens
-restore_file /etc/systemd/system/guzi-scholar-account.service account-unit
 restore_file /etc/systemd/system/guzi-scholar-ai.service ai-unit
 restore_file /etc/systemd/system/guzi-scholar-account-backup.service backup-service
 restore_file /etc/systemd/system/guzi-scholar-account-backup.timer backup-timer
@@ -154,13 +152,9 @@ elif [[ -L "$SERVICE_ROOT/current" ]]; then
 fi
 
 systemctl daemon-reload
-restore_enablement "$LEGACY_ACCOUNT_UNIT" legacy-account
-restore_enablement guzi-scholar-account.service account
 restore_enablement guzi-scholar-ai.service ai
 restore_enablement guzi-scholar-account-backup.timer backup-timer
 
-restore_activity "$LEGACY_ACCOUNT_UNIT" legacy-account
-restore_activity guzi-scholar-account.service account
 restore_activity guzi-scholar-ai.service ai
 restore_activity guzi-scholar-account-backup.timer backup-timer
 

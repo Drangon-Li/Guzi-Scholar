@@ -171,7 +171,7 @@ fi
 
 echo "[preflight] os=$PRETTY_NAME ram_kib=$MEMORY_KB root_available_kib=$AVAILABLE_KB caddy=$CADDY_VERSION"
 echo "[preflight] current listeners on managed ports:"
-sudo -n ss -H -ltnp '( sport = :80 or sport = :443 or sport = :8478 or sport = :8480 )' || true
+sudo -n ss -H -ltnp '( sport = :80 or sport = :443 or sport = :8480 )' || true
 REMOTE
 
 echo "[preflight] passed"

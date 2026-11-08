@@ -14,14 +14,12 @@ readonly PUBLIC_HOST=guzilab.com
 RELEASE_ID=
 BUNDLE_ROOT=
 SOURCE_DB=$TARGET_DB
-LEGACY_ACCOUNT_UNIT=my-scholar-account.service
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --release-id) RELEASE_ID=${2:-}; shift 2 ;;
     --bundle-root) BUNDLE_ROOT=${2:-}; shift 2 ;;
     --source-db) SOURCE_DB=${2:-}; shift 2 ;;
-    --legacy-account-unit) LEGACY_ACCOUNT_UNIT=${2:-}; shift 2 ;;
     *) echo "[install] unknown argument: $1" >&2; exit 64 ;;
   esac
 done
@@ -32,10 +30,6 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
 fi
 if [[ ! "$RELEASE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
   echo "[install] invalid release id" >&2
-  exit 64
-fi
-if [[ ! "$LEGACY_ACCOUNT_UNIT" =~ ^[A-Za-z0-9_.@-]+\.service$ ]]; then
-  echo "[install] invalid legacy unit name" >&2
   exit 64
 fi
 if [[ "$BUNDLE_ROOT" != /* || ! -d "$BUNDLE_ROOT" ]]; then
@@ -57,8 +51,6 @@ if [[ ! -f "$SOURCE_DB" || ! -f "$BUNDLE_ROOT/account/user_service.py" || ! -f "
   exit 66
 fi
 for REQUIRED in \
-  account.env.example \
-  systemd/guzi-scholar-account.service \
   systemd/guzi-scholar-ai.service \
   systemd/guzi-scholar-account-backup.service \
   systemd/guzi-scholar-account-backup.timer \
@@ -143,8 +135,11 @@ print(name)
 PY
 )
 fi
-if ! python3 -I -B "$BUNDLE_ROOT/account/user_service.py" --help | grep -q 'create-invite'; then
-  echo "[install] refusing to deploy an account build without create-invite" >&2
+# The account service (port 8478) is paused and not managed here. ai_gateway.py still imports
+# user_service.py and authenticates requests against the same database, so both ship together.
+python3 -I -B "$BUNDLE_ROOT/account/user_service.py" --help >/dev/null
+if systemctl is-active --quiet guzi-scholar-account.service; then
+  echo "[install] guzi-scholar-account.service is running but this tool no longer manages it; stop it before deploying" >&2
   exit 78
 fi
 python3 -B "$BUNDLE_ROOT/account/ai_gateway.py" --help >/dev/null
@@ -244,8 +239,7 @@ if [[ -e "$SNAPSHOT" ]]; then
 fi
 install -d -o root -g root -m 0700 "$SNAPSHOT" "$SNAPSHOT/files" "$SNAPSHOT/services"
 printf '%s\n' "$SOURCE_DB" >"$SNAPSHOT/source-db-path"
-printf '%s\n' "$LEGACY_ACCOUNT_UNIT" >"$SNAPSHOT/legacy-account-unit"
-chmod 0600 "$SNAPSHOT/source-db-path" "$SNAPSHOT/legacy-account-unit"
+chmod 0600 "$SNAPSHOT/source-db-path"
 if [[ -d /home/guzi/config/guzi-scholar ]]; then
   echo present >"$SNAPSHOT/etc-dir.state"
   stat -c '%a:%U:%G' /home/guzi/config/guzi-scholar >"$SNAPSHOT/etc-dir.metadata"
@@ -253,9 +247,7 @@ else
   echo absent >"$SNAPSHOT/etc-dir.state"
 fi
 
-save_file /home/guzi/config/guzi-scholar/account.env account-env
 save_file /home/guzi/config/guzi-scholar/ai.tokens.json ai-tokens
-save_file /etc/systemd/system/guzi-scholar-account.service account-unit
 save_file /etc/systemd/system/guzi-scholar-ai.service ai-unit
 save_file /etc/systemd/system/guzi-scholar-account-backup.service backup-service
 save_file /etc/systemd/system/guzi-scholar-account-backup.timer backup-timer
@@ -264,8 +256,6 @@ save_file /home/guzi/services/guzi-scholar/sbin/guzi-scholar-ai-config-verify ai
 save_file /home/guzi/services/guzi-scholar/sbin/guzi-scholar-account-backup db-backup
 save_file /home/guzi/services/guzi-scholar/sbin/guzi-scholar-rollback rollback-script
 
-capture_service "$LEGACY_ACCOUNT_UNIT" legacy-account
-capture_service guzi-scholar-account.service account
 capture_service guzi-scholar-ai.service ai
 capture_service guzi-scholar-account-backup.timer backup-timer
 
@@ -392,11 +382,6 @@ elif [[ -d "$SERVICE_ROOT/current/updates" ]]; then
   cp --archive -- "$(realpath -e -- "$SERVICE_ROOT/current/updates")" "$RELEASE_ROOT/$RELEASE_ID/updates"
 fi
 install -d -o root -g guzi-account -m 0710 /home/guzi/config/guzi-scholar
-if [[ ! -e /home/guzi/config/guzi-scholar/account.env ]]; then
-  install -o root -g root -m 0600 "$BUNDLE_ROOT/deployment/account.env.example" /home/guzi/config/guzi-scholar/account.env
-fi
-chown root:root /home/guzi/config/guzi-scholar/account.env
-chmod 0600 /home/guzi/config/guzi-scholar/account.env
 if [[ ! -f /home/guzi/config/guzi-scholar/ai.tokens.json || -L /home/guzi/config/guzi-scholar/ai.tokens.json ]]; then
   echo "[install] provision /home/guzi/config/guzi-scholar/ai.tokens.json out of band before deployment" >&2
   false
@@ -411,14 +396,13 @@ install -o root -g root -m 0755 "$BUNDLE_ROOT/deployment/scripts/guzi-scholar-db
 install -o root -g root -m 0755 "$BUNDLE_ROOT/deployment/scripts/guzi-scholar-ai-config-verify" /home/guzi/services/guzi-scholar/sbin/guzi-scholar-ai-config-verify
 install -o root -g root -m 0755 "$BUNDLE_ROOT/deployment/scripts/guzi-scholar-account-backup" /home/guzi/services/guzi-scholar/sbin/guzi-scholar-account-backup
 install -o root -g root -m 0755 "$BUNDLE_ROOT/deployment/scripts/remote-rollback.sh" /home/guzi/services/guzi-scholar/sbin/guzi-scholar-rollback
-install -o root -g root -m 0644 "$BUNDLE_ROOT/deployment/systemd/guzi-scholar-account.service" /etc/systemd/system/guzi-scholar-account.service
 install -o root -g root -m 0644 "$BUNDLE_ROOT/deployment/systemd/guzi-scholar-ai.service" /etc/systemd/system/guzi-scholar-ai.service
 install -o root -g root -m 0644 "$BUNDLE_ROOT/deployment/systemd/guzi-scholar-account-backup.service" /etc/systemd/system/guzi-scholar-account-backup.service
 install -o root -g root -m 0644 "$BUNDLE_ROOT/deployment/systemd/guzi-scholar-account-backup.timer" /etc/systemd/system/guzi-scholar-account-backup.timer
 /home/guzi/services/guzi-scholar/sbin/guzi-scholar-ai-config-verify /home/guzi/config/guzi-scholar/ai.tokens.json
 
-systemctl stop guzi-scholar-ai.service "$LEGACY_ACCOUNT_UNIT" guzi-scholar-account.service >/dev/null 2>&1 || true
-for UNIT in guzi-scholar-ai.service "$LEGACY_ACCOUNT_UNIT" guzi-scholar-account.service; do
+systemctl stop guzi-scholar-ai.service >/dev/null 2>&1 || true
+for UNIT in guzi-scholar-ai.service; do
   if systemctl is-active --quiet "$UNIT"; then
     echo "[install] account database user is still active after stop: $UNIT" >&2
     false
@@ -457,12 +441,9 @@ chmod 0600 "$TARGET_DB"
 ln -sfn -- "releases/$RELEASE_ID" "$SERVICE_ROOT/current"
 
 systemctl daemon-reload
-systemctl disable "$LEGACY_ACCOUNT_UNIT" >/dev/null 2>&1 || true
-systemctl enable --now guzi-scholar-account.service
 systemctl enable --now guzi-scholar-ai.service
 systemctl enable --now guzi-scholar-account-backup.timer
 
-curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8478/api/health >/dev/null
 curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8480/health >/dev/null
 systemctl start guzi-scholar-account-backup.service
 echo "$RELEASE_ID" >"$SNAPSHOT/deployed"
@@ -470,4 +451,3 @@ chmod 0600 "$SNAPSHOT/deployed"
 trap - ERR
 
 echo "[install] release $RELEASE_ID is active"
-echo "[install] no invitation was generated; create one explicitly after HTTPS verification"
