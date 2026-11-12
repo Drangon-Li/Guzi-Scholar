@@ -69,10 +69,12 @@ class AICapabilitiesTest(unittest.TestCase):
             self.assertEqual(known["max_output_tokens"], 128000)
             self.assertEqual(known["reasoning_efforts"], ["medium", "high", "xhigh"])
             self.assertFalse(known["temperature_supported"])
+            self.assertTrue(known["vision_supported"])
             self.assertEqual(known["source"], "models.dev:2026-10-22")
             unknown = capabilities.get_model_capabilities({"base_url": "https://gateway.test", "model": "my-custom-model", "context_window": 32000})
             self.assertIsNone(unknown["context_window"])
             self.assertIsNone(unknown["thinking_supported"])
+            self.assertIsNone(unknown["vision_supported"])
             self.assertEqual(unknown["source"], "unknown")
             self.assertEqual(set(known), set(unknown))
 

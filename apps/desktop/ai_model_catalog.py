@@ -304,3 +304,16 @@ CATALOG = json.loads(r'''
 }}
 }
 ''')
+
+for provider, model_ids in {
+    "openai": ("gpt-4o", "gpt-4o-mini", "gpt-4o-2024-05-13", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20",
+               "gpt-4-turbo", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "gpt-5.2", "gpt-5.4-pro", "gpt-5.5-pro",
+               "gpt-6.1-sol", "gpt-6-astra", "o3", "o3-pro", "o4-mini"),
+    "anthropic": ("claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-sonnet-4-5", "claude-sonnet-4-5-20250929",
+                  "claude-opus-4-5", "claude-opus-4-5-20251101", "claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-7",
+                  "claude-opus-4-8", "claude-opus-5", "claude-sonnet-5", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"),
+    "alibaba": ("qwen-vl-plus", "qwen-vl-max", "qwen3-vl-235b-a22b"),
+    "alibaba-cn": ("qwen-vl-plus", "qwen-vl-max", "qwen3-vl-30b-a3b"),
+}.items():
+    for model_id in model_ids:
+        CATALOG[provider]["models"][model_id]["modalities"] = {"input": ["text", "image"]}

@@ -597,7 +597,7 @@ class TranslationCacheTest(unittest.TestCase):
             self.assertEqual(restored["source_filename"], "paper.pdf")
             self.assertEqual(restored["source_sha256"], digest)
 
-    def test_failed_exact_upload_retries_the_same_index(self) -> None:
+    def test_failed_exact_upload_preserves_the_same_job_for_explicit_retry(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-digest-retry-") as temp:
             root = Path(temp)
             store = JobStore(root)
@@ -613,10 +613,13 @@ class TranslationCacheTest(unittest.TestCase):
             (retry_stage / "upload.pdf.part").write_bytes(payload)
             retried, duplicate = store.commit_staged_upload(retry_stage, "paper.pdf", len(payload), digest)
 
-            self.assertFalse(duplicate)
+            self.assertTrue(duplicate)
             self.assertEqual(retried["job_id"], failed["job_id"])
-            self.assertEqual(retried["status"], "queued")
+            self.assertEqual(retried["status"], "failed")
             self.assertEqual((Path(retried["job_dir"]) / "upload.pdf").read_bytes(), payload)
+            queued, submitted = store.begin_parse(retried["job_id"])
+            self.assertTrue(submitted)
+            self.assertEqual(queued["status"], "queued")
 
     def test_requested_folder_intent_is_replayed_and_cleared(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-folder-recovery-") as temp:
@@ -1897,6 +1900,16 @@ class LocalRequestSecurityTest(unittest.TestCase):
 
 
 class SettingsBoundaryTest(unittest.TestCase):
+    def test_local_cli_settings_require_desktop_authentication(self) -> None:
+        with (
+            patch.object(server_module.runtime, "DESKTOP_CLI_ALLOWED", True),
+            patch.object(server_module.runtime, "API_ACCESS_TOKEN", ""),
+            patch.object(server_module.runtime, "READONLY_MODE", False),
+        ):
+            for changes in ({"cli_kind": "codex"}, {"cli_path": "/tmp/untrusted"}):
+                with self.assertRaisesRegex(PipelineError, "仅可在谷子学术桌面端"):
+                    _write_settings({"ai": {"translation": changes}})
+
     def test_reader_shortcut_defaults_follow_platform_and_round_trip_allowlist(self) -> None:
         with tempfile.TemporaryDirectory(prefix="my-scholar-reader-shortcuts-") as temp:
             settings_path = Path(temp) / "settings.json"

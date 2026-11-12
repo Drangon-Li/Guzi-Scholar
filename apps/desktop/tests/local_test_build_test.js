@@ -14,7 +14,7 @@ const mainPath = path.join(root, 'electron', 'main.cjs');
 const mainSource = fs.readFileSync(mainPath, 'utf8');
 const badgeSource = fs.readFileSync(path.join(root, 'web', 'test-build.js'), 'utf8');
 
-function loadMain(metadata, directory, development = false) {
+function loadMain(metadata, directory, { isolated = false, source = isolated } = {}) {
   const paths = { appData: directory, userData: path.join(directory, 'production') };
   const calls = [];
   const handlers = new Map();
@@ -23,7 +23,7 @@ function loadMain(metadata, directory, development = false) {
   let startup;
   const app = {
     commandLine: { getSwitchValue: () => '', appendSwitch: () => {}, removeSwitch: () => {} },
-    isPackaged: !development,
+    isPackaged: !source,
     getPath: (key) => paths[key],
     setPath: (key, value) => { paths[key] = value; calls.push(['setPath', key, value]); },
     setName: (value) => calls.push(['setName', value]),
@@ -57,7 +57,7 @@ function loadMain(metadata, directory, development = false) {
     __dirname: path.dirname(mainPath),
     process: {
       platform: 'darwin', arch: 'arm64', getSystemVersion: () => '13.0.0',
-      argv: development ? ['electron', '--guzi-development', `--guzi-dev-root=${path.join(directory, 'isolated-development')}`] : [],
+      argv: isolated ? ['electron', '--guzi-development', `--guzi-dev-root=${path.join(directory, 'isolated-development')}`] : [],
       env: { MY_SCHOLAR_DATA_DIR: path.join(directory, 'production-state'), MY_SCHOLAR_LIBRARY_DIR: path.join(directory, 'production-library') },
     },
     console,
@@ -130,7 +130,7 @@ async function main() {
     assert.strictEqual((await test.handlers.get('my-scholar:install-update')(test.event)).ok, false);
     assert.strictEqual((await test.handlers.get('my-scholar:get-update-state')(test.event)).enabled, false);
     assert.strictEqual(test.counters.updates, 0, 'test build must never query a production manifest');
-    const development = loadMain({}, directory, true);
+    const development = loadMain({}, directory, { isolated: true });
     const developmentRoot = path.join(directory, 'isolated-development');
     assert.strictEqual(development.paths.userData, developmentRoot);
     const developmentStorage = vm.runInContext('storageConfiguration()', development.context);
@@ -143,6 +143,9 @@ async function main() {
     assert.strictEqual(developmentContext.app.channel, 'development');
     assert.strictEqual(developmentContext.app.name, '谷子学术开发版');
     assert.strictEqual((await development.handlers.get('my-scholar:check-for-updates')(development.event)).ok, false);
+    const source = loadMain({}, directory, { source: true });
+    const sourceContext = source.handlers.get('my-scholar:get-startup-context')(source.event);
+    assert.strictEqual((await renderBadge(sourceContext)).elements.get('localTestBuildBadge').textContent, '开发版');
     const beta = loadMain({ version: '0.6.3-beta.1', updater: { enabled: false, channel: 'beta' } }, directory);
     assert.strictEqual(beta.paths.userData, path.join(directory, 'GuziScholar-Beta'));
     assert.strictEqual(vm.runInContext('storageConfiguration().stateDir', beta.context), path.join(directory, 'GuziScholar-Beta', 'state'));

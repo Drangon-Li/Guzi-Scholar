@@ -1,0 +1,816 @@
+body:has(#paper-report-shell.active-view) {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+body:has(#paper-report-shell.active-view) .app-shell {
+  width: 100%;
+  max-width: none;
+  min-height: 0;
+  flex: 1 1 0;
+  padding: 0;
+}
+
+body:has(#paper-report-shell.active-view) .app-header {
+  flex: 0 0 auto;
+}
+
+#paper-report-shell.active-view {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.paper-report-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 7px clamp(10px, 2vw, 32px);
+  border-bottom: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.paper-report-toolbar-actions,
+.paper-report-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.paper-report-toolbar-actions {
+  margin-left: auto;
+  justify-content: flex-end;
+}
+
+#paper-report-shell .action-button,
+.report-knowledge-layout .action-button {
+  padding: 6px 9px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+#paper-report-shell .action-button:hover,
+#paper-report-shell .action-button[aria-expanded="true"],
+.report-knowledge-layout .action-button:hover {
+  border-color: var(--line);
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+}
+
+.paper-report-workspace {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: clip;
+}
+
+.paper-report-scroll {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable both-edges;
+}
+
+.paper-report-article {
+  width: min(100%, 840px);
+  min-height: 100%;
+  margin-inline: auto;
+  padding: clamp(32px, 5.2vw, 78px) clamp(20px, 6vw, 84px) 90px;
+  background: var(--paper);
+}
+
+.paper-report-header {
+  margin: 0 0 28px;
+  padding: 0 0 25px;
+  border-bottom: 1px solid var(--line);
+}
+
+#paper-report-title {
+  margin: 0;
+  font-family: var(--reader-content-font-family);
+  font-size: clamp(26px, 4vw, 41px);
+  line-height: 1.18;
+  letter-spacing: -.025em;
+  text-wrap: balance;
+  overflow-wrap: anywhere;
+}
+
+:is(#paper-report-title, #paper-report-drawer-title, #paper-report-evidence-title, #paper-report-concept-article-title, #report-knowledge-title):focus {
+  outline: none;
+}
+
+.paper-report-coverage {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.paper-report-questions {
+  width: 100%;
+  margin: 0 0 38px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.paper-report-questions th,
+.paper-report-questions td {
+  padding: 13px 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: baseline;
+  text-align: left;
+}
+
+.paper-report-questions tr:first-child :is(th, td) {
+  border-top: 1px solid var(--line);
+}
+
+.paper-report-questions th {
+  width: 105px;
+  padding-right: 14px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.paper-report-section {
+  padding: 24px 0 20px;
+  border-top: 1px solid var(--line);
+}
+
+.paper-report-section h2,
+.paper-report-questions caption {
+  margin: 0 0 13px;
+  color: var(--ink);
+  font-family: var(--app-font);
+  font-size: 17px;
+  font-weight: 700;
+  text-align: left;
+}
+
+.paper-report-paragraph {
+  margin: 0 0 12px;
+  color: var(--ink);
+  font-family: var(--reader-content-font-family);
+  font-size: clamp(16px, 1.55vw, 18px);
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.paper-report-paragraph:last-child {
+  margin-bottom: 0;
+}
+
+.paper-report-kind {
+  display: inline-block;
+  margin-inline-end: .45em;
+  color: var(--muted);
+  font-family: var(--app-font);
+  font-size: .71em;
+  font-weight: 650;
+}
+
+.paper-report-article .copyable-data,
+.paper-report-prose,
+.paper-report-concept-article .copyable-data,
+.paper-report-evidence .copyable-data,
+.paper-report-drawer .copyable-data,
+.report-knowledge-list .copyable-data {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.paper-report-inline {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-dark);
+  font: inherit;
+}
+
+.paper-report-term {
+  text-decoration: underline dotted;
+  text-decoration-color: var(--accent);
+  text-underline-offset: .2em;
+}
+
+.paper-report-inline:hover,
+.paper-report-inline:focus-visible {
+  background: var(--accent-soft);
+}
+
+.paper-report-citation {
+  display: inline-block;
+  margin-inline-start: .35em;
+  padding: 0 .32em;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-family: var(--app-font);
+  font-size: .69em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  vertical-align: .15em;
+  white-space: nowrap;
+}
+
+.paper-report-media {
+  min-width: 0;
+  margin: 14px 0 18px;
+  padding: 10px 0;
+  border-block: 1px solid var(--line);
+  color: var(--text-secondary);
+  white-space: normal;
+}
+
+.paper-report-media-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin-inline: auto;
+  background: #fff;
+}
+
+.paper-report-media-caption {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-top: 8px;
+  color: var(--muted);
+  font: 13px/1.5 var(--app-font);
+}
+
+.paper-report-media-caption .paper-report-media-source {
+  margin: 0;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+.paper-report-media-explanation {
+  margin: 10px 0 2px;
+  padding: 8px 11px;
+  border-inline-start: 2px solid var(--line);
+  color: var(--ink);
+  font: 14px/1.65 var(--app-font);
+}
+
+.paper-report-media-explanation p {
+  margin: 0;
+}
+
+.paper-report-media-explanation .paper-report-media-explanation-label {
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.paper-report-media-explanation-text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.paper-report-equation {
+  overflow-x: auto;
+  color: var(--ink);
+}
+
+.paper-report-equation .katex-display {
+  margin: .4em 0;
+}
+
+.paper-report-equation-source {
+  display: block;
+  padding: 4px 0;
+  font-size: .85em;
+  white-space: pre-wrap;
+}
+
+.paper-report-media-caption .paper-report-status {
+  grid-column: 1 / -1;
+  margin: 4px 0 0;
+}
+
+.paper-report-drawer {
+  --drawer-width: clamp(290px, 29vw, 355px);
+  z-index: 2;
+  display: flex;
+  width: var(--drawer-width);
+  flex: 0 0 auto;
+  flex-direction: column;
+  margin-inline-end: calc(-1 * var(--drawer-width));
+  border-left: 1px solid var(--line);
+  background: var(--paper);
+  visibility: hidden;
+  transition:
+    margin-inline-end var(--motion-panel) var(--motion-ease-out),
+    transform var(--motion-panel) var(--motion-ease-out),
+    box-shadow var(--motion-panel) var(--motion-ease-out),
+    visibility 0s var(--motion-panel);
+}
+
+.paper-report-drawer.is-open {
+  margin-inline-end: 0;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+.paper-report-drawer > header,
+.paper-report-evidence-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.paper-report-drawer > header {
+  flex: 0 0 auto;
+  min-height: 52px;
+  padding: 7px 14px 7px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.paper-report-drawer h2,
+.paper-report-evidence h2,
+.paper-report-historical-source h2 {
+  font-size: 15px;
+}
+
+.paper-report-drawer-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 17px 20px;
+}
+
+.paper-report-muted,
+.paper-report-status {
+  margin: 0 0 11px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.paper-report-status.error {
+  color: light-dark(#a62934, #ffa4a8);
+}
+
+.paper-report-state {
+  padding: 6px 0 24px;
+}
+
+.paper-report-state p,
+.paper-report-draft p {
+  margin: 0 0 11px;
+}
+
+.paper-report-draft {
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  background: var(--soft);
+  font-size: 13px;
+}
+
+.paper-report-editor {
+  display: block;
+  width: 100%;
+  min-height: 76px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--canvas);
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.paper-report-editor:focus-visible,
+.paper-report-form select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.paper-report-chat {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 240px;
+}
+
+.paper-report-chat--discussion {
+  min-height: 0;
+}
+
+.paper-report-chat--discussion > .paper-report-form {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.paper-report-chat-hint {
+  margin: 4px 0 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.paper-report-messages {
+  flex: 1;
+  min-height: 105px;
+  overflow: auto;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.paper-report-chat--discussion > .paper-report-messages {
+  min-height: 4rem;
+}
+
+.paper-report-messages:empty {
+  display: none;
+}
+
+.paper-report-message {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--soft);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.paper-report-message.user {
+  margin-inline-start: 16px;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+}
+
+.paper-report-message small {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.paper-report-chat-quote {
+  min-width: 0;
+  padding: 6px 9px;
+  border-inline-start: 2px solid var(--accent);
+  border-radius: 0 5px 5px 0;
+  background: var(--canvas);
+  color: var(--text-secondary);
+}
+
+.paper-report-chat-quote-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.paper-report-chat-quote-heading small {
+  margin: 0;
+  color: var(--accent-dark);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.paper-report-chat-quote-heading button {
+  width: 24px;
+  height: 24px;
+}
+
+.paper-report-chat-quote blockquote {
+  max-height: 6em;
+  overflow: auto;
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.paper-report-message .paper-report-chat-quote {
+  margin-bottom: 6px;
+}
+
+.paper-report-form {
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  font-size: 13px;
+}
+
+.paper-report-form label {
+  display: grid;
+  gap: 5px;
+}
+
+.paper-report-form select {
+  width: 100%;
+  padding: 7px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--canvas);
+  color: var(--ink);
+  font: inherit;
+}
+
+.paper-report-form .paper-report-checkbox {
+  display: flex;
+  align-items: center;
+}
+
+.paper-report-checkbox input {
+  accent-color: var(--accent-fill);
+}
+
+.paper-report-concept {
+  margin: 0 0 13px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.paper-report-concept h3 {
+  margin: 0 0 6px;
+  font-size: 17px;
+  overflow-wrap: anywhere;
+}
+
+.paper-report-concept p {
+  margin: 0 0 13px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.paper-report-concept-read {
+  width: 100%;
+  margin-block-end: 14px;
+}
+
+.paper-report-concept-read:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  background: color-mix(in srgb, var(--accent-soft) 68%, var(--paper));
+  color: var(--accent-dark);
+  font-weight: 650;
+}
+
+.paper-report-concept-read:not(:disabled):hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.paper-report-concept-article {
+  --concept-reading-inset: clamp(22px, 6vw, 72px);
+  box-sizing: border-box;
+  width: min(850px, calc(100% - 28px));
+  height: min(780px, calc(100dvh - 36px));
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--paper);
+  box-shadow: var(--shadow-window);
+  color: var(--ink);
+}
+
+.paper-report-concept-article[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.paper-report-concept-article::backdrop {
+  background: rgb(10 16 23 / 37%);
+}
+
+.paper-report-concept-article-heading {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px 19px 19px var(--concept-reading-inset);
+  border-bottom: 1px solid var(--line);
+}
+
+.paper-report-concept-article-heading h2 {
+  margin: 0;
+  font-family: var(--reader-content-font-family);
+  font-size: clamp(25px, 3.6vw, 36px);
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.paper-report-concept-article-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 25px var(--concept-reading-inset) 42px;
+}
+
+.paper-report-concept-article section + section {
+  margin-block-start: 30px;
+}
+
+.paper-report-concept-article h3 {
+  margin: 0 0 9px;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.paper-report-concept-article .paper-report-paragraph {
+  font-size: clamp(16px, 1.65vw, 18px);
+}
+
+.paper-report-concept-article button:focus-visible,
+.paper-report-concept-read:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.paper-report-versions {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.paper-report-versions li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.paper-report-versions time {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.paper-report-evidence,
+.paper-report-historical-source {
+  margin: auto;
+  padding: 14px 18px 18px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  box-shadow: var(--shadow-pop);
+  color: var(--ink);
+}
+
+.paper-report-evidence {
+  width: min(465px, calc(100vw - 32px));
+}
+
+.paper-report-evidence::backdrop,
+.paper-report-historical-source::backdrop {
+  background: rgb(10 16 23 / 30%);
+}
+
+.paper-report-evidence blockquote,
+.report-knowledge-entry blockquote {
+  margin: 12px 0 14px;
+  padding: 4px 12px;
+  border-left: 2px solid var(--accent);
+  color: var(--text-secondary);
+  font-family: var(--reader-content-font-family);
+  font-size: 16px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.paper-report-evidence blockquote {
+  max-height: 44vh;
+  overflow: auto;
+}
+
+.paper-report-historical-source {
+  width: min(960px, calc(100vw - 28px));
+  height: 88dvh;
+}
+
+.paper-report-historical-source[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 9px;
+}
+
+.paper-report-historical-frame {
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.report-knowledge-layout {
+  width: min(100%, 820px);
+  margin: 0 auto;
+  padding: 10px clamp(12px, 5vw, 52px) 52px;
+}
+
+.report-knowledge-header {
+  margin-bottom: 25px;
+}
+
+.report-knowledge-header h1 {
+  margin-top: 16px;
+  font-size: clamp(27px, 4vw, 38px);
+}
+
+.report-knowledge-entry {
+  padding: 18px 0 20px;
+  border-top: 1px solid var(--line);
+}
+
+.report-knowledge-entry header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.report-knowledge-entry h2 {
+  font-size: 17px;
+  overflow-wrap: anywhere;
+}
+
+.report-knowledge-entry header span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.report-knowledge-text {
+  margin: 8px 0 12px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.report-knowledge-entry .paper-report-actions button {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+@media (max-width: 850px) {
+  .paper-report-drawer {
+    position: absolute;
+    inset: 0 0 0 auto;
+    width: min(355px, calc(100% - 25px));
+    margin-inline-end: 0;
+    transform: translateX(100%);
+  }
+
+  .paper-report-drawer.is-open {
+    box-shadow: var(--shadow-pop);
+    transform: translateX(0);
+  }
+}
+
+@media (max-width: 520px) {
+  .paper-report-questions th {
+    width: 82px;
+    padding-right: 9px;
+  }
+
+  .paper-report-article {
+    padding-inline: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .paper-report-drawer {
+    transition-property: none;
+  }
+
+  #paper-report-shell *,
+  #report-knowledge-view * {
+    animation-duration: 0s;
+    transition-duration: 0s;
+  }
+}

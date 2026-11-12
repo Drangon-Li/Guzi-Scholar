@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import http.client
 from http.server import ThreadingHTTPServer
@@ -16,6 +17,7 @@ import tempfile
 import threading
 import time
 import tracemalloc
+from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -278,6 +280,18 @@ class StreamingUploadTest(unittest.TestCase):
     def incoming_entries(self) -> list:
         return sorted(path.name for path in self.store.incoming_root.iterdir())
 
+    def request(self, method: str, path: str, payload=None):
+        connection = http.client.HTTPConnection(*self.httpd.server_address, timeout=5)
+        try:
+            body = json.dumps(payload).encode() if payload is not None else None
+            connection.request(method, path, body=body, headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            content_type = response.getheader("Content-Type")
+            result = response.read()
+            return response.status, content_type, json.loads(result) if content_type.startswith("application/json") else result
+        finally:
+            connection.close()
+
     def test_upload_is_byte_exact_and_leaves_no_spool_behind(self) -> None:
         pdf = b"%PDF-1.7\r\n" + os.urandom(3 * 1024 * 1024 + 17) + b"\r\n--" + BOUNDARY.encode() + b"Y\r\n%%EOF"
         filename = "全文 Transformer 综述.pdf"
@@ -290,7 +304,9 @@ class StreamingUploadTest(unittest.TestCase):
         self.assertEqual(job["source_filename"], filename)
         self.assertEqual(self.incoming_entries(), [])
         self.assertFalse(list(Path(job["job_dir"]).glob("request.body")))
-        self.assertEqual(self.conversions.qsize(), 1)
+        self.assertEqual(job["status"], "unparsed")
+        self.assertTrue(self.conversions.empty())
+        self.assertEqual(self.request("GET", payload["job"]["links"]["source"]), (200, "application/pdf", pdf))
 
         # The same connection stays usable, and a re-upload is deduplicated.
         connection.request("GET", "/api/health")
@@ -300,7 +316,82 @@ class StreamingUploadTest(unittest.TestCase):
         again, payload, _ = self.post(multipart(file_part(pdf, filename)), connection)
         self.assertIn(again.status, {200, 202})
         self.assertTrue(payload["deduplicated"])
+        self.assertEqual(payload["job"]["status"], "unparsed")
+        self.assertTrue(self.conversions.empty())
         self.assertEqual(self.incoming_entries(), [])
+
+    def test_only_explicit_parse_is_queued_and_restart_recovers_that_intent(self) -> None:
+        _, incoming, _ = self.post(multipart(file_part(b"%PDF-1.4\nraw")))
+        job = incoming["job"]
+        _, idle, _ = self.post(multipart(file_part(b"%PDF-1.4\nanother")))
+        parse_url = f"/api/jobs/{job['job_id']}/parse"
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            responses = list(executor.map(lambda _: self.request("POST", parse_url, {})[2], range(6)))
+        self.assertEqual({item["status"] for item in responses}, {"queued"})
+        self.assertEqual(self.conversions.get_nowait(), (job["job_id"], "paper.pdf"))
+        self.assertTrue(self.conversions.empty())
+        self.assertIsNotNone(self.store.claim(job["job_id"]))
+
+        restored = JobStore(self.root / "jobs")
+        self.assertEqual(restored.get(idle["job"]["job_id"])["status"], "unparsed")
+        self.assertEqual(restored.get(job["job_id"])["status"], "queued")
+        with patch.object(server, "STORE", restored), patch.object(server.threading, "Thread"):
+            server._start_background_workers()
+        self.assertEqual(self.conversions.get_nowait(), (job["job_id"], "paper.pdf"))
+        self.assertTrue(self.conversions.empty())
+
+    def test_failed_parse_keeps_raw_pdf_and_translation_cache_until_retry_succeeds(self) -> None:
+        original = b"%PDF-1.4\nraw"
+        _, incoming, _ = self.post(multipart(file_part(original)))
+        job = incoming["job"]
+        job_id = job["job_id"]
+        job_dir = Path(self.store.get(job_id)["job_dir"])
+        job_url = f"/api/jobs/{job_id}"
+        parse_url = f"{job_url}/parse"
+        translate_url = f"{job_url}/translate"
+        selection = {"source_kind": "pdf", "text": "A selected passage"}
+        self.assertEqual(self.request("POST", translate_url, {"text": "Structured only"})[0], 409)
+        self.assertEqual(self.request("POST", translate_url, {**selection, "block_id": "b1"})[0], 400)
+        self.assertFalse((job_dir / "document.json").exists())
+
+        profile = {"provider": "cli", "cli_kind": "codex", "model": "test-model", "profile_id": "test-profile"}
+        remote = SimpleNamespace(configured=lambda: False)
+        with (
+            patch.object(server, "resolve_ai_profile", return_value=profile),
+            patch.object(server, "translate_text", return_value={"text": "选中的一段文字"}) as translate,
+            patch.object(server, "_parsing_provider_registry", return_value={"remote-guzi": remote}),
+        ):
+            status, _, translated = self.request("POST", translate_url, selection)
+            self.assertEqual(status, 200, translated)
+            self.assertEqual(translated["result"]["text"], "选中的一段文字")
+            self.assertFalse(translated["result"]["cached"])
+            self.assertIs(translate.call_args.kwargs["profile"], profile)
+            self.assertEqual(self.request("POST", parse_url)[0], 202)
+            with patch.object(server, "process_pdf", side_effect=PipelineError("temporary failure")):
+                server._run_conversion_job(*self.conversions.get_nowait())
+            failed = self.request("GET", job_url)[2]
+            self.assertEqual(failed["status"], "failed")
+            self.assertEqual(self.request("GET", failed["links"]["source"])[2], original)
+            self.assertEqual(self.request("POST", parse_url)[0], 202)
+            self.assertEqual(JobStore(self.root / "jobs").get(job_id)["status"], "queued")
+
+            def parse(source, destination, **kwargs):
+                self.assertEqual(source.read_bytes(), original)
+                (destination / "document.html").write_text("<p>Parsed document</p>", encoding="utf-8")
+                (destination / "document.json").write_text('{"pages":[]}', encoding="utf-8")
+                return {"source": {"filename": kwargs["source_name"]}}
+
+            with patch.object(server, "process_pdf", side_effect=parse):
+                server._run_conversion_job(*self.conversions.get_nowait())
+            self.assertFalse((job_dir / "error.json").exists())
+            completed = self.request("GET", job_url)[2]
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(self.request("GET", completed["links"]["source"])[2], original)
+            self.assertEqual(self.request("GET", completed["links"]["html"])[2], b"<p>Parsed document</p>")
+            self.assertEqual(self.request("POST", parse_url)[0], 200)
+            self.assertTrue(self.conversions.empty())
+            self.assertTrue(self.request("POST", translate_url, selection)[2]["result"]["cached"])
+            translate.assert_called_once()
 
     def test_rejected_uploads_clean_up_their_spool(self) -> None:
         cases = [

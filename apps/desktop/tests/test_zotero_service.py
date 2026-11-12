@@ -124,16 +124,21 @@ class ServerImportTest(unittest.TestCase):
     def import_one(self):
         return server._import_zotero_document("user:0", request()["items"][0], "")
 
-    def test_stages_before_queue_and_merges_after_conversion_without_duplicate_content(self):
+    def test_stages_without_queueing_and_merges_after_explicit_parse_without_duplicate_content(self):
         result = self.import_one()
         self.assertEqual(result["status"], "imported")
         self.assertTrue(result["pending"])
+        self.assertEqual(result["parse_status"], "unparsed")
         record = self.store.get(result["job_id"])
         directory = Path(record["job_dir"])
         self.assertTrue((directory / "zotero-import.json").is_file())
         self.assertFalse((directory / "notes.md").exists())
         self.assertEqual(self.library.get_metadata(record["job_id"])["fields"]["title"], "Imported title")
-        self.queue.put.assert_called_once()
+        self.queue.put.assert_not_called()
+        handler = object.__new__(server.ScholarHandler)
+        handler._send_json = lambda *_: None
+        handler._start_parse(record["job_id"])
+        self.queue.put.assert_called_once_with((record["job_id"], "paper.pdf"))
         self.store.update(record["job_id"], status="completed")
         (directory / "document.json").write_text(json.dumps({"pages": []}))
         merged = server._apply_zotero_pending(record["job_id"])
@@ -170,7 +175,7 @@ class ServerImportTest(unittest.TestCase):
         self.assertEqual(len(self.store.list()), 1)
         self.assertEqual(list(self.store.incoming_root.iterdir()), [])
 
-    def test_reimport_requeues_failed_conversion_using_the_same_job(self):
+    def test_reimport_preserves_failed_conversion_until_explicit_retry(self):
         first = self.import_one()
         self.store.update(first["job_id"], status="failed", error="SSH 隧道连接超时。")
         directory = Path(self.store.get(first["job_id"])["job_dir"])
@@ -178,20 +183,24 @@ class ServerImportTest(unittest.TestCase):
         with patch.object(server, "_zotero_imports") as manager:
             manager.return_value.get.return_value = {"id": "b" * 32, "status": "completed", "results": [first]}
             failed = server._zotero_batch_status("b" * 32)["results"][0]
-        self.assertIn("从 Zotero 导入", failed["error"])
-        self.assertNotIn("文献库中重试", failed["error"])
+        self.assertIn("在文献阅读页重试", failed["error"])
         self.queue.reset_mock()
         repeated = self.import_one()
         self.assertEqual(repeated["job_id"], first["job_id"])
         self.assertEqual(repeated["status"], "existing")
         record = self.store.get(first["job_id"])
-        self.assertEqual(record["status"], "queued")
-        self.assertEqual(record["error"], "")
-        self.assertFalse((directory / "error.json").exists())
+        self.assertEqual(record["status"], "failed")
+        self.assertEqual(repeated["parse_status"], "failed")
+        self.assertTrue((directory / "error.json").exists())
         self.assertEqual(len(self.store.list()), 1)
-        self.queue.put.assert_called_once_with((first["job_id"], "paper.pdf"))
+        self.queue.put.assert_not_called()
         self.assertTrue(repeated["pending"])
         self.assertNotIn("error", repeated)
+        handler = object.__new__(server.ScholarHandler)
+        handler._send_json = lambda *_: None
+        handler._start_parse(first["job_id"])
+        self.queue.put.assert_called_once_with((first["job_id"], "paper.pdf"))
+        self.assertEqual(self.store.get(first["job_id"])["status"], "queued")
 
     def test_same_pdf_from_another_source_preserves_both_sources_and_notes(self):
         first = self.import_one()

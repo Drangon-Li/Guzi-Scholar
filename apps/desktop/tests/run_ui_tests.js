@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('fs');
+const { randomBytes } = require('crypto');
 const http = require('http');
 const net = require('net');
 const os = require('os');
@@ -50,7 +51,7 @@ function freePort() {
   });
 }
 
-async function waitForHealth(port, timeoutMs = 60000) {
+async function waitForHealth(port, apiToken, timeoutMs = 60000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const healthy = await new Promise((resolve) => {
@@ -61,7 +62,10 @@ async function waitForHealth(port, timeoutMs = 60000) {
         request.destroy();
         resolve(value);
       };
-      const request = http.get({ host: '127.0.0.1', port, path: '/api/health', agent: false, timeout: Math.min(2000, deadline - Date.now()) }, (response) => {
+      const request = http.get({
+        host: '127.0.0.1', port, path: '/api/health', agent: false, timeout: Math.min(2000, deadline - Date.now()),
+        headers: apiToken ? { 'X-My-Scholar-Api-Token': apiToken } : {},
+      }, (response) => {
         response.resume();
         response.once('end', () => finish(response.statusCode === 200));
         response.once('error', () => finish(false));
@@ -84,6 +88,7 @@ async function waitForHealth(port, timeoutMs = 60000) {
 async function runManaged(script, meta) {
   const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'my-scholar-ui-'));
   const logPath = path.join(dataRoot, 'server.log');
+  const apiToken = meta.desktopCli ? randomBytes(32).toString('hex') : '';
   const env = {
     ...process.env,
     MY_SCHOLAR_PROJECT_ROOT: desktopRoot,
@@ -93,6 +98,8 @@ async function runManaged(script, meta) {
     MY_SCHOLAR_SETTINGS_FILE: path.join(dataRoot, 'settings.json'),
     MY_SCHOLAR_DEVELOPER_TOKENS_FILE: path.join(dataRoot, 'developer.tokens.json'),
     MY_SCHOLAR_READONLY: meta.readonly ? '1' : '0',
+    MY_SCHOLAR_DESKTOP_CLI: meta.desktopCli ? '1' : '',
+    MY_SCHOLAR_API_TOKEN: apiToken,
     MY_SCHOLAR_LANDING_FILE: '',
     MY_SCHOLAR_SHELL: 'reference',
     ...(script === 'plugin_market_smoke.js' ? { MY_SCHOLAR_PLUGIN_ADMISSION_TOKEN: 'fixture-admission-token' } : {}),
@@ -116,7 +123,7 @@ async function runManaged(script, meta) {
       windowsHide: true,
     });
     fs.closeSync(log);
-    await waitForHealth(port);
+    await waitForHealth(port, apiToken);
 
     const result = spawnSync(process.execPath, [path.join(__dirname, script), `http://127.0.0.1:${port}`], {
       cwd: desktopRoot,

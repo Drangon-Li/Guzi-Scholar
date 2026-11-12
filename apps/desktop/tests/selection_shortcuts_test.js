@@ -28,6 +28,7 @@ function harness() {
     normalizeAnnotationColor: (value) => value, escapeHTML: (value) => value,
     activeSelectionActionTarget: () => target,
     readerShortcutReady: () => ready,
+    nativePdfMount: null,
     isEditableAppSurface: (node) => Boolean(node?.editable),
     saveAnnotation: (kind, options) => {
       calls.push([kind, JSON.parse(JSON.stringify(options))]);
@@ -116,6 +117,8 @@ function event(key, changes = {}) {
     state: { activeJob: { job_id: 'job' }, selection: savedSelection, annotations: [] },
     readerMount: { jobId: 'job', annotations: [] },
     frameDocument: () => ({ querySelector: () => ({}) }),
+    annotationDocument: () => saveContext.frameDocument(),
+    currentAnnotationMount: () => saveContext.readerMount,
     cssEscape: (value) => value, rangeAtOffsets: () => ({}), canonicalBlockText: () => 'Stored quote.',
     readerMountMatches: () => true, readerMountIsCurrent: () => true,
     jsonOptions: (value) => value, annotationColorFor: () => '#f59e0b',

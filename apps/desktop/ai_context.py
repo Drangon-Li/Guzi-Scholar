@@ -8,6 +8,8 @@ from ai_capabilities import get_model_capabilities, normalize_ai_options, resolv
 
 DEFAULT_CONTEXT_WINDOW = 32768
 IMAGE_TOKEN_ESTIMATE = 4096
+MAX_SOURCE_IMAGES = 4
+MAX_SOURCE_IMAGE_BYTES = 2 * 1024 * 1024
 
 
 def estimate_tokens(content: Any) -> int:

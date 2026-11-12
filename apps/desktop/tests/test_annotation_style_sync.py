@@ -55,7 +55,10 @@ class AnnotationStyleSyncTest(unittest.TestCase):
         for patcher in (
             patch.object(server, "SETTINGS_PATH", self.settings),
             patch.object(server, "LIBRARY_ROOT", self.library),
-            patch.object(server, "STORE", SimpleNamespace(list=lambda: self.jobs, get=lambda _job_id: {})),
+            patch.object(server, "STORE", SimpleNamespace(
+                list=lambda: self.jobs, get=lambda _job_id: {}, path=lambda _job_id: None,
+                resolve_id=lambda job_id: job_id,
+            )),
             patch.object(server, "ai_services", return_value={}),
             patch.object(server, "_ai_status_history", return_value=[]),
             patch.object(server, "ANNOTATION_STYLE_RECOVERY_REQUIRED", False),

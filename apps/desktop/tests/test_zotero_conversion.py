@@ -27,6 +27,7 @@ class ZoteroConversionHooksTest(unittest.TestCase):
         self.record = self.store.create('fixture.pdf', 0)
         self.job_id = self.record['job_id']
         self.directory = Path(self.record['job_dir'])
+        (self.directory / 'upload.pdf').write_bytes(b'%PDF-1.4')
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         self.stack.enter_context(patch.object(server, 'STORE', self.store))

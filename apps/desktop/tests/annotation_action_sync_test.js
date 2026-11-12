@@ -22,6 +22,7 @@ const context = vm.createContext({
   state: { activeJob: { job_id: 'one' }, annotations: first.annotations }, readerMount: first,
   window: { MyScholarAnnotationOperations: annotationOperations },
   readerMounts: new Map([['one', first], ['two', second]]),
+  currentAnnotationMount: () => context.readerMount,
   readerMountIsCurrent: (mount) => context.readerMounts.get(mount.jobId) === mount,
   readerMountMatches: (mount) => context.readerMount === mount && context.state.activeJob?.job_id === mount.jobId,
   isAIAnnotation: (annotation) => annotation.source === 'ai',

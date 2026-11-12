@@ -4,7 +4,8 @@ const os = require('os');
 const path = require('path');
 
 const POINTER_VERSION = 1;
-const LIBRARY_FILES = new Set(['library.json', 'library.json.bak', 'vocabulary.json', 'vocabulary.json.bak']);
+const PERSONAL_DATA_FILES = new Set(['vocabulary.json', 'vocabulary.json.bak', 'report-knowledge.json']);
+const LIBRARY_FILES = ['library.json', 'library.json.bak', ...PERSONAL_DATA_FILES];
 const DESKTOP_STATE_FILES = ['settings.json', 'ai-status-history.json', 'account.json'];
 
 function expandHome(value) {
@@ -183,7 +184,7 @@ async function inspectLibraryDirectory(directory) {
     return { path: root, exists: true, valid: false, empty: false, itemCount: 0, jobCount, updatedAt: '', error: 'library.json 结构不受支持，未自动切换。' };
   }
   const itemCount = Array.isArray(items) ? items.length : Object.keys(items).length;
-  const hasPersonalData = (await fs.promises.readdir(root)).some((name) => name === 'vocabulary.json' || name === 'vocabulary.json.bak' || name === 'plugin-data');
+  const hasPersonalData = (await fs.promises.readdir(root)).some((name) => PERSONAL_DATA_FILES.has(name) || name === 'plugin-data');
   return {
     path: root,
     exists: true,

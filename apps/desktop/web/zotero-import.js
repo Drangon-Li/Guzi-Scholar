@@ -31,28 +31,35 @@
     else if (result.warnings) parts.push(String(result.warnings));
     if (result.notes_count > 0) parts.push(`${result.notes_count} 条笔记`);
     if (result.annotations_count > 0) parts.push(`${result.annotations_count} 条标注`);
-    if (result.pending && !result.error) parts.push('正文正在解析；附属笔记与标注将在解析完成后呈现');
+    if (result.parse_status === 'unparsed') parts.push('可打开原始 PDF，笔记与标注将在解析完成后呈现');
+    else if (awaitingConversion(result)) parts.push('正文正在解析，笔记与标注将在解析完成后呈现');
     if (result.unanchored_count > 0) parts.push(`${result.unanchored_count} 条标注未能唯一定位，已保留笔记与页码`);
     return parts.join(' · ');
   }
 
   function batchSummary(batch) {
     if (batch.status === 'running') return `正在复制 PDF · ${batch.completed || 0}/${batch.total || 0} 已处理`;
-    const counts = { imported: 0, existing: 0, failed: 0, skipped: 0, pending: 0 };
+    const counts = { imported: 0, existing: 0, failed: 0, skipped: 0, pending: 0, unparsed: 0 };
     for (const result of batch.results || []) {
       if (Object.hasOwn(counts, result.status)) counts[result.status] += 1;
-      if (result.pending && !result.error) counts.pending += 1;
+      if (result.parse_status === 'unparsed') counts.unparsed += 1;
+      else if (awaitingConversion(result)) counts.pending += 1;
     }
     const parts = [batch.status === 'failed' ? '批次已停止' : 'PDF 导入复制结束'];
     for (const [key, label] of [['imported', '新增'], ['existing', '已有'], ['failed', '失败'], ['skipped', '跳过']]) {
       if (counts[key]) parts.push(`${label} ${counts[key]} 篇`);
     }
     if (counts.pending) parts.push(`${counts.pending} 篇正文仍在解析`);
+    if (counts.unparsed) parts.push(`${counts.unparsed} 篇可直接阅读原始 PDF`);
     return parts.join(' · ');
   }
 
+  function awaitingConversion(result) {
+    return result.pending === true && !result.error && result.parse_status !== 'unparsed';
+  }
+
   function shouldPollBatch(batch) {
-    return batch?.status === 'running' || (batch?.results || []).some((result) => result.pending === true && !result.error);
+    return batch?.status === 'running' || (batch?.results || []).some(awaitingConversion);
   }
 
   function buildImportBody(library, selected, folderId = '') {
@@ -176,7 +183,12 @@
       $('#zotero-results').innerHTML = rows;
       resultNode('#zotero-result-summary').textContent = batchSummary(batch);
       resultNode('#zotero-result-details').innerHTML = rows;
-      resultNode('#zotero-result-explanation').textContent = (batch.results || []).some((result) => result.pending && !result.error) ? 'PDF 复制已完成；正文仍在解析，笔记和标注将在解析完成后呈现。可以关闭此窗口，解析会继续。' : '请查看每篇文献的成功、失败或跳过详情。';
+      const results = batch.results || [];
+      resultNode('#zotero-result-explanation').textContent = results.some((result) => result.parse_status === 'unparsed')
+        ? '可以在文献库打开原始 PDF。需要阅读解析版或查看 Zotero 笔记和标注时，请从阅读页发起解析。'
+        : results.some(awaitingConversion)
+          ? '正文仍在解析，笔记和标注将在解析完成后呈现。可以关闭此窗口，解析会继续。'
+          : '请查看每篇文献的成功、失败或跳过详情。';
       if (batch.error) status(String(batch.error), true);
       syncControls();
     }

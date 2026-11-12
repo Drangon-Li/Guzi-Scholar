@@ -88,7 +88,7 @@ def _unknown_capabilities() -> dict[str, Any]:
     return {"context_window": None, "max_input_tokens": None, "max_output_tokens": None,
             "reasoning_efforts": None, "thinking_supported": None, "thinking_required": None,
             "thinking_budget_supported": None, "thinking_budget_min": None, "thinking_budget_max": None,
-            "temperature_supported": None, "source": "unknown", "matched_model": None}
+            "temperature_supported": None, "vision_supported": None, "source": "unknown", "matched_model": None}
 
 
 def _mapping(value: Any) -> Mapping[str, Any]:
@@ -125,6 +125,12 @@ def _metadata_capabilities(model: Mapping[str, Any]) -> dict[str, Any]:
     info, caps = _mapping(model.get("model_info")), _mapping(model.get("capabilities"))
     limits = _mapping(model.get("limit"))
     sources = [model, caps, info]
+    modalities = _mapping(model.get("modalities")).get("input", _mapping(model.get("architecture")).get("input_modalities"))
+    vision = _supported(model.get("vision_supported", caps.get("image_input", caps.get("vision"))))
+    if vision is None and isinstance(modalities, list):
+        vision = "image" in modalities
+    if vision is not None:
+        result["vision_supported"] = vision
     aliases = {
         "context_window": ("context_window", "context_length", "max_context_length", "max_sequence_length"),
         "max_input_tokens": ("max_input_tokens", "input_token_limit", "max_input_length"),
@@ -283,6 +289,9 @@ def _cache_key(profile: Mapping[str, Any]) -> tuple[str, str, str, str]:
 
 def get_model_capabilities(profile: Mapping[str, Any]) -> dict[str, Any]:
     """Read known limits locally; a context budget never changes discovered limits."""
+    if profile.get("cli_kind"):
+        return {**_unknown_capabilities(), "source": "cli", "thinking_budget_supported": False,
+                "temperature_supported": False, "vision_supported": False}
     key = _cache_key(profile)
     with _lock:
         cached = _capability_cache.get(key)
@@ -371,7 +380,7 @@ def _refresh_catalog(timeout: float) -> None:
         selected = {}
         for model_id, record in models.items():
             if isinstance(record, Mapping) and isinstance(model_id, str) and len(model_id) <= MAX_MODEL_ID_CHARS:
-                selected[model_id] = {key: record[key] for key in ("id", "limit", "reasoning", "reasoning_options", "temperature", "capabilities") if key in record}
+                selected[model_id] = {key: record[key] for key in ("id", "limit", "reasoning", "reasoning_options", "temperature", "capabilities", "modalities") if key in record}
                 count += 1
                 if count >= 20000:
                     break
