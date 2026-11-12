@@ -11,8 +11,9 @@ import re
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
 
+import runtime
 from ai_capabilities import get_model_capabilities, normalize_ai_options
-from config import AI_TRANSLATION_MODES, DEFAULT_TRANSLATION_MODE, TRANSLATION_PROVIDERS
+from config import AI_TRANSLATION_MODES, CLI_PROFILE_FIELDS, DEFAULT_TRANSLATION_MODE, TRANSLATION_PROVIDERS, normalize_cli_profile
 from layout_pipeline import LayoutPipelineError, normalize_mineru_backend, normalize_mineru_server_url
 from pipeline import PipelineError
 from runtime import LOOPBACK_HOSTS
@@ -166,7 +167,7 @@ AI_PROFILE_LIMITS = {"base_url": 2048, "model": 256, "api_key": 4096}
 
 
 def _normalize_ai_profile(value: Any, current: Any = None, *, service: str = "chat") -> Dict[str, Any]:
-    """Validate one user-owned OpenAI-compatible profile.
+    """Validate one user-owned AI profile.
 
     API keys are write-only from the UI: an empty key keeps the existing one,
     while ``clear_api_key`` explicitly removes it. This avoids echoing secrets
@@ -181,6 +182,7 @@ def _normalize_ai_profile(value: Any, current: Any = None, *, service: str = "ch
     }
     try:
         result.update(normalize_ai_options({**existing, **incoming}, strict=True))
+        result.update(normalize_cli_profile(incoming, existing))
     except ValueError as exc:
         raise PipelineError(str(exc)) from exc
     if service == "translation":
@@ -236,7 +238,9 @@ def _normalize_ai_settings(value: Any, current: Any = None) -> Dict[str, Dict[st
     }
 
 
-def _public_ai_settings(value: Any) -> Dict[str, Dict[str, Any]]:
+def _public_ai_settings(value: Any, *, include_cli: Optional[bool] = None) -> Dict[str, Dict[str, Any]]:
+    if include_cli is None:
+        include_cli = runtime.desktop_cli_available()
     profiles = _normalize_ai_settings(value)
     return {
         service: {
@@ -244,7 +248,8 @@ def _public_ai_settings(value: Any) -> Dict[str, Dict[str, Any]]:
             "model": profile["model"],
             "api_key_configured": bool(profile["api_key"]),
             **normalize_ai_options(profile),
-            "capabilities": get_model_capabilities(profile),
+            "capabilities": get_model_capabilities(profile if include_cli else {**profile, "cli_kind": ""}),
+            **({field: profile[field] for field in CLI_PROFILE_FIELDS} if include_cli and profile.get("cli_kind") else {}),
             **({
                 "mode": profile["mode"], "provider": profile["provider"],
                 "source_language": profile["source_language"], "target_language": profile["target_language"],

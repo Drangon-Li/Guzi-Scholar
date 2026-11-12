@@ -1148,7 +1148,7 @@ let page;
   }
   const assistantTokens = await page.evaluate(() => {
     const body = getComputedStyle(document.body);
-    const toolbar = getComputedStyle(document.querySelector('.action-button'));
+    const toolbar = getComputedStyle(document.querySelector('#full-translate-button'));
     return { toolbarSize: parseFloat(toolbar.fontSize), appFont: body.fontFamily };
   });
   const normalizedAppFont = assistantTokens.appFont.replace(/["']/gu, '').replace(/\s+/gu, '').toLowerCase();

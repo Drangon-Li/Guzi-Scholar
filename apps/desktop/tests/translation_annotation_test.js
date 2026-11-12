@@ -41,6 +41,8 @@ const functions = [
         isAIAnnotation: () => false, normalizeHighlightCategory: () => 'method', applyAnnotationColor() {}, applyAnnotationTheme() {},
         scheduleNoteHoverOpen() {}, cancelNoteHoverOpen() {}, scheduleNoteHoverClose() {},
         readerMountMatches: () => true, readerMountIsCurrent: () => true, jsonOptions: (value) => value, annotationColorFor: () => '#ffcc00',
+        currentAnnotationMount: () => window.readerMount,
+        annotationDocument: () => document,
         api: async (_url, value) => {
           window.savedPayload = value;
           const annotation = { ...value, id: 'saved' };

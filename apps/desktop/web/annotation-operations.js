@@ -65,7 +65,11 @@
       mounts.forEach((mount) => {
         mount.annotations = mount.annotations.map((annotation) => applyStyleFields(annotation, sync.updates, revision));
       });
-      state.annotations = getCurrentMount()?.annotations || state.annotations.map((annotation) => applyStyleFields(annotation, sync.updates, revision));
+      const active = getCurrentMount();
+      if (active && mounts.get(active.jobId) !== active) {
+        active.annotations = active.annotations.map((annotation) => applyStyleFields(annotation, sync.updates, revision));
+      }
+      state.annotations = active?.annotations || state.annotations.map((annotation) => applyStyleFields(annotation, sync.updates, revision));
       return true;
     }
 

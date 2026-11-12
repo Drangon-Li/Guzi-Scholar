@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Mapping, Optional
 
 from ai_capabilities import normalize_ai_options
@@ -36,6 +36,8 @@ AI_TRANSLATION_MODES = ("qwen-mt", "chat")
 DEFAULT_TRANSLATION_MODE = "qwen-mt"
 TRANSLATION_PROVIDERS = ("openai-compatible", "volcengine", "deepl")
 MACHINE_TRANSLATION_FORMAT_VERSION = "local-format-v1"
+CLI_PROFILE_FIELDS = ("cli_kind", "cli_path", "cli_model", "cli_args")
+CLI_KINDS = ("codex", "claude", "custom")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -76,9 +78,56 @@ def _profile_id(base_url: str, model: str, mode: str = "") -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
+def normalize_cli_profile(value: Mapping[str, Any], current: Optional[Mapping[str, Any]] = None) -> dict[str, Any]:
+    existing = current if current is not None else {}
+    kind = value.get("cli_kind", existing.get("cli_kind", ""))
+    if kind == "":
+        return {}
+    if kind not in CLI_KINDS:
+        raise ValueError("本地 CLI 类型无效。")
+    defaults = existing if kind == existing.get("cli_kind") else {}
+    path = value.get("cli_path", defaults.get("cli_path", ""))
+    if not isinstance(path, str) or len(path) > 4096 or "\x00" in path:
+        raise ValueError("本地 CLI 可执行文件路径无效。")
+    path = path.strip()
+    if path and not (Path(path).is_absolute() or PureWindowsPath(path).is_absolute() or path.startswith(("~/", "~\\"))):
+        raise ValueError("本地 CLI 可执行文件必须使用绝对路径或 ~/ 路径。")
+    if kind == "custom" and not path:
+        raise ValueError("请为自定义 CLI 填写可执行文件路径。")
+    model = value.get("cli_model", defaults.get("cli_model", ""))
+    if not isinstance(model, str) or len(model) > 256 or "\x00" in model:
+        raise ValueError("CLI 模型名称无效。")
+    if kind == "custom" and model.strip():
+        raise ValueError("CLI 模型只适用于 Codex 和 Claude Code。")
+    args = value.get("cli_args", defaults.get("cli_args", []))
+    if (not isinstance(args, list) or (kind != "custom" and args)
+            or any(not isinstance(arg, str) or "\x00" in arg for arg in args)):
+        raise ValueError("只有自定义 CLI 可填写参数，参数必须是字符串列表。")
+    return {"cli_kind": kind, "cli_path": path, "cli_model": model.strip(), "cli_args": list(args)}
+
+
+def cli_context_options(value: Mapping[str, Any], *, strict: bool = False) -> dict[str, Any]:
+    return normalize_ai_options({"context_window": value.get("context_window", 0)}, strict=strict)
+
+
 def _normalize_profile(value: Any, *, service: str = "chat") -> dict[str, Any]:
     if not isinstance(value, Mapping):
         value = {}
+    cli = normalize_cli_profile(value)
+    if cli:
+        result = {
+            **cli, "base_url": "", "api_key": "", "model": cli["cli_model"],
+            **cli_context_options(value),
+        }
+        if service == "translation":
+            result.update(
+                provider="cli", mode="chat",
+                source_language=str(value.get("source_language") or "auto").strip(),
+                target_language=str(value.get("target_language") or "zh").strip(),
+            )
+        identity = json.dumps(["cli", result], sort_keys=True)
+        result["profile_id"] = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        return result
     base_url = str(value.get("base_url", "") or "").strip().rstrip("/")
     api_key = str(value.get("api_key", "") or "").strip()
     model = str(value.get("model", "") or "").strip()
@@ -177,6 +226,7 @@ __all__ = [
     "AI_GATEWAY_URL_ENV",
     "AI_SERVICES",
     "AI_TRANSLATION_MODES",
+    "CLI_PROFILE_FIELDS",
     "DEFAULT_TRANSLATION_MODE",
     "DEVELOPER_TOKENS_FILE_ENV",
     "DEVELOPER_TOKENS_PATH",

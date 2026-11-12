@@ -43,11 +43,12 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import runtime
+import cli_adapter
 from annotation_style_sync import AnnotationStyleRecoveryRequiredError, AnnotationStyleSyncError, changed_action_fields, commit_style_sync, recover_pending_transactions
 from ai import TranslationQualityError, auto_highlights, chat as ai_chat, chat_stream as ai_chat_stream, chat_context_info, reference_quick_read, review_tables, services as ai_services, status as ai_status, test_connections as ai_test_connections, translate_text, translate_text_stream, translation_profile_id, validate_translation_segments
 from ai_capabilities import discover_models, normalize_ai_options
 from bibliography import is_fragmented_metadata_text, retrieve_bibliographic_metadata, retrieve_reference_evidence
-from config import DEFAULT_TRANSLATION_MODE, resolve_ai_profile
+from config import CLI_PROFILE_FIELDS, DEFAULT_TRANSLATION_MODE, resolve_ai_profile
 from ai import test_connection as ai_test_connection, translation_target_language
 from ai import _safe_connection_error
 from content_store import MAX_NOTE_ASSET_BYTES, _active_conversion_root, _atomic_temp_path, _atomic_write_text, _ensure_content_layout, _normalize_media_layout_items, _note_image_type, _read_media_layout, _store_note_asset, _sync_content_file, _translation_key, _translation_records, _translation_records_need_persist, _write_media_layout, _write_translation_records
@@ -64,7 +65,7 @@ from data_root_lock import DataRootLock
 from keyed_locks import KeyedLock, KeyedLocks
 from multipart_form import _multipart_parts, _parse_multipart_form, _spool_request_body, _spooled_body
 from settings_schema import AI_PROFILE_NAMES, _annotation_actions, _annotation_colors, _appearance_settings, _chat_options, _normalize_ai_profile, _normalize_ai_settings, _normalize_ai_status_record, _parsing_settings, _public_ai_settings, _setting_bool, _setting_color
-from job_store import JOB_ID_RE, RENDER_GENERATION_RE, JobStore, ReflowCancelledError, ReflowConflictError, _read_json_file, set_artifact_migrator
+from job_store import JOB_ID_RE, RENDER_GENERATION_RE, JobStore, ParseConflictError, ReflowCancelledError, ReflowConflictError, _read_json_file, original_pdf_path, set_artifact_migrator
 from library_store import LibraryStore, LibraryValidationError
 from vocabulary_store import VocabularyStore, VocabularyValidationError, source_snapshot
 from mcp_access import MCPAccess
@@ -73,6 +74,9 @@ from vocabulary_ai import explain as explain_vocabulary
 from layout_pipeline import MathRenderer, mineru_worker_advice
 from parsing_providers import ProviderError, ParsingRequest, create_default_registry
 from pipeline import PipelineError, process_pdf
+from report_knowledge import REPORT_KNOWLEDGE_STATUSES, ReportKnowledgeStore
+import report_concept_article
+import report_service
 from runtime import LOOPBACK_HOSTS, METADATA_PENDING, METADATA_STATE_LOCK
 from time_utils import utc_now
 from zotero_import import ZoteroClient, ZoteroError
@@ -90,6 +94,8 @@ MAX_UPLOAD_BYTES = int(os.environ.get("MY_SCHOLAR_MAX_UPLOAD_BYTES", str(100 * 1
 MAX_CHAT_IMAGE_BYTES = 5 * 1024 * 1024
 FILE_STREAM_CHUNK_BYTES = 256 * 1024
 NOTE_ASSET_PATH_RE = re.compile(r"^content/notes/assets/[a-f0-9]{64}\.(?:png|jpg|webp|gif)$")
+REPORT_PATH = r"/api/jobs/([a-f0-9]{12,40})/report"
+REPORT_CONCEPT_ARTICLE_PATH = REPORT_PATH + r"/concepts/([a-f0-9]{32})/article"
 SETTINGS_PATH = DATA_ROOT / "settings.json"
 AI_STATUS_HISTORY_PATH = DATA_ROOT / "ai-status-history.json"
 AI_STATUS_HISTORY_LIMIT = 100
@@ -166,7 +172,8 @@ def _job_mutations(job_ids: Any):
 def _locked_job_method(method: Any) -> Any:
     @wraps(method)
     def wrapped(self: Any, job_id: str, *args: Any, **kwargs: Any) -> Any:
-        with _job_mutation(job_id):
+        canonical_id = STORE.resolve_id(job_id) if STORE is not None else job_id
+        with _job_mutation(canonical_id):
             return method(self, job_id, *args, **kwargs)
     return wrapped
 
@@ -343,6 +350,19 @@ def _annotation_payload(annotations: list, **fields: Any) -> Dict[str, Any]:
     return {"annotations": annotations, "annotation_style_revision": int(_stored_settings().get("annotation_style_revision", 0)), **fields}
 
 
+def _validate_pdf_annotation_anchor(page: Any, rects: Any) -> None:
+    if type(page) is not int or page < 1:
+        raise PipelineError("原始 PDF 标注需要有效页码。")
+    if not isinstance(rects, list) or not 1 <= len(rects) <= 256:
+        raise PipelineError("原始 PDF 标注需要 1 到 256 个选区矩形。")
+    for rect in rects:
+        if not isinstance(rect, list) or len(rect) != 4 or any(type(value) not in (int, float) for value in rect):
+            raise PipelineError("原始 PDF 标注的选区坐标无效。")
+        left, top, right, bottom = rect
+        if not (0 <= left < right <= 1 and 0 <= top < bottom <= 1):
+            raise PipelineError("原始 PDF 标注的选区坐标无效。")
+
+
 def _persist_settings(data: Dict[str, Any]) -> None:
     _assert_annotation_style_writable()
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -371,6 +391,8 @@ def _copy_ai_profile(source: str, target: str) -> Dict[str, Any]:
         current = _stored_settings()
         profiles = _normalize_ai_settings(current.get("ai"), current.get("ai"))
         source_profile = profiles[source_name]
+        if source_profile.get("cli_kind") or profiles[target_name].get("cli_kind"):
+            raise PipelineError("请分别为翻译和文章助手选择本机 CLI。")
         if source_name == "translation" and source_profile.get("provider") != "openai-compatible":
             raise PipelineError("专用机器翻译配置不能与文章助手复用；请分别配置。")
         if not source_profile["base_url"] or not source_profile["model"]:
@@ -434,7 +456,7 @@ def _public_settings() -> Dict[str, Any]:
                 shortcuts[key] = shortcut_defaults[key]
     return {
         "ai_services": ai_services(),
-        "ai": _public_ai_settings(data.get("ai")),
+        "ai": _public_ai_settings(data.get("ai"), include_cli=runtime.desktop_cli_available()),
         "ai_status_history": _ai_status_history(),
         "shortcuts": shortcuts,
         "highlight_color": _setting_color(data.get("highlight_color")),
@@ -456,6 +478,11 @@ def _write_settings(data: Dict[str, Any]) -> Dict[str, Any]:
     global ANNOTATION_STYLE_RECOVERY_REQUIRED
     if runtime.READONLY_MODE:
         raise PipelineError("只读演示模式，暂不支持修改。")
+    incoming_ai = data.get("ai")
+    if isinstance(incoming_ai, dict) and not runtime.desktop_cli_available():
+        for profile in incoming_ai.values():
+            if isinstance(profile, dict) and any(field in profile for field in CLI_PROFILE_FIELDS):
+                raise PipelineError("本机 CLI 配置仅可在谷子学术桌面端修改。")
     forbidden = {"base_url", "model", "api_key", "server_preset", "translation", "chat"}
     blocked = sorted(forbidden.intersection(data))
     if blocked:
@@ -746,10 +773,8 @@ def _import_zotero_document(library: str, item: Dict[str, str], folder_id: str) 
         if record is not None and record.get("source_sha256") != pdf["sha256"]:
             return {**item, "title": package["title"], "status": "skipped", "job_id": str(record["job_id"]),
                     "pending": False, "error": "同一 Zotero 来源的 PDF 已变化。已保留本地文献，本次未导入新版笔记或批注，以免对应到错误正文。"}
-        # This sidecar moves atomically with a newly committed job; it must
-        # exist before startup or a conversion worker can discover the PDF.
-        # Existing jobs also use the upload transaction to repair a missing
-        # source or requeue an earlier failed conversion.
+        # The sidecar must survive a restart between saving the PDF and
+        # indexing the document in the library.
         stage_zotero_import(incoming_dir, package)
         record, reused = STORE.commit_staged_upload(
             incoming_dir, pdf["filename"], pdf["byte_size"], pdf["sha256"], folder_id,
@@ -778,12 +803,8 @@ def _import_zotero_document(library: str, item: Dict[str, str], folder_id: str) 
             result = _apply_zotero_pending(job_id)
         except (OSError, LibraryValidationError) as exc:
             result = {"pending": True, "error": f"PDF 已接收，Zotero 附属信息暂未合并，可重新导入重试：{exc}"}
-        if record.get("status") == "queued":
-            CONVERSION_QUEUE.put((job_id, str(record.get("source_filename") or "document.pdf")))
-        if record.get("status") == "failed":
-            result.update(pending=False, error="PDF 解析失败；请在“从 Zotero 导入”中重新选择该文献并导入以重试，会复用当前文献。")
         return {**item, "title": package["title"], "status": "existing" if deduplicated else "imported",
-                "job_id": job_id, **result, "warnings": [*warnings, *result.get("warnings", [])]}
+                "job_id": job_id, "parse_status": record["status"], **result, "warnings": [*warnings, *result.get("warnings", [])]}
 
 
 def _zotero_batch_status(batch_id: str) -> Dict[str, Any]:
@@ -795,9 +816,11 @@ def _zotero_batch_status(batch_id: str) -> Dict[str, Any]:
         record = STORE.get(job_id)
         if not record:
             result.update(pending=False, error="导入的文献已被删除。")
-        elif record.get("status") == "failed":
-            result.update(pending=False, error="PDF 解析失败；请在“从 Zotero 导入”中重新选择该文献并导入以重试，会复用当前文献。")
-        elif record.get("status") == "completed":
+            continue
+        result["parse_status"] = record["status"]
+        if record["status"] == "failed":
+            result.update(pending=False, error="PDF 解析失败，可在文献阅读页重试解析。")
+        elif record["status"] == "completed":
             saved = _read_json_file(Path(record["job_dir"]) / "zotero-status.json", {})
             if isinstance(saved, dict):
                 if saved.get("pending") is False and not saved.get("error"):
@@ -1072,9 +1095,9 @@ def _run_metadata_job(job_id: str, online: bool, phase: str, generation: int) ->
                 STORE.update(job_id, metadata_status="retrieving", metadata_phase=phase)
             started = time.perf_counter()
             job_dir = Path(record["job_dir"])
-            source = job_dir / "source.pdf"
-            if not source.is_file():
-                source = job_dir / "upload.pdf"
+            source = original_pdf_path(job_dir)
+            if source is None:
+                raise PipelineError("原始 PDF 不存在。")
             document_json = _active_conversion_root(job_dir) / "document.json" if phase == "refine" else None
             result = retrieve_bibliographic_metadata(
                 source,
@@ -1151,14 +1174,17 @@ def _run_conversion_job(job_id: str, source_name: str) -> None:
         STORE.update(job_id, status="running", stage=stage, progress=fraction)
 
     try:
+        source_path = original_pdf_path(job_dir)
+        if source_path is None:
+            raise PipelineError("原始 PDF 不存在，请重新导入文献。")
         attempt_dir.mkdir(parents=True, exist_ok=False)
         remote_provider = _parsing_provider_registry().get("remote-guzi")
         if getattr(remote_provider, "configured", lambda: False)() is True:
-            result = remote_provider.run(ParsingRequest(job_id=job_id, source_pdf=job_dir / "upload.pdf", output_dir=attempt_dir, source_name=source_name), progress=progress)
+            result = remote_provider.run(ParsingRequest(job_id=job_id, source_pdf=source_path, output_dir=attempt_dir, source_name=source_name), progress=progress)
             manifest = result.manifest
         else:
             manifest = process_pdf(
-                job_dir / "upload.pdf", attempt_dir, job_id=job_id,
+                source_path, attempt_dir, job_id=job_id,
                 source_name=source_name, progress=progress, backend_override="odl",
             )
         source = manifest.setdefault("source", {})
@@ -1167,10 +1193,6 @@ def _run_conversion_job(job_id: str, source_name: str) -> None:
         manifest = _rebase_manifest_paths(manifest, attempt_dir, job_dir)
         manifest_text = json.dumps(manifest, ensure_ascii=False, indent=2)
         (attempt_dir / "manifest.json").write_text(manifest_text, encoding="utf-8")
-        _ensure_content_layout(attempt_dir)
-        _sync_content_file(attempt_dir, "annotations/annotations.json", [])
-        _sync_content_file(attempt_dir, "notes/notes.md", "")
-        _write_translation_records(attempt_dir, [])
         # Artifact publication and the completed-state/index handoff must be
         # atomic with respect to permanent deletion. The expensive conversion
         # itself remains outside this lock.
@@ -1181,7 +1203,20 @@ def _run_conversion_job(job_id: str, source_name: str) -> None:
             finished = time.perf_counter()
             stage_timings.append({"stage": last_stage, "seconds": round(finished - last_stage_at, 3)})
             metrics = {"conversion_seconds": round(finished - started, 3), "stages": stage_timings}
-            STORE.update(job_id, status="completed", stage="已完成", progress=1.0, manifest=manifest, metrics=metrics)
+            STORE.update(job_id, status="completed", stage="已完成", progress=1.0, error="", manifest=manifest, metrics=metrics)
+            try:
+                (job_dir / "error.json").unlink(missing_ok=True)
+                _ensure_content_layout(job_dir)
+                if not (job_dir / "content" / "annotations" / "annotations.json").is_file():
+                    _sync_content_file(job_dir, "annotations/annotations.json", _read_json_file(job_dir / "annotations.json", []))
+                if not (job_dir / "content" / "notes" / "notes.md").is_file():
+                    notes_path = job_dir / "notes.md"
+                    _sync_content_file(job_dir, "notes/notes.md", notes_path.read_text(encoding="utf-8") if notes_path.is_file() else "")
+                with TRANSLATION_LOCK:
+                    if _translation_records_need_persist(job_dir):
+                        _write_translation_records(job_dir, _translation_records(job_dir))
+            except OSError as exc:
+                print(f"[conversion] {job_id} 已完成，附属索引将在重启时恢复：{exc}", flush=True)
             completed = STORE.get(job_id)
             if completed:
                 LIBRARY.sync_jobs([completed])
@@ -1193,7 +1228,11 @@ def _run_conversion_job(job_id: str, source_name: str) -> None:
         error = str(exc)
         try:
             with _job_mutation(job_id):
-                if not STORE.get(job_id):
+                current = STORE.get(job_id)
+                if not current:
+                    return
+                if current.get("status") == "completed":
+                    print(f"[conversion] {job_id} 已完成，入库后续处理失败：{error}", flush=True)
                     return
                 (job_dir / "error.json").write_text(json.dumps({"error": error, "at": utc_now()}, ensure_ascii=False, indent=2), encoding="utf-8")
         except OSError:
@@ -1449,7 +1488,7 @@ def _start_background_workers() -> None:
     for record in STORE.list():
         if record.get("status") == "completed":
             _apply_zotero_pending(str(record["job_id"]))
-        if record.get("status") == "queued" and Path(record.get("job_dir", "")).joinpath("upload.pdf").is_file():
+        if record.get("status") == "queued":
             CONVERSION_QUEUE.put((str(record["job_id"]), str(record.get("source_filename") or "document.pdf")))
         try:
             metadata = LIBRARY.get_metadata(str(record["job_id"]))
@@ -1601,7 +1640,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _serve_file(self, path: Path, *, download: bool = False, immutable: bool = False) -> None:
+    def _serve_file(self, path: Path, *, download: bool = False, download_name: str = "", immutable: bool = False) -> None:
         if not path.is_file():
             self._send_error_json("资源不存在。", HTTPStatus.NOT_FOUND)
             return
@@ -1614,9 +1653,11 @@ class ScholarHandler(BaseHTTPRequestHandler):
             content_type = "application/pdf"
         elif path.suffix.lower() == ".webmanifest":
             content_type = "application/manifest+json; charset=utf-8"
-        elif path.suffix.lower() == ".js":
+        elif path.suffix.lower() in {".js", ".mjs"}:
             content_type = "text/javascript; charset=utf-8"
-        disposition = f'attachment; filename="{path.name}"' if download else None
+        elif path.suffix.lower() == ".wasm":
+            content_type = "application/wasm"
+        disposition = f'attachment; filename="{download_name or path.name}"' if download else None
         try:
             handle = path.open("rb")
         except FileNotFoundError:
@@ -1668,6 +1709,28 @@ class ScholarHandler(BaseHTTPRequestHandler):
         if path == "/api/vocabulary":
             self._vocabulary_request("list")
             return
+        match = re.fullmatch(REPORT_PATH, path)
+        article_match = re.fullmatch(REPORT_CONCEPT_ARTICLE_PATH, path)
+        if runtime.READONLY_MODE and (match or article_match or path == "/api/report-knowledge"):
+            self._send_error_json("只读演示模式不提供私人阅读报告和知识笔记。", HTTPStatus.FORBIDDEN)
+            return
+        if path == "/api/report-knowledge":
+            try:
+                self._send_json({"entries": ReportKnowledgeStore(LIBRARY_ROOT).list_entries()})
+            except (OSError, ValueError):
+                self._send_error_json("报告知识库无法读取。", HTTPStatus.INTERNAL_SERVER_ERROR, code="report_storage_error")
+            return
+        if match:
+            self._report_request(match.group(1), "read")
+            return
+        if article_match:
+            revisions = parse_qs(parsed.query, keep_blank_values=True).get("revision", [])
+            if len(revisions) != 1 or not re.fullmatch(r"[1-9][0-9]{0,9}", revisions[0]):
+                self._send_error_json("请提供要查看解读的报告版本号。")
+                return
+            job_id, concept_id = article_match.groups()
+            self._report_request(job_id, "read-article", concept_id, read_revision=int(revisions[0]))
+            return
         if path.startswith("/api/integrations/zotero/"):
             self._get_zotero(path, parse_qs(parsed.query))
             return
@@ -1702,6 +1765,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 "service": "my-scholar",
                 "version": "0.5.0",
                 "readonly": runtime.READONLY_MODE,
+                "desktop_cli_available": runtime.desktop_cli_available(),
                 "shell": os.environ.get("MY_SCHOLAR_SHELL", "reference"),
                 "ai": ai,
                 "account": _account_summary(),
@@ -1766,20 +1830,22 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return
         match = re.fullmatch(r"/api/jobs/([a-f0-9]{12,40})/(annotations|notes)", path)
         if match:
-            job_dir = STORE.path(match.group(1))
-            if not job_dir:
-                self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
-                return
-            if match.group(2) == "annotations":
-                with ANNOTATION_LOCK:
-                    if not ANNOTATION_STYLE_RECOVERY_REQUIRED:
-                        _ensure_content_layout(job_dir)
-                    payload = _annotation_payload(_read_json_file(job_dir / "annotations.json", []))
-                self._send_json(payload)
-            else:
-                _ensure_content_layout(job_dir)
-                with _job_mutation_lock(match.group(1)):
-                    self._send_json(notes_snapshot(job_dir))
+            job_id, action = match.groups()
+            job_id = STORE.resolve_id(job_id)
+            with _job_mutation_lock(job_id):
+                job_dir = STORE.path(job_id)
+                if not job_dir:
+                    self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
+                    return
+                if action == "annotations":
+                    with ANNOTATION_LOCK:
+                        if not ANNOTATION_STYLE_RECOVERY_REQUIRED:
+                            _ensure_content_layout(job_dir)
+                        payload = _annotation_payload(_read_json_file(job_dir / "annotations.json", []))
+                else:
+                    _ensure_content_layout(job_dir)
+                    payload = notes_snapshot(job_dir)
+            self._send_json(payload)
             return
         match = re.fullmatch(r"/api/jobs/([a-f0-9]{12,40})/translations", path)
         if match:
@@ -1841,7 +1907,6 @@ class ScholarHandler(BaseHTTPRequestHandler):
             "translations.json",
             "converter.log",
             "layout-error.log",
-            "source.pdf",
         }
         render_match = re.fullmatch(
             r"renders/([1-9][0-9]{0,8})/(document\.html|document\.json|document-ir\.json|manifest\.json|validation\.json|layout-content-list\.json|backend-selection\.json|converter\.log|layout-error\.log|(?:(?:assets/images|pages)/[A-Za-z0-9._@-]+|assets/pages/[A-Za-z0-9._@-]+\.jpg))",
@@ -1852,7 +1917,10 @@ class ScholarHandler(BaseHTTPRequestHandler):
         if runtime.READONLY_MODE and blocked_relative in READONLY_BLOCKED_ARTIFACTS:
             self._send_error_json("只读演示模式不提供该文件。", HTTPStatus.FORBIDDEN)
             return
-        if render_match:
+        if relative == "source.pdf":
+            job_dir = STORE.path(job_id)
+            path = original_pdf_path(job_dir) if job_dir else None
+        elif render_match:
             path = STORE.path(job_id, relative)
         elif relative in allowed:
             path = STORE.path(job_id, relative)
@@ -1875,7 +1943,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return
         # Render generations never change once published, so the reader can
         # cache them aggressively; live job artifacts stay uncacheable.
-        self._serve_file(path, download=download, immutable=bool(render_match))
+        self._serve_file(path, download=download, download_name="source.pdf" if relative == "source.pdf" else "", immutable=bool(render_match))
 
     def _migration_control_authorized(self) -> bool:
         provided = str(self.headers.get("X-My-Scholar-Migration-Token") or "")
@@ -1964,8 +2032,25 @@ class ScholarHandler(BaseHTTPRequestHandler):
         )
         if ai_execution and not self._require_ai_entitlement():
             return
+        match = re.fullmatch(REPORT_PATH + r"/(draft|chat)", path)
+        if match:
+            if self._require_ai_entitlement():
+                self._report_request(*match.groups())
+            return
+        match = re.fullmatch(REPORT_CONCEPT_ARTICLE_PATH, path)
+        if match:
+            if runtime.READONLY_MODE:
+                self._send_error_json("只读演示模式不提供私人阅读报告和知识笔记。", HTTPStatus.FORBIDDEN)
+            elif self._require_ai_entitlement():
+                job_id, concept_id = match.groups()
+                self._report_request(job_id, "generate-article", concept_id)
+            return
         if path == "/api/jobs":
             self._create_job()
+            return
+        match = re.fullmatch(r"/api/jobs/([a-f0-9]{12,40})/parse", path)
+        if match:
+            self._start_parse(match.group(1))
             return
         match = re.fullmatch(r"/api/jobs/([a-f0-9]{12,40})/reflow", path)
         if match:
@@ -2109,6 +2194,8 @@ class ScholarHandler(BaseHTTPRequestHandler):
             current = _stored_settings().get("ai", {})
             current_profile = current.get(service) if isinstance(current, dict) else None
             profile = _normalize_ai_profile(payload.get("profile"), current_profile, service=service)
+            if profile.get("cli_kind"):
+                raise PipelineError("本机 CLI 的模型由 CLI 管理，可在模型栏填写名称。")
             if service == "translation" and profile.get("provider") != "openai-compatible":
                 raise PipelineError("专用机器翻译不使用模型列表。")
             if not profile["base_url"]:
@@ -2438,6 +2525,11 @@ class ScholarHandler(BaseHTTPRequestHandler):
         if path == "/api/settings":
             self._update_settings()
             return
+        match = re.fullmatch(REPORT_PATH + r"(?:/concepts/([a-f0-9]{32}))?", path)
+        if match:
+            job_id, concept_id = match.groups()
+            self._report_request(job_id, "concept" if concept_id else "save", concept_id)
+            return
         match = re.fullmatch(r"/api/jobs/([a-f0-9]{12,40})/notes", path)
         if match:
             self._update_notes(match.group(1))
@@ -2630,9 +2722,103 @@ class ScholarHandler(BaseHTTPRequestHandler):
             return None
         return Path(record["job_dir"])
 
+    def _original_pdf_job_dir(self, job_id: str) -> Optional[Path]:
+        job_dir = STORE.path(job_id)
+        if job_dir is None:
+            self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
+            return None
+        if original_pdf_path(job_dir) is None:
+            self._send_error_json("原始 PDF 不存在。", HTTPStatus.CONFLICT)
+            return None
+        return job_dir
+
+    def _document_job_dir(self, job_id: str) -> Optional[Path]:
+        job_dir = STORE.path(job_id) if STORE is not None else None
+        if job_dir and original_pdf_path(job_dir) is not None:
+            return job_dir
+        return self._completed_job_dir(job_id)
+
+    def _report_request(self, job_id: str, action: str, concept_id: Optional[str] = None, *, read_revision: Optional[int] = None) -> None:
+        job_id = STORE.resolve_id(job_id)
+        try:
+            payload = {} if action in ("read", "read-article") else self._read_json_body()
+            with _job_mutation_lock(job_id):
+                job_dir = self._completed_job_dir(job_id)
+                if job_dir is None:
+                    return
+                history = report_service.read_history(job_dir)
+                if action == "read":
+                    self._send_json(report_service.report_response(history))
+                    return
+                if action == "save":
+                    _assert_annotation_style_writable()
+                    self._send_json(report_service.save_report(job_dir, history, payload))
+                    return
+                if action == "concept":
+                    _assert_annotation_style_writable()
+                    report = report_service.require_revision(history, payload.get("revision"))
+                    self._send_json(self._save_report_concept(job_id, report, concept_id, payload))
+                    return
+                revision = read_revision if action == "read-article" else payload.get("expected_revision")
+                report = report_service.require_revision(history, revision)
+                if action != "draft" and report is None:
+                    raise report_service.ReportError("请先保存阅读报告。", HTTPStatus.CONFLICT, "report_required")
+                if action in ("read-article", "generate-article"):
+                    article = report_concept_article.read_article(job_dir, report, concept_id)
+                    if article is not None or action == "read-article":
+                        self._send_json({"article": article})
+                        return
+                generation = report["source"]["render_generation"] if action != "draft" else None
+                evidence = report_service.load_evidence(job_dir, generation)
+
+            if action == "draft":
+                result = {"draft": report_service.generate_report(evidence)}
+            elif action == "generate-article":
+                result = {"article": report_concept_article.generate_article(evidence, report, concept_id)}
+            else:
+                result = report_service.report_chat(evidence, report, payload)
+
+            with _job_mutation_lock(job_id):
+                current_dir = self._completed_job_dir(job_id)
+                if current_dir is None:
+                    return
+                current_report = report_service.require_revision(report_service.read_history(current_dir), revision)
+                if action == "generate-article":
+                    existing = report_concept_article.read_article(current_dir, current_report, concept_id)
+                    result["article"] = existing or report_concept_article.save_article(current_dir, current_report, concept_id, result["article"])
+            self._send_json(result)
+        except report_service.ReportError as exc:
+            self._send_error_json(str(exc), exc.status, code=exc.code)
+        except (PipelineError, ValueError) as exc:
+            self._send_error_json(str(exc))
+        except OSError:
+            self._send_error_json("阅读报告文件无法读取或保存。", HTTPStatus.INTERNAL_SERVER_ERROR, code="report_storage_error")
+
+    def _save_report_concept(self, job_id: str, report: Optional[dict], concept_id: Optional[str], payload: dict) -> dict:
+        concept, citations = report_service.find_concept(report, concept_id)
+        status, text, saved = payload.get("status"), payload.get("text"), payload.get("saved")
+        if not isinstance(status, str) or status not in REPORT_KNOWLEDGE_STATUSES:
+            raise report_service.ReportError("概念熟悉度无效。")
+        if "text" in payload and (not isinstance(text, str) or len(text) > 16000):
+            raise report_service.ReportError("知识笔记格式无效或超过长度限制。")
+        if "saved" in payload and not isinstance(saved, bool):
+            raise report_service.ReportError("知识笔记保存状态无效。")
+        try:
+            article_title = LIBRARY.get_metadata(job_id)["fields"]["title"]
+        except LibraryValidationError:
+            article_title = ""
+        try:
+            return ReportKnowledgeStore(LIBRARY_ROOT).upsert(
+                job_id=job_id, concept_id=concept["id"], term=concept["term"], status=status,
+                report_revision=payload["revision"], article_title=article_title or report["title"],
+                citation=citations[0] if citations else None, text=text, saved=saved,
+            )
+        except ValueError as exc:
+            raise report_service.ReportError("报告知识库无法读取。", HTTPStatus.INTERNAL_SERVER_ERROR, "report_storage_error") from exc
+
     @_locked_job_method
     def _add_note_asset(self, job_id: str) -> None:
-        job_dir = self._completed_job_dir(job_id)
+        job_dir = self._document_job_dir(job_id)
         if not job_dir:
             return
         try:
@@ -2663,28 +2849,42 @@ class ScholarHandler(BaseHTTPRequestHandler):
 
     @_locked_job_method
     def _add_annotation(self, job_id: str) -> None:
-        job_dir = self._completed_job_dir(job_id)
-        if not job_dir:
-            return
         try:
             payload = self._read_json_body()
-            quote = str(payload.get("quote", "")).strip()
+            raw_pdf = payload.get("surface") == "pdf"
+            job_dir = self._original_pdf_job_dir(job_id) if raw_pdf else self._completed_job_dir(job_id)
+            if not job_dir:
+                return
+            raw_quote = payload.get("quote", "")
+            if raw_pdf and not isinstance(raw_quote, str):
+                raise PipelineError("原始 PDF 划线内容必须是文本。")
+            quote = str(raw_quote).strip()
             if not quote:
                 raise PipelineError("划线内容不能为空。")
+            page = payload.get("page")
+            pdf_rects = payload.get("pdf_rects") if raw_pdf else None
+            if raw_pdf:
+                if payload.get("source", "manual") != "manual":
+                    raise PipelineError("原始 PDF 只支持人工标注。")
+                if len(quote) > 10000:
+                    raise PipelineError("原始 PDF 划线内容不能超过 10000 个字符。")
+                _validate_pdf_annotation_anchor(page, pdf_rects)
             with ANNOTATION_LOCK:
                 _assert_annotation_style_writable()
                 annotations = _read_json_file(job_dir / "annotations.json", [])
                 if not isinstance(annotations, list):
                     annotations = []
                 kind = str(payload.get("kind", "highlight"))
-                block_id = payload.get("block_id")
+                block_id = None if raw_pdf else payload.get("block_id")
                 source = "ai" if str(payload.get("source", "")).strip().lower() == "ai" else "manual"
                 action_snapshot = _annotation_action_snapshot(payload) if source == "manual" else {}
                 kind = action_snapshot.get("kind", kind)
-                surface = payload.get("surface") if payload.get("surface") in {"paper", "translation"} else None
-                source_block_id = str(payload["source_block_id"]) if payload.get("source_block_id") else None
-                start = payload.get("start")
-                end = payload.get("end")
+                if raw_pdf and kind not in {"highlight", "underline"}:
+                    raise PipelineError("标注类型只能是 highlight 或 underline。")
+                surface = payload.get("surface") if payload.get("surface") in {"paper", "translation", "pdf"} else None
+                source_block_id = str(payload["source_block_id"]) if not raw_pdf and payload.get("source_block_id") else None
+                start = None if raw_pdf else payload.get("start")
+                end = None if raw_pdf else payload.get("end")
                 has_precise_anchor = (
                     not isinstance(start, bool)
                     and not isinstance(end, bool)
@@ -2695,7 +2895,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     and end > start
                 )
                 for existing in annotations:
-                    if not isinstance(existing, dict):
+                    if not isinstance(existing, dict) or (existing.get("surface") == "pdf") != raw_pdf:
                         continue
                     existing_source = "ai" if str(existing.get("source", "")).strip().lower() == "ai" else "manual"
                     same_annotation = (
@@ -2705,20 +2905,19 @@ class ScholarHandler(BaseHTTPRequestHandler):
                         and existing_source == source
                         and (existing.get("action_id") or "") == action_snapshot.get("action_id", "")
                     )
-                    if same_annotation and source == "manual" and has_precise_anchor:
+                    if same_annotation and raw_pdf:
+                        same_annotation = existing.get("page") == page and existing.get("pdf_rects") == pdf_rects
+                    elif same_annotation and source == "manual" and has_precise_anchor:
                         same_annotation = (
                             existing.get("surface") == surface
                             and existing.get("source_block_id") == source_block_id
-                            and existing.get("page") == payload.get("page")
+                            and existing.get("page") == page
                             and existing.get("start") == start
                             and existing.get("end") == end
                         )
                     if same_annotation:
                         self._send_json(_annotation_payload(annotations, annotation=existing))
                         return
-                render_generation = str(payload.get("render_generation") or "")
-                if render_generation != "base" and not RENDER_GENERATION_RE.fullmatch(render_generation):
-                    render_generation = str(((STORE.get(job_id) if STORE is not None else {}) or {}).get("active_render") or "base")
                 item = {
                     "id": uuid.uuid4().hex,
                     "kind": kind,
@@ -2726,17 +2925,23 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     "category": str(payload.get("category", "method")),
                     "quote": quote[:10000],
                     "note": str(payload.get("note", ""))[:10000],
-                    "page": payload.get("page"),
-                    "block_id": payload.get("block_id"),
+                    "page": page,
+                    "block_id": block_id,
                     "start": start,
                     "end": end,
                     "source": source,
                     "quote_prefix": str(payload.get("quote_prefix") or "")[-48:],
                     "quote_suffix": str(payload.get("quote_suffix") or "")[:48],
-                    "render_generation": render_generation,
                     "created_at": utc_now(),
                     **action_snapshot,
                 }
+                if raw_pdf:
+                    item["pdf_rects"] = pdf_rects
+                else:
+                    render_generation = str(payload.get("render_generation") or "")
+                    if render_generation != "base" and not RENDER_GENERATION_RE.fullmatch(render_generation):
+                        render_generation = str(((STORE.get(job_id) if STORE is not None else {}) or {}).get("active_render") or "base")
+                    item["render_generation"] = render_generation
                 if surface:
                     item["surface"] = surface
                 if source_block_id:
@@ -2753,7 +2958,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
 
     @_locked_job_method
     def _delete_annotation(self, job_id: str, annotation_id: str) -> None:
-        job_dir = self._completed_job_dir(job_id)
+        job_dir = self._document_job_dir(job_id)
         if not job_dir:
             return
         with ANNOTATION_LOCK:
@@ -2767,7 +2972,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
 
     @_locked_job_method
     def _delete_manual_annotations(self, job_id: str) -> None:
-        job_dir = self._completed_job_dir(job_id)
+        job_dir = self._document_job_dir(job_id)
         if not job_dir:
             return
         with ANNOTATION_LOCK:
@@ -2784,7 +2989,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
 
     @_locked_job_method
     def _update_annotation(self, job_id: str, annotation_id: str) -> None:
-        job_dir = self._completed_job_dir(job_id)
+        job_dir = self._document_job_dir(job_id)
         if not job_dir:
             return
         try:
@@ -2815,7 +3020,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                     if _is_ai_annotation(updated):
                         raise PipelineError("只有人工标注可以切换高亮或划线。")
                     if next_kind != updated.get("kind"):
-                        anchor_fields = ("surface", "source_block_id", "page", "block_id", "start", "end", "quote")
+                        anchor_fields = ("surface", "source_block_id", "page", "block_id", "start", "end", "quote", "pdf_rects")
                         anchor = tuple(updated.get(field) for field in anchor_fields)
                         has_conflict = any(
                             isinstance(item, dict)
@@ -2859,7 +3064,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
 
     @_locked_job_method
     def _update_notes(self, job_id: str) -> None:
-        job_dir = self._completed_job_dir(job_id)
+        job_dir = self._document_job_dir(job_id)
         if not job_dir:
             return
         try:
@@ -2874,17 +3079,34 @@ class ScholarHandler(BaseHTTPRequestHandler):
         flight_key = None
         leader = False
         try:
+            payload = self._read_json_body()
+            raw_pdf = payload.get("source_kind") == "pdf"
+            job_id = STORE.resolve_id(job_id) if STORE is not None else job_id
             with _job_mutation(job_id):
-                job_dir = self._completed_job_dir(job_id)
-                if not job_dir:
-                    return
-                document = _read_json_file(_active_conversion_root(job_dir) / "document.json", {})
-                semantic_validation = document.get("semantic_validation", {}) if isinstance(document, dict) else {}
-                if (isinstance(document, dict) and document.get("translation_enabled") is False) or (isinstance(semantic_validation, dict) and semantic_validation.get("status") == "FAIL"):
-                    raise PipelineError("当前文档未通过语义结构校验，不能对视觉整页结果执行段落翻译。")
-                payload = self._read_json_body()
                 text = str(payload.get("text", "")).strip()
                 block_id = str(payload.get("block_id", "") or "").strip()
+                if raw_pdf:
+                    if block_id or payload.get("formulas") or "segments" in payload or payload.get("alignment_version"):
+                        self._send_error_json("原始 PDF 选区翻译只接受选中的纯文本。", HTTPStatus.BAD_REQUEST)
+                        return
+                    if not isinstance(payload.get("text"), str) or not text:
+                        self._send_error_json("没有可翻译的文本。", HTTPStatus.BAD_REQUEST)
+                        return
+                    job_dir = STORE.path(job_id)
+                    if job_dir is None:
+                        self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
+                        return
+                    if original_pdf_path(job_dir) is None:
+                        self._send_error_json("原始 PDF 不存在。", HTTPStatus.CONFLICT)
+                        return
+                else:
+                    job_dir = self._completed_job_dir(job_id)
+                    if not job_dir:
+                        return
+                    document = _read_json_file(_active_conversion_root(job_dir) / "document.json", {})
+                    semantic_validation = document.get("semantic_validation", {}) if isinstance(document, dict) else {}
+                    if (isinstance(document, dict) and document.get("translation_enabled") is False) or (isinstance(semantic_validation, dict) and semantic_validation.get("status") == "FAIL"):
+                        raise PipelineError("当前文档未通过语义结构校验，不能对视觉整页结果执行段落翻译。")
                 profile = resolve_ai_profile("translation")
                 target_language = str(payload.get("target_language") or translation_target_language(profile)).strip()
                 source_hash = str(payload.get("source_hash", "") or "").strip()
@@ -2924,7 +3146,7 @@ class ScholarHandler(BaseHTTPRequestHandler):
                 if not leader:
                     return {**flight.result(), "cached": False}
                 try:
-                    options = {"target_language": target_language, "context": _job_context(job_dir, 5000), "formulas": formulas, "profile": profile}
+                    options = {"target_language": target_language, "context": "" if raw_pdf else _job_context(job_dir, 5000), "formulas": formulas, "profile": profile}
                     if segments is not None:
                         options.update(segments=segments, alignment_version=alignment_version)
                         result = translate_text(text, **options)
@@ -2941,17 +3163,19 @@ class ScholarHandler(BaseHTTPRequestHandler):
                                 raise RuntimeError("模型返回为空。")
                             result = {"text": translated}
                         except Exception as exc:
-                            if parts and not isinstance(exc, TranslationQualityError):
+                            if profile.get("cli_kind") or parts and not isinstance(exc, TranslationQualityError):
                                 raise
                             result = translate_text(text, **options)
                     else:
                         result = translate_text(text, **options)
                     provider = profile.get("provider", "openai-compatible")
-                    model = (profile.get("model") or None) if provider == "openai-compatible" else None
+                    model = (profile.get("model") or None) if provider in {"openai-compatible", "cli"} else None
                     record = {
                         **result, "cache_key": cache_key, "profile_id": profile_id,
                         "provider": provider, "model": model,
-                        "provider_snapshot": {"provider": provider, "model": model, "mode": profile.get("mode") if provider == "openai-compatible" else None},
+                        "provider_snapshot": {"provider": provider, "model": model,
+                                              "mode": profile.get("mode") if provider in {"openai-compatible", "cli"} else None,
+                                              **({"cli_kind": profile["cli_kind"]} if profile.get("cli_kind") else {})},
                         "block_id": block_id, "target_language": target_language,
                         "source_hash": source_hash or hashlib.sha256(text.encode("utf-8")).hexdigest(),
                         "source_text": text, "formulas": formulas, "updated_at": utc_now(),
@@ -3183,20 +3407,28 @@ class ScholarHandler(BaseHTTPRequestHandler):
             self._send_sse_event({"error": f"翻译失败：{exc}"})
 
     def _chat(self, job_id: str) -> None:
-        job_dir = self._completed_job_dir(job_id)
-        if not job_dir:
-            return
         try:
             payload = self._read_json_body(max_bytes=4 * 1024 * 1024)
+            raw_pdf = payload.get("source_kind") == "pdf"
+            job_dir = self._original_pdf_job_dir(job_id) if raw_pdf else self._completed_job_dir(job_id)
+            if not job_dir:
+                return
             messages = payload.get("messages", [])
             if not isinstance(messages, list):
                 raise PipelineError("messages 必须是数组。")
-            selected = str(payload.get("selected_text", "")).strip()
+            raw_selection = payload.get("selected_text", "")
+            if raw_pdf and (not isinstance(raw_selection, str) or payload.get("selected_image") is not None):
+                raise PipelineError("原始 PDF 对话只支持文本选区。")
+            selected = str(raw_selection).strip()
             options = _chat_options(payload.get("options"))
-            context = _job_context(job_dir, 4_000_001)
+            if raw_pdf:
+                context = "当前打开原始 PDF，未提供论文全文。请以用户选中的文本和对话历史为依据。遇到需要全文才能确认的问题时，请明确指出。"
+                image = None
+            else:
+                context = _job_context(job_dir, 4_000_001)
+                image = _chat_image_context(job_dir, payload.get("selected_image"))
             source_truncated = len(context) > 4_000_000
             context = context[:4_000_000]
-            image = _chat_image_context(job_dir, payload.get("selected_image"))
             context_info = chat_context_info(context=context, messages=messages, selected_text=selected,
                                              selected_image=image, options=options)
             if source_truncated:
@@ -3398,8 +3630,6 @@ class ScholarHandler(BaseHTTPRequestHandler):
             print(f"[library] 导入 {record['job_id']} 后索引写入失败：{exc}", flush=True)
         record = STORE.get(str(record["job_id"])) or record
         settings = _metadata_settings()
-        if record.get("status") == "queued":
-            CONVERSION_QUEUE.put((str(record["job_id"]), str(record.get("source_filename") or filename)))
         if library_ready and record.get("status") != "completed" and _setting_bool(settings.get("auto_retrieve", True), True):
             _enqueue_metadata(
                 str(record["job_id"]),
@@ -3408,6 +3638,25 @@ class ScholarHandler(BaseHTTPRequestHandler):
             )
         status = HTTPStatus.OK if deduplicated and record.get("status") == "completed" else HTTPStatus.ACCEPTED
         self._send_json({"job": _public_job(record), "deduplicated": deduplicated, "warning": "；".join(warnings)}, status)
+
+    def _start_parse(self, job_id: str) -> None:
+        job_id = STORE.resolve_id(job_id)
+        try:
+            with _job_mutation(job_id), PARSING_PROVIDER_LOCK:
+                record, queued = STORE.begin_parse(job_id)
+                if queued:
+                    CONVERSION_QUEUE.put((job_id, str(record.get("source_filename") or "document.pdf")))
+        except KeyError:
+            self._send_error_json("任务不存在。", HTTPStatus.NOT_FOUND)
+            return
+        except ParseConflictError as exc:
+            self._send_error_json(str(exc), HTTPStatus.CONFLICT)
+            return
+        except (OSError, PipelineError) as exc:
+            self._send_error_json(str(exc), HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        status = HTTPStatus.OK if record["status"] == "completed" else HTTPStatus.ACCEPTED
+        self._send_json(_public_job(record), status)
 
     def _send_provider_error(self, error: ProviderError) -> None:
         self._send_error_json(
@@ -3656,17 +3905,22 @@ def _public_job(record: Dict[str, Any]) -> Dict[str, Any]:
     active_render = record.get("active_render")
     render_name = str(active_render or "")
     render_prefix = f"renders/{render_name}/" if RENDER_GENERATION_RE.fullmatch(render_name) else ""
+    job_id = record["job_id"]
+    job_dir = record.get("job_dir")
+    links = {}
+    if job_dir and original_pdf_path(Path(job_dir)) is not None:
+        links["source"] = f"/api/jobs/{job_id}/source.pdf"
     if record.get("status") == "completed":
-        job_id = record["job_id"]
-        output["links"] = {
+        links.update({
             "html": f"/api/jobs/{job_id}/{render_prefix}document.html",
             "json": f"/api/jobs/{job_id}/{render_prefix}document.json?download=1",
             "validation": f"/api/jobs/{job_id}/{render_prefix}validation.json",
-            "source": f"/api/jobs/{job_id}/source.pdf",
             "translations": f"/api/jobs/{job_id}/translations",
             "content": f"/api/jobs/{job_id}/content/manifest.json",
             "metadata": f"/api/library/items/{job_id}/metadata",
-        }
+        })
+    if links:
+        output["links"] = links
     reflow = record.get("reflow")
     if isinstance(reflow, dict):
         public_reflow = dict(reflow)
@@ -3825,6 +4079,8 @@ def main() -> None:
     parser.add_argument("--pdf-evidence-drawing-pages", default="", help=argparse.SUPPRESS)
     parser.add_argument("--dependency-smoke", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.host not in LOOPBACK_HOSTS:
+        runtime.DESKTOP_CLI_ALLOWED = False
     if args.dependency_smoke:
         import sqlite3
         import ssl
@@ -3911,6 +4167,7 @@ def main() -> None:
         except KeyboardInterrupt:
             print("\nStopping My Scholar", flush=True)
         finally:
+            cli_adapter.stop_all()
             _mcp_access().close()
             if SCHOLAR_SERVICE is not None:
                 SCHOLAR_SERVICE.search_index.close()

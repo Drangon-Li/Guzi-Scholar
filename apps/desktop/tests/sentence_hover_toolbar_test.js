@@ -35,6 +35,7 @@ const annotation = { id: 'note', label: '论文贡献', note: 'Saved note.' };
 const context = vm.createContext({
   state: { selection: null, annotations: [annotation], activeJob: { job_id: 'paper' } },
   readerMount: currentMount,
+  nativePdfMount: null,
   notePopoverHover: { openTimer: null, closeTimer: null, pendingAnnotationId: '', pendingDoc: null, pinned: false, anchor: null },
   NOTE_HOVER_OPEN_DELAY: 120,
   NOTE_HOVER_CLOSE_DELAY: 260,

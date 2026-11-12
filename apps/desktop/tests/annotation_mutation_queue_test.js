@@ -26,6 +26,8 @@ function harness() {
     waitForCloseResume: async () => {},
     jsonOptions: (body, method = 'POST') => ({ method, body: JSON.stringify(body) }),
     frameDocument: () => doc,
+    annotationDocument: () => doc,
+    currentAnnotationMount: () => context.readerMount,
     readerMountIsCurrent: (mount) => mounts.get(mount.jobId) === mount,
     readerMountMatches: (mount) => mounts.get(mount.jobId) === mount && context.readerMount === mount && context.state.activeJob.job_id === mount.jobId,
     isActiveReaderJob: (jobId) => context.state.activeJob.job_id === jobId,

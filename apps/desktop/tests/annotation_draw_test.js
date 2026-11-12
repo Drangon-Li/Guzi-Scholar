@@ -177,7 +177,7 @@ const flush = () => new Promise((resolve) => setImmediate(resolve));
   assert.equal(children.length, 0, 'Changing the system motion preference immediately restores static marks');
   t.playAnnotationDrawAnimation({ ...annotation, source: 'ai' });
   assert.equal(children.length, 0, 'AI suggestions do not play the manual creation animation');
-  assert.match(source, /if \(saved && !existingAnnotationIds\.has\(saved\.id\)\) playAnnotationDrawAnimation\(saved, doc\)/u);
+  assert.match(source, /if \(!isPdf && saved && !existingAnnotationIds\.has\(saved\.id\)\) playAnnotationDrawAnimation\(saved, doc\)/u);
   const render = functionSource('renderFrameAnnotations');
   assert(render.indexOf('clearAnnotationDrawAnimation(doc)') < render.indexOf('removeMark('), 'Rebuilding marks clears their temporary decorations first');
   assert.doesNotMatch(functionSource('updateAnnotationColor').replace('async ', ''), /playAnnotationDrawAnimation/u);

@@ -38,6 +38,10 @@ class ReflowCancelledError(PipelineError):
     """Raised when a reflow run is cancelled while it is still working."""
 
 
+class ParseConflictError(PipelineError):
+    """Raised when a job has no original PDF available to parse."""
+
+
 ArtifactMigrator = Callable[[Path, Dict[str, Any]], Dict[str, Any]]
 
 _artifact_migrator: Optional[ArtifactMigrator] = None
@@ -58,6 +62,15 @@ def _read_json_file(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else default
     except (OSError, json.JSONDecodeError):
         return default
+
+
+def original_pdf_path(job_dir: Path) -> Optional[Path]:
+    job_dir = job_dir.resolve()
+    for name in ("upload.pdf", "source.pdf"):
+        path = (job_dir / name).resolve()
+        if path.parent == job_dir and path.is_file():
+            return path
+    return None
 
 
 # In-memory conversion job registry backed by data/jobs/<job-id> artifacts.
@@ -168,7 +181,7 @@ class JobStore:
             status = str(record.get("status") or "")
             if status in {"queued", "running"}:
                 return canonical_id, "文献仍在导入或转换中，暂不能彻底清除。"
-            if status not in {"completed", "failed"}:
+            if status not in {"completed", "failed", "unparsed"}:
                 return canonical_id, "文献当前仍在处理中，暂不能彻底清除。"
             reflow = record.get("reflow")
             if isinstance(reflow, dict) and str(reflow.get("status") or "") in {"queued", "running", "cancelling"}:
@@ -256,7 +269,7 @@ class JobStore:
         return current
 
     def _load_existing(self) -> None:
-        """Make completed local jobs visible after a server restart."""
+        """Recover saved PDFs and conversions after a server restart."""
         for job_dir in sorted(self.root.iterdir()):
             if not job_dir.is_dir() or not JOB_ID_RE.fullmatch(job_dir.name):
                 continue
@@ -279,26 +292,29 @@ class JobStore:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else None
             except (OSError, json.JSONDecodeError):
                 manifest = None
-            if isinstance(manifest, dict):
-                if active_render is None and _artifact_migrator is not None:
-                    manifest = _artifact_migrator(job_dir, manifest)
+            if not isinstance(manifest, dict):
+                manifest = None
+            if manifest and active_render is None and _artifact_migrator is not None:
+                manifest = _artifact_migrator(job_dir, manifest)
             source = (manifest or {}).get("source", {})
-            source_path = job_dir / "source.pdf"
-            if not source_path.is_file():
-                source_path = job_dir / "upload.pdf"
+            source_path = original_pdf_path(job_dir)
             stored_status = str(state.get("status") or "")
             if manifest:
                 status = "completed"
-            elif error_path.is_file() or stored_status == "failed":
+            elif stored_status == "unparsed":
+                status = "unparsed"
+            elif stored_status == "failed" or (not stored_status and error_path.is_file()):
+                status = "failed"
+            elif source_path is None:
                 status = "failed"
             else:
                 status = "queued"
             record = {
                 "job_id": job_dir.name,
                 "source_filename": source.get("filename") or state.get("source_filename") or "document.pdf",
-                "source_bytes": source.get("bytes") or state.get("source_bytes") or (source_path.stat().st_size if source_path.is_file() else 0),
+                "source_bytes": source.get("bytes") or state.get("source_bytes") or (source_path.stat().st_size if source_path else 0),
                 "status": status,
-                "stage": "已完成" if manifest else ("转换失败" if status == "failed" else "等待开始"),
+                "stage": {"completed": "已完成", "unparsed": "未解析", "failed": "转换失败", "queued": "等待开始"}[status],
                 "progress": 1.0 if status in {"completed", "failed"} else 0.0,
                 "created_at": state.get("created_at") or (manifest or {}).get("created_at", ""),
                 "updated_at": state.get("updated_at") or (manifest or {}).get("created_at", ""),
@@ -338,20 +354,20 @@ class JobStore:
                 if key in state:
                     record[key] = state[key]
             digest = str(source.get("sha256") or state.get("source_sha256") or "").strip().lower()
-            if not digest and source_path.is_file():
+            if not digest and source_path:
                 digest = self._hash_file(source_path)
             if digest:
                 record["source_sha256"] = digest
             if manifest:
                 record["manifest"] = manifest
-            if error_path.is_file():
-                try:
-                    record["error"] = json.loads(error_path.read_text(encoding="utf-8")).get("error", "转换失败")
-                except (OSError, json.JSONDecodeError):
-                    record["error"] = "转换失败"
+            if status == "failed":
+                error = _read_json_file(error_path, {})
+                record["error"] = state.get("error") or (error.get("error") if isinstance(error, dict) else "") or (
+                    "原始 PDF 不存在。" if source_path is None else "转换失败"
+                )
             self.jobs[job_dir.name] = record
             self._persist_locked(record)
-        status_priority = {"completed": 3, "running": 2, "queued": 1, "failed": 0}
+        status_priority = {"completed": 4, "running": 3, "queued": 2, "unparsed": 1, "failed": 0}
         for record in sorted(self.jobs.values(), key=lambda item: status_priority.get(str(item.get("status")), -1), reverse=True):
             digest = str(record.get("source_sha256") or "").strip().lower()
             if digest:
@@ -385,10 +401,8 @@ class JobStore:
         if digest:
             return digest
         job_dir = Path(str(record.get("job_dir") or ""))
-        source_path = job_dir / "source.pdf"
-        if not source_path.is_file():
-            source_path = job_dir / "upload.pdf"
-        if not source_path.is_file():
+        source_path = original_pdf_path(job_dir)
+        if source_path is None:
             return ""
         digest = JobStore._hash_file(source_path)
         record["source_sha256"] = digest
@@ -396,14 +410,11 @@ class JobStore:
 
     @staticmethod
     def _can_reuse_exact(record: Dict[str, Any], size: int) -> bool:
-        if record.get("status") not in {"queued", "running", "completed"}:
+        if record.get("status") not in {"unparsed", "queued", "running", "completed", "failed"}:
             return False
-        job_dir = Path(str(record.get("job_dir") or ""))
-        source = job_dir / "source.pdf"
-        if not source.is_file():
-            source = job_dir / "upload.pdf"
+        source = original_pdf_path(Path(record["job_dir"]))
         try:
-            return source.is_file() and source.stat().st_size == int(size)
+            return source is not None and source.stat().st_size == int(size)
         except OSError:
             return False
 
@@ -446,48 +457,29 @@ class JobStore:
         with self.lock:
             canonical_id = self.sha_index.get(digest)
             canonical = self.jobs.get(canonical_id or "")
-            if canonical and int(canonical.get("source_bytes") or 0) == int(size) and canonical.get("status") in {"failed", "queued"} and not self._can_reuse_exact(canonical, size):
-                job_dir = Path(str(canonical["job_dir"]))
-                os.replace(part, job_dir / "upload.pdf")
-                shutil.rmtree(incoming_dir, ignore_errors=True)
-                (job_dir / "error.json").unlink(missing_ok=True)
-                canonical.update({
-                    "source_filename": source_name,
-                    "source_bytes": int(size),
-                    "source_sha256": digest,
-                    "status": "queued",
-                    "stage": "等待重试",
-                    "progress": 0.0,
-                    "error": "",
-                    "updated_at": utc_now(),
-                })
-                if folder_id:
-                    requested = list(canonical.get("requested_folder_ids") or [])
-                    if folder_id not in requested:
-                        requested.append(folder_id)
-                    canonical["requested_folder_ids"] = requested
-                self._persist_locked(canonical)
-                return dict(canonical), False
-            if canonical and int(canonical.get("source_bytes") or 0) == int(size) and canonical.get("status") == "completed" and not self._can_reuse_exact(canonical, size):
-                job_dir = Path(str(canonical["job_dir"]))
-                os.replace(part, job_dir / "source.pdf")
-                shutil.rmtree(incoming_dir, ignore_errors=True)
-                if folder_id:
-                    requested = list(canonical.get("requested_folder_ids") or [])
-                    if folder_id not in requested:
-                        requested.append(folder_id)
-                    canonical["requested_folder_ids"] = requested
-                canonical["updated_at"] = utc_now()
-                self._persist_locked(canonical)
-                return dict(canonical), True
-            if canonical and self._can_reuse_exact(canonical, size):
+            reusable = canonical and self._can_reuse_exact(canonical, size)
+            repairable = (
+                canonical and int(canonical.get("source_bytes") or 0) == int(size)
+                and canonical.get("status") in {"unparsed", "queued", "failed", "completed"}
+            )
+            if reusable or repairable:
+                changed = False
+                if not reusable:
+                    job_dir = Path(canonical["job_dir"])
+                    target_name = "upload.pdf"
+                    if canonical["status"] == "completed" and not (job_dir / target_name).exists():
+                        target_name = "source.pdf"
+                    os.replace(part, job_dir / target_name)
+                    changed = True
                 if folder_id:
                     requested = list(canonical.get("requested_folder_ids") or [])
                     if folder_id not in requested:
                         requested.append(folder_id)
                         canonical["requested_folder_ids"] = requested
-                        canonical["updated_at"] = utc_now()
-                        self._persist_locked(canonical)
+                        changed = True
+                if changed:
+                    canonical["updated_at"] = utc_now()
+                    self._persist_locked(canonical)
                 shutil.rmtree(incoming_dir, ignore_errors=True)
                 return dict(canonical), True
             job_id = uuid.uuid4().hex[:16]
@@ -498,8 +490,8 @@ class JobStore:
                 "source_filename": source_name,
                 "source_bytes": int(size),
                 "source_sha256": digest,
-                "status": "queued",
-                "stage": "等待开始",
+                "status": "unparsed",
+                "stage": "未解析",
                 "progress": 0.0,
                 "attempt": 0,
                 "requested_folder_ids": [folder_id] if folder_id else [],
@@ -568,6 +560,23 @@ class JobStore:
                 except Exception:
                     self.jobs[canonical_id] = previous
                     raise
+
+    def begin_parse(self, job_id: str) -> tuple[Dict[str, Any], bool]:
+        with self.lock:
+            canonical_id = self.resolve_id(job_id)
+            record = self.jobs.get(canonical_id)
+            if record is None:
+                raise KeyError(job_id)
+            status = record.get("status")
+            if status in {"queued", "running", "completed"}:
+                return dict(record), False
+            if original_pdf_path(Path(record["job_dir"])) is None:
+                raise ParseConflictError("原始 PDF 不存在，请重新导入文献。")
+            self.update(
+                canonical_id, status="queued", stage="等待解析",
+                progress=0.0, error="",
+            )
+            return dict(record), True
 
     def claim(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Atomically claim a queued job so duplicate queue entries are harmless."""
@@ -756,7 +765,7 @@ class JobStore:
             status = str(record.get("status") or "")
             if status in {"queued", "running"}:
                 raise ReflowConflictError("文献仍在导入或转换中，暂不能彻底清除。")
-            if status not in {"completed", "failed"}:
+            if status not in {"completed", "failed", "unparsed"}:
                 raise ReflowConflictError("文献当前仍在处理中，暂不能彻底清除。")
             reflow = record.get("reflow")
             if isinstance(reflow, dict) and str(reflow.get("status") or "") in {"queued", "running", "cancelling"}:

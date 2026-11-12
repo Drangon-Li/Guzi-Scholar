@@ -41,6 +41,9 @@ class HTTPKeepaliveTest(unittest.TestCase):
         job_id, job_dir = self.job_id, self.job_dir
 
         class IsolatedStore:
+            def resolve_id(self, requested):
+                return requested
+
             def get(self, requested):
                 return {"job_id": job_id, "job_dir": str(job_dir), "status": "completed"} if requested == job_id else None
 

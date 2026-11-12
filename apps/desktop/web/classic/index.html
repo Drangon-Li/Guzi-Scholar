@@ -6,6 +6,7 @@
   <title>谷子学术 · 本地论文阅读器</title>
   <link rel="icon" type="image/png" href="/web/assets/app-icon.png">
   <link rel="stylesheet" href="/web/classic/styles.css">
+  <link rel="stylesheet" href="/web/native-pdf.css">
 </head>
 <body>
   <header class="app-header">
@@ -32,16 +33,10 @@
         <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
         <div class="upload-icon" aria-hidden="true">＋</div>
         <div class="upload-title">拖入 PDF，或 <button id="choose-button" class="link-button" type="button">选择文件</button></div>
-        <div class="upload-hint">初版上限 100 MB · 解析在本机进行 · 无需登录</div>
+        <div class="upload-hint">上限 100 MB · 导入后可直接阅读原版 PDF</div>
         <div id="selected-file" class="selected-file" hidden></div>
         <button id="upload-button" class="primary-button" type="button" disabled>加入文献库</button>
         <div id="upload-error" class="inline-error" role="alert" hidden></div>
-      </section>
-
-      <section id="progress-card" class="progress-card" hidden>
-        <div class="progress-head"><span id="progress-stage">等待开始</span><span id="progress-value">0%</span></div>
-        <div class="progress-track"><div id="progress-bar" class="progress-bar"></div></div>
-        <div id="progress-detail" class="progress-detail">正在准备本地转换器…</div>
       </section>
 
       <section class="library-section">
@@ -49,6 +44,8 @@
         <div id="recent-list" class="library-grid"><div class="empty-state">还没有转换任务。拖入一份 PDF 开始。</div></div>
       </section>
     </section>
+
+    <section id="native-pdf-view" class="view" aria-label="原版 PDF 阅读" hidden></section>
 
     <section id="reader-view" class="view" hidden>
       <div class="reader-toolbar">
@@ -96,6 +93,7 @@
   </main>
 
   <footer class="site-footer">谷子学术 · 本地优先的学术阅读器</footer>
+  <script src="/web/native-pdf.js"></script>
   <script src="/web/classic/app.js"></script>
 </body>
 </html>

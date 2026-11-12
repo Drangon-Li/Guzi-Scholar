@@ -329,6 +329,8 @@ async function verifyElectron(paths, temporary) {
       const created = await request('/api/jobs', { method: 'POST', body: form });
       const id = created.job?.job_id;
       if (!id) throw new Error(`PDF upload did not return a job: ${JSON.stringify(created)}`);
+      if (created.job.status !== 'unparsed') throw new Error('PDF upload must wait for explicit parsing');
+      await request(`/api/jobs/${id}/parse`, { method: 'POST' });
       const deadline = Date.now() + 120000;
       let job;
       do {

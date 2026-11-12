@@ -26,6 +26,7 @@ apps/desktop/build/
 apps/desktop/dist/
 apps/desktop/mcp/bridge.cjs
 apps/desktop/mcp/bridge.cjs.LEGAL.txt
+apps/desktop/web/vendor/pdfjs/
 *.dmg
 *.pkg
 macos/resources/dmg-background.tiff

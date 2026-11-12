@@ -13,8 +13,7 @@
   $('#shortcut-settings').value = `${shortcutPrimaryModifier}+,`;
   const state = { jobs: [], activeJob: null, selection: null, annotations: [], chat: [] };
   let pickedFile = null;
-  let activeJobId = null;
-  let pollHandle = null;
+  let activePdfId = null;
 
   const escapeHTML = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
   const api = async (url, options = {}) => {
@@ -24,6 +23,17 @@
     return payload;
   };
   const jsonOptions = (body, method = 'POST') => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const nativePdf = window.GuziNativePdf.create({
+    container: $('#native-pdf-view'),
+    translate: async (job, text) => (await api(`/api/jobs/${job.job_id}/translate`, jsonOptions({ source_kind: 'pdf', text }))).result.text,
+    onParse: async (job) => {
+      const updated = await api(`/api/jobs/${job.job_id}/parse`, { method: 'POST' });
+      nativePdf.update(updated);
+      void pollPdf(updated);
+    },
+    onOpenParsed: openReader,
+    onBack: () => { switchView('library-view'); void loadLibrary(); },
+  });
 
   function selectionElement(rootDocument, event) {
     const selection = rootDocument?.getSelection?.();
@@ -33,11 +43,12 @@
   }
 
   function isEditableAppSurface(element) {
-    return Boolean(element?.closest?.('input, textarea, [contenteditable="true"], .notes-preview'));
+    return Boolean(element?.closest?.('input, textarea, [contenteditable="true"], .notes-preview, .native-pdf .textLayer, .native-pdf-translation'));
   }
 
   function guardAppSelection(event) {
-    if (!isEditableAppSurface(selectionElement(document, event))) event.preventDefault();
+    const target = event.type === 'selectstart' ? event.target : selectionElement(document, event);
+    if (!isEditableAppSurface(target)) event.preventDefault();
   }
 
   document.addEventListener('selectstart', guardAppSelection);
@@ -50,6 +61,10 @@
   }
 
   function switchView(viewId) {
+    if (viewId !== 'native-pdf-view' && activePdfId) {
+      nativePdf.close();
+      activePdfId = null;
+    }
     $$('.view').forEach((view) => { view.hidden = view.id !== viewId; view.classList.toggle('active-view', view.id === viewId); });
     $$('.nav-button').forEach((button) => button.classList.toggle('active', button.dataset.view === viewId));
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -75,37 +90,42 @@
   ['dragleave', 'drop'].forEach((eventName) => dropZone.addEventListener(eventName, (event) => { event.preventDefault(); dropZone.classList.remove('dragging'); }));
   dropZone.addEventListener('drop', (event) => choose(event.dataTransfer.files[0]));
 
-  function setProgress(job) {
-    const value = Math.max(0, Math.min(100, Math.round((job.progress || 0) * 100)));
-    $('#progress-card').hidden = false;
-    $('#progress-bar').style.width = `${value}%`;
-    $('#progress-value').textContent = `${value}%`;
-    $('#progress-stage').textContent = job.stage || '处理中';
-    $('#progress-detail').textContent = job.status === 'failed' ? (job.error || '转换失败') : '版面、图片、公式和表格正在生成可追溯结构…';
-  }
-
   async function upload() {
     if (!pickedFile) return;
     showError('');
     const button = $('#upload-button');
-    button.disabled = true; button.textContent = '解析中…';
+    button.disabled = true; button.textContent = '正在导入…';
     const form = new FormData(); form.append('file', pickedFile, pickedFile.name);
     try {
       const payload = await api('/api/jobs', { method: 'POST', body: form });
-      activeJobId = payload.job.job_id; setProgress(payload.job); poll();
-    } catch (error) { showError(error.message); button.disabled = false; }
-    finally { button.textContent = '加入文献库'; }
+      await loadLibrary();
+      openLibraryDocument(payload.job);
+      pickedFile = null;
+      $('#selected-file').hidden = true;
+      $('#file-input').value = '';
+    } catch (error) { showError(error.message); }
+    finally { button.textContent = '加入文献库'; button.disabled = !pickedFile; }
   }
   $('#upload-button').addEventListener('click', upload);
 
-  async function poll() {
-    if (!activeJobId) return;
+  async function pollPdf(job) {
+    if (!['queued', 'running'].includes(job.status)) { await loadLibrary(); return; }
+    if (activePdfId !== job.job_id) return;
     try {
-      const job = await api(`/api/jobs/${activeJobId}`); setProgress(job);
-      if (job.status === 'completed') { window.clearTimeout(pollHandle); await loadLibrary(); openReader(job); return; }
-      if (job.status === 'failed') { window.clearTimeout(pollHandle); showError(job.error || '转换失败'); $('#upload-button').disabled = false; await loadLibrary(); return; }
-      pollHandle = window.setTimeout(poll, 700);
-    } catch (error) { $('#progress-detail').textContent = error.message; pollHandle = window.setTimeout(poll, 1500); }
+      const updated = await api(`/api/jobs/${job.job_id}`);
+      nativePdf.update(updated);
+      job = updated;
+    } catch (_) { /* Keep reading available while the parse status is temporarily unreachable. */ }
+    window.setTimeout(() => void pollPdf(job), 1200);
+  }
+
+  function openLibraryDocument(job) {
+    if (job?.status === 'completed') { openReader(job); return; }
+    if (!job?.links?.source) return;
+    activePdfId = job.job_id;
+    switchView('native-pdf-view');
+    nativePdf.open(job);
+    if (['queued', 'running'].includes(job.status)) void pollPdf(job);
   }
 
   function renderLibrary(jobs = state.jobs) {
@@ -115,12 +135,12 @@
     if (!filtered.length) { $('#recent-list').innerHTML = '<div class="empty-state">没有匹配的文献。</div>'; return; }
     $('#recent-list').innerHTML = filtered.map((job) => {
       const counts = job.manifest?.counts || {};
-      const stateLabel = job.status === 'completed' ? '可阅读' : (job.status === 'failed' ? '失败' : '处理中');
+      const stateLabel = ({ completed: '可阅读', unparsed: '原版 PDF', failed: '解析失败' })[job.status] || '解析中';
       const date = job.created_at ? new Date(job.created_at).toLocaleDateString('zh-CN') : '';
-      return `<article class="library-card" data-job-id="${escapeHTML(job.job_id)}"><div class="library-card-head"><span class="file-badge">PDF</span><div><div class="library-name" title="${escapeHTML(job.source_filename)}">${escapeHTML(job.source_filename)}</div><div class="library-date">${date} · ${stateLabel}</div></div></div><div class="library-metrics"><span>${counts.pages ?? '—'} 页</span><span>${counts.tables ?? 0} 表</span><span>${counts.images ?? counts.major_figures ?? 0} 图</span><span>${counts.formulas ?? counts.display_formulas ?? 0} 公式</span></div><div class="library-card-footer">${job.status === 'completed' ? '<button class="open-link" type="button">打开阅读器 →</button>' : ''}</div></article>`;
+      return `<article class="library-card" data-job-id="${escapeHTML(job.job_id)}"><div class="library-card-head"><span class="file-badge">PDF</span><div><div class="library-name" title="${escapeHTML(job.source_filename)}">${escapeHTML(job.source_filename)}</div><div class="library-date">${date} · ${stateLabel}</div></div></div><div class="library-metrics"><span>${counts.pages ?? '—'} 页</span><span>${counts.tables ?? 0} 表</span><span>${counts.images ?? counts.major_figures ?? 0} 图</span><span>${counts.formulas ?? counts.display_formulas ?? 0} 公式</span></div><div class="library-card-footer">${job.status === 'completed' || job.links?.source ? '<button class="open-link" type="button">打开阅读器 →</button>' : ''}</div></article>`;
     }).join('');
     $$('.library-card').forEach((card) => card.addEventListener('click', () => {
-      const job = state.jobs.find((item) => item.job_id === card.dataset.jobId); if (job?.status === 'completed') openReader(job);
+      openLibraryDocument(state.jobs.find((item) => item.job_id === card.dataset.jobId));
     }));
   }
 
@@ -520,7 +540,7 @@
     state.chat = JSON.parse(localStorage.getItem(chatStorageKey()) || '[]'); renderChat();
   }
 
-  function openReader(job) { state.activeJob = job; activeJobId = job.job_id; $('#reader-title').textContent = job.source_filename; const counts = job.manifest?.counts || {}; $('#reader-meta').textContent = `${counts.pages || '—'} 页 · ${counts.tables || 0} 表 · ${counts.images || counts.major_figures || 0} 图 · ${counts.formulas || counts.display_formulas || 0} 公式`; $('#html-preview').src = `${job.links.html}?reader=1`; switchView('reader-view'); loadReaderData(job.job_id).catch((error) => setPanelStatus(error.message, true)); }
+  function openReader(job) { state.activeJob = job; $('#reader-title').textContent = job.source_filename; const counts = job.manifest?.counts || {}; $('#reader-meta').textContent = `${counts.pages || '—'} 页 · ${counts.tables || 0} 表 · ${counts.images || counts.major_figures || 0} 图 · ${counts.formulas || counts.display_formulas || 0} 公式`; $('#html-preview').src = `${job.links.html}?reader=1`; switchView('reader-view'); loadReaderData(job.job_id).catch((error) => setPanelStatus(error.message, true)); }
 
   function renderMarkdown(markdown) {
     let safe = escapeHTML(markdown || '');

@@ -524,6 +524,8 @@ body.resizing-reader-assistant * { cursor: col-resize !important; }
 
 .reader-frame-wrap { position: relative; width: 100%; height: 100%; min-width: 0; min-height: 0; overflow: hidden; border: 0; border-radius: 0; background: #fff; box-shadow: none; }
 #reader-documents { position: absolute; inset: 0; }
+#native-pdf-view { position: absolute; inset: 0; }
+#reader-view.is-native-pdf :is(.action-split:has(#full-translate-button), #reflow-button, #auto-highlight-button, #open-source-button, .typography-control, #reader-chapter-rail, #reader-search, .sidebar-tab[data-panel="outline-panel"], .sidebar-tab[data-panel="highlights-panel"], .sidebar-tab[data-panel="quick-preview-panel"]) { display: none; }
 .reader-document-frame { position: absolute; inset: 0; display: block; width: 100%; height: 100%; min-height: 0; border: 0; background: var(--paper,#fff); }
 .reader-document-frame:not(#html-preview) { visibility: hidden; pointer-events: none; }
 .reader-search { position: absolute; top: 12px; right: 16px; z-index: 8; display: flex; min-width: min(330px,calc(100% - 32px)); max-width: calc(100% - 32px); align-items: center; gap: 3px; padding: 4px; border: 1px solid var(--line); border-radius: 9px; background: var(--material-overlay); box-shadow: var(--shadow-pop); backdrop-filter: var(--material-filter); }
@@ -1038,8 +1040,9 @@ body.image-lightbox-open { overflow: hidden; }
 .ai-advanced-settings[open] > summary { margin-bottom: 12px; }
 .shortcut-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 11px 14px; margin-top: 10px; }
 .shortcut-grid label,.settings-field { display: grid; gap: 6px; color: var(--text-secondary); font-size: 13px; }
-.shortcut-grid input,.settings-field input,.settings-field select { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; outline: 0; background: var(--paper); color: var(--ink); font: inherit; font-size: 13px; box-shadow: 0 1px 2px rgba(28,39,49,.05); transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease; }
-.shortcut-grid input:focus-visible,.settings-field input:focus-visible,.settings-field select:focus-visible,.settings-select-field select:focus-visible { border-color: var(--accent); outline: 3px solid color-mix(in srgb,var(--accent) 32%,transparent); outline-offset: 0; }
+.shortcut-grid input,.settings-field input,.settings-field select,[data-ai-cli-custom] textarea { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; outline: 0; background: var(--paper); color: var(--ink); font: inherit; font-size: 13px; box-shadow: 0 1px 2px rgba(28,39,49,.05); transition: border-color var(--motion-fast) ease, box-shadow var(--motion-fast) ease; }
+.shortcut-grid input:focus-visible,.settings-field input:focus-visible,.settings-field select:focus-visible,.settings-select-field select:focus-visible,[data-ai-cli-custom] textarea:focus-visible { border-color: var(--accent); outline: 3px solid color-mix(in srgb,var(--accent) 32%,transparent); outline-offset: 0; }
+[data-ai-cli-custom] textarea { resize: vertical; }
 .shortcut-grid input { cursor: default; font-variant-numeric: tabular-nums; }
 .shortcut-grid input.is-capturing { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-dark); }
 .shortcut-grid input.is-invalid { border-color: #c44f45; background: color-mix(in srgb,#c44f45 6%,var(--paper)); }

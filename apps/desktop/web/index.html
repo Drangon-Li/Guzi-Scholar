@@ -14,6 +14,8 @@
   <meta name="apple-mobile-web-app-title" content="谷子学术">
   <link rel="apple-touch-icon" href="/web/assets/apple-touch-icon.png">
   <link rel="stylesheet" href="/web/styles.css">
+  <link rel="stylesheet" href="/web/paper-report.css">
+  <link rel="stylesheet" href="/web/native-pdf.css">
   <link id="reader-math-style" rel="stylesheet" href="/web/reader-math.css">
 </head>
 <body>
@@ -22,6 +24,7 @@
     <div class="brand-mark" aria-label="谷子学术"><picture class="brand-glyph-frame"><source media="(prefers-color-scheme: dark)" srcset="/web/assets/brand-glyph-dark-96.png"><img class="brand-glyph" src="/web/assets/brand-glyph-96.png" alt=""></picture><span>谷子学术</span></div>
     <nav class="top-nav" aria-label="主导航">
       <button class="nav-button active" data-view="library-view" type="button">文献库 <span id="library-count" class="nav-count">0</span></button>
+      <button id="paper-report-knowledge-nav" class="nav-button" data-view="report-knowledge-view" type="button" hidden>知识库</button>
       <button class="nav-button" data-view="market-view" type="button">插件市场</button>
     </nav>
     <div id="document-tabs" class="document-tabs header-document-tabs" role="tablist" aria-label="已打开文档" hidden></div>
@@ -85,7 +88,7 @@
         </aside>
         <main class="library-main">
           <div class="library-main-heading">
-            <div><div class="eyebrow">LOCAL LIBRARY</div><h1 id="library-heading">全部文献</h1><p id="library-subtitle" class="library-subtitle">本机保存 · HTML 连续阅读</p></div>
+            <div><div class="eyebrow">LOCAL LIBRARY</div><h1 id="library-heading">全部文献</h1><p id="library-subtitle" class="library-subtitle">本机保存</p></div>
             <div id="library-list-actions" class="library-main-actions"><label class="search-box"><span>⌕</span><input id="library-search" type="search" placeholder="搜索名称、标题或标签"></label><select id="library-sort" aria-label="文献排序"><option value="updated_at-desc">最近更新</option><option value="created_at-desc">最近加入</option><option value="title-asc">标题 A–Z</option><option value="importance-desc">重要程度</option></select><select id="library-status-filter" aria-label="按阅读状态筛选"><option value="">全部状态</option></select><button id="columns-button" class="secondary-button compact-button" type="button">列设置</button><button id="import-zotero-button" class="secondary-button compact-button" data-open-zotero-import type="button">从 Zotero 导入</button><button id="import-pdf-button" class="primary-button compact-button" type="button">导入 PDF</button></div>
             <div id="library-graph-actions" class="library-main-actions graph-header-actions" hidden><label class="search-box"><span>⌕</span><input id="graph-search" type="search" placeholder="搜索图谱中的文献"></label><button id="graph-fit-button" class="secondary-button compact-button" type="button">适应画布</button></div>
           </div>
@@ -166,6 +169,66 @@
       </div>
     </section>
 
+    <section id="paper-report-shell" class="view" aria-labelledby="paper-report-title" hidden>
+      <div class="paper-report-toolbar">
+        <button id="paper-report-back" class="action-button" type="button">‹ 文献库</button>
+        <div class="paper-report-toolbar-actions" aria-label="报告操作">
+          <button id="paper-report-regenerate" class="action-button" type="button" hidden>重新生成</button>
+          <button id="paper-report-edit" class="action-button" type="button" hidden>编辑</button>
+          <button id="paper-report-save" class="action-button" type="button" hidden>保存修改</button>
+          <button id="paper-report-cancel-edit" class="action-button" type="button" hidden>取消编辑</button>
+          <button id="paper-report-history" class="action-button" type="button" aria-expanded="false" aria-controls="paper-report-drawer" hidden>版本</button>
+          <button id="paper-report-discuss" class="action-button" type="button" aria-expanded="false" aria-controls="paper-report-drawer" hidden>讨论</button>
+          <button id="paper-report-knowledge" class="action-button" type="button">知识库</button>
+          <button id="paper-report-original" class="secondary-button" type="button">阅读原文</button>
+        </div>
+      </div>
+      <div class="paper-report-workspace">
+        <div id="paper-report-scroll" class="paper-report-scroll">
+          <article class="paper-report-article">
+            <header class="paper-report-header">
+              <h1 id="paper-report-title" class="copyable-data" tabindex="-1">精读报告</h1>
+              <p id="paper-report-coverage" class="paper-report-coverage" hidden></p>
+            </header>
+            <p id="paper-report-status" class="paper-report-status" role="status" hidden></p>
+            <div id="paper-report-draft" class="paper-report-draft" hidden></div>
+            <div id="paper-report-content"></div>
+          </article>
+        </div>
+        <aside id="paper-report-drawer" class="paper-report-drawer" aria-labelledby="paper-report-drawer-title" inert>
+          <header><h2 id="paper-report-drawer-title" tabindex="-1"></h2><button id="paper-report-close-drawer" class="toolbar-icon-button" type="button" aria-label="关闭侧栏">×</button></header>
+          <div id="paper-report-drawer-content" class="paper-report-drawer-content"></div>
+        </aside>
+      </div>
+      <dialog id="paper-report-concept-article" class="paper-report-concept-article" aria-labelledby="paper-report-concept-article-title">
+        <header class="paper-report-concept-article-heading">
+          <h2 id="paper-report-concept-article-title" class="copyable-data" tabindex="-1" autofocus></h2>
+          <form method="dialog"><button id="paper-report-concept-article-close" class="toolbar-icon-button" type="submit" aria-label="关闭完整解读">×</button></form>
+        </header>
+        <div id="paper-report-concept-article-scroll" class="paper-report-concept-article-scroll">
+          <p id="paper-report-concept-article-status" class="paper-report-status" role="status" hidden></p>
+          <button id="paper-report-concept-article-retry" class="secondary-button" type="button" hidden>重试</button>
+          <article id="paper-report-concept-article-content"></article>
+        </div>
+      </dialog>
+      <dialog id="paper-report-evidence" class="paper-report-evidence" aria-labelledby="paper-report-evidence-title">
+        <div class="paper-report-evidence-heading"><h2 id="paper-report-evidence-title" tabindex="-1">原文证据</h2><form method="dialog"><button class="toolbar-icon-button" type="submit" aria-label="关闭证据">×</button></form></div>
+        <blockquote id="paper-report-quote" class="copyable-data"></blockquote>
+        <p id="paper-report-evidence-status" class="paper-report-status error" role="status" hidden></p>
+        <button id="paper-report-locate" class="secondary-button" type="button">在原文中定位</button>
+      </dialog>
+    </section>
+
+    <section id="report-knowledge-view" class="view" aria-labelledby="report-knowledge-title" hidden>
+      <div class="report-knowledge-layout">
+        <div class="report-knowledge-header">
+          <button id="report-knowledge-back" class="action-button" type="button">‹ 文献库</button>
+          <h1 id="report-knowledge-title" tabindex="-1">知识库</h1>
+        </div>
+        <div id="report-knowledge-list" class="report-knowledge-list"></div>
+      </div>
+    </section>
+
     <section id="reader-view" class="view" hidden>
       <div class="reader-action-bar">
         <div class="reader-heading">
@@ -173,10 +236,11 @@
           <button id="reader-info-button" class="toolbar-icon-button" type="button" title="文档信息" aria-label="文档信息">ⓘ</button>
         </div>
         <div class="reader-actions" aria-label="阅读动作">
+          <button id="reader-open-report" class="action-button" type="button" hidden>精读报告</button>
           <span class="action-split" role="group" aria-label="全文翻译"><button id="full-translate-button" class="action-button" type="button" title="翻译全文（含附录）；再次点击可重新翻译已有译文的段落"><span class="action-icon">文</span><span id="full-translate-label">全文翻译</span></button><button id="full-translate-scope-button" class="action-button action-split-caret" type="button" title="翻译与阅读显示" aria-label="翻译与阅读显示" aria-haspopup="menu" aria-controls="translation-scope-menu" aria-expanded="false">⌄</button></span>
           <button id="reflow-button" class="action-button" type="button"><span class="action-icon">✧</span><span id="reflow-button-label">AI 重排</span></button>
           <button id="auto-highlight-button" class="action-button" type="button"><span class="action-icon">✦</span>重点高亮</button>
-          <button id="open-source-button" class="action-button" type="button"><span class="action-icon">⇱</span>切换源文件</button>
+          <button id="open-source-button" class="action-button" type="button"><span class="action-icon">⇱</span>阅读原版 PDF</button>
           <div class="typography-control">
             <button id="typography-button" class="action-button" type="button" aria-expanded="false" aria-controls="typography-popover"><span class="action-icon">Aa</span>文字</button>
           </div>
@@ -288,6 +352,7 @@
             <button id="reader-search-close" class="reader-search-button reader-search-close" type="button" title="关闭搜索" aria-label="关闭搜索">×</button>
           </div>
           <div id="reader-documents"></div>
+          <section id="native-pdf-view" aria-label="原版 PDF 阅读" hidden></section>
           <div id="selection-popover" class="selection-popover" hidden>
             <div class="selection-actions" role="toolbar" aria-label="选中文本操作">
               <button data-builtin-action="highlight" id="selection-highlight" type="button">高亮</button>
@@ -406,6 +471,17 @@
             <div class="ai-credentials-grid">
               <article class="ai-credential-card" data-ai-config="translation">
                 <div class="ai-credential-heading"><span class="ai-service-icon" aria-hidden="true">译</span><div><h3>翻译服务</h3><p>选区、段落与全文翻译</p></div></div>
+                <label class="settings-field" data-ai-transport="translation" hidden>接入方式<select id="setting-translation-cli-kind"><option value="">API</option><option value="codex">Codex CLI</option><option value="claude">Claude Code CLI</option><option value="custom">自定义 CLI</option></select></label>
+                <div data-ai-cli-fields="translation" hidden>
+                  <label class="settings-field">可执行文件路径<input id="setting-translation-cli-path" type="text" autocomplete="off" spellcheck="false" aria-describedby="setting-translation-cli-path-hint"></label>
+                  <p id="setting-translation-cli-path-hint" class="settings-field-hint"></p>
+                  <label class="settings-field" data-ai-cli-builtin="translation">模型（可选）<input id="setting-translation-cli-model" type="text" autocomplete="off" spellcheck="false" placeholder="使用 CLI 默认模型"></label>
+                  <div data-ai-cli-custom="translation" hidden>
+                    <label class="settings-field">参数（每行一个）<textarea id="setting-translation-cli-args" rows="3" spellcheck="false" aria-describedby="setting-translation-cli-args-hint"></textarea></label>
+                    <p id="setting-translation-cli-args-hint" class="settings-field-hint">例如使用自己的 DeepSeek 包装脚本。程序从标准输入读取 UTF-8 提示词，将纯文本结果写入标准输出。参数逐行原样传入。</p>
+                  </div>
+                </div>
+                <div data-ai-api-fields="translation">
                 <label class="settings-field">翻译提供商<select id="setting-translation-provider"><option value="openai-compatible">OpenAI-compatible</option><option value="volcengine">火山翻译（AK / SK）</option><option value="deepl">DeepL API</option></select></label>
                 <div data-translation-provider-fields="openai-compatible">
                 <label class="settings-field">Base URL<input id="setting-translation-base-url" type="url" inputmode="url" autocomplete="url" placeholder="例如：https://api.example.com/v1"></label>
@@ -442,12 +518,24 @@
                   <p class="settings-field-hint">使用火山引擎官方机器翻译接口和签名认证，密钥仅保存在本机。</p>
                 </div>
                 <label class="settings-field" data-translation-provider-fields="deepl" hidden>DeepL 套餐<select id="setting-translation-deepl-tier"><option value="free">API Free</option><option value="pro">API Pro</option></select></label>
+                </div>
                 <div class="translation-language-fields"><label class="settings-field">原文语言<input id="setting-translation-source-language" type="text" placeholder="auto" aria-label="原文语言"></label><label class="settings-field">译文语言<input id="setting-translation-target-language" type="text" placeholder="zh" aria-label="译文语言"></label></div>
-                <p class="settings-field-hint">语言代码示例：auto（自动检测原文）、zh、en、ja。知网翻译尚无可核实的官方公开 API。</p>
+                <p class="settings-field-hint">语言代码示例：auto（自动检测原文）、zh、en、ja。<span data-ai-api-fields="translation">知网翻译尚无可核实的官方公开 API。</span></p>
                 <div class="ai-credential-actions"><button id="test-translation-button" class="secondary-button compact-button" type="button">检测翻译服务</button><span id="translation-provider-test-result" role="status"></span></div>
               </article>
               <article class="ai-credential-card" data-ai-config="chat">
                 <div class="ai-credential-heading"><span class="ai-service-icon" aria-hidden="true">AI</span><div><h3>文章助手</h3><p>Chat、阅读重点与内容分析</p></div></div>
+                <label class="settings-field" data-ai-transport="chat" hidden>接入方式<select id="setting-chat-cli-kind"><option value="">API</option><option value="codex">Codex CLI</option><option value="claude">Claude Code CLI</option><option value="custom">自定义 CLI</option></select></label>
+                <div data-ai-cli-fields="chat" hidden>
+                  <label class="settings-field">可执行文件路径<input id="setting-chat-cli-path" type="text" autocomplete="off" spellcheck="false" aria-describedby="setting-chat-cli-path-hint"></label>
+                  <p id="setting-chat-cli-path-hint" class="settings-field-hint"></p>
+                  <label class="settings-field" data-ai-cli-builtin="chat">模型（可选）<input id="setting-chat-cli-model" type="text" autocomplete="off" spellcheck="false" placeholder="使用 CLI 默认模型"></label>
+                  <div data-ai-cli-custom="chat" hidden>
+                    <label class="settings-field">参数（每行一个）<textarea id="setting-chat-cli-args" rows="3" spellcheck="false" aria-describedby="setting-chat-cli-args-hint"></textarea></label>
+                    <p id="setting-chat-cli-args-hint" class="settings-field-hint">例如使用自己的 DeepSeek 包装脚本。程序从标准输入读取 UTF-8 提示词，将纯文本结果写入标准输出。参数逐行原样传入。</p>
+                  </div>
+                </div>
+                <div data-ai-api-fields="chat">
                 <label class="settings-field">Base URL<input id="setting-chat-base-url" type="url" inputmode="url" autocomplete="url" placeholder="例如：https://api.example.com/v1"></label>
                 <div class="settings-field settings-field-with-action">
                   <label for="setting-chat-api-key">API Key</label>
@@ -471,6 +559,7 @@
                 </details>
                 <div class="ai-credential-actions"><button class="secondary-button compact-button" data-ai-models="chat" type="button">查询模型</button><button class="secondary-button compact-button" data-ai-reuse-source="chat" data-ai-reuse-target="translation" type="button">复用到翻译服务</button></div>
                 <div class="ai-model-picker" id="setting-chat-model-picker" hidden><label class="settings-field">筛选模型<input id="setting-chat-model-filter" type="search" autocomplete="off" placeholder="输入关键词筛选"></label><select id="setting-chat-model-list" size="5" aria-label="文章助手模型列表"></select><small id="setting-chat-model-status" role="status"></small></div>
+                </div>
               </article>
             </div>
             <div id="ai-status-overview" class="ai-status-overview is-unknown" role="status" aria-live="polite">
@@ -490,7 +579,7 @@
                 <p id="setting-chat-result" class="ai-service-result" role="status" aria-live="polite" hidden></p>
               </article>
             </div>
-            <div class="settings-inline-actions"><button id="test-ai-button" class="secondary-button settings-test-button" type="button">立即检测</button><small class="settings-gateway-hint">仅在点击时发起真实请求，不会在后台持续调用。请求会直接发送到你填写的服务地址。</small></div>
+            <div class="settings-inline-actions"><button id="test-ai-button" class="secondary-button settings-test-button" type="button">立即检测</button><small class="settings-gateway-hint">点击后会按当前配置发起连接检测。</small></div>
             <div class="ai-status-history"><div class="ai-status-history-heading"><strong>检测历史</strong><small id="ai-status-history-count">仅保存在当前设备</small></div><ol id="ai-status-history-list"><li class="ai-status-history-empty">还没有检测记录。</li></ol><nav id="ai-status-history-pagination" class="ai-status-history-pagination" aria-label="检测历史翻页" hidden><button id="ai-status-history-prev" class="secondary-button compact-button" type="button">上一页</button><span id="ai-status-history-page" aria-live="polite"></span><button id="ai-status-history-next" class="secondary-button compact-button" type="button">下一页</button></nav></div>
           </section>
           <section id="settings-mcp" class="settings-section" aria-labelledby="settings-mcp-title" hidden>
@@ -705,6 +794,11 @@
     </div>
   </dialog>
 
+  <dialog id="paper-report-historical-source" class="paper-report-historical-source" aria-labelledby="paper-report-historical-title">
+    <header class="paper-report-evidence-heading"><h2 id="paper-report-historical-title">历史原文</h2><button class="toolbar-icon-button" data-report-historical-close type="button" aria-label="关闭历史原文">×</button></header>
+    <iframe class="paper-report-historical-frame" sandbox="allow-same-origin" title="引用所在版本的论文原文"></iframe>
+  </dialog>
+
   <script src="/web/vendor/cytoscape.min.js"></script>
   <script src="/web/graph-model.js"></script>
   <script src="/web/graph-view.js"></script>
@@ -718,6 +812,8 @@
   <script src="/web/plugin-host.js"></script>
   <script src="/web/market.js"></script>
   <script src="/web/mcp-settings.js"></script>
+  <script src="/web/paper-report.js"></script>
+  <script src="/web/native-pdf.js"></script>
   <script defer src="/web/test-build.js"></script>
   <script src="/web/app.js"></script>
 </body>

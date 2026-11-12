@@ -30,7 +30,7 @@ async function harness() {
   const listeners = new Map();
   const timers = new Map();
   const nodes = new Map();
-  const controls = { failNotes: new Set(), conflictNotes: new Set(), failSettings: false, failDisk: false, rejectNotes: false, blockNotes: null };
+  const controls = { failNotes: new Set(), conflictNotes: new Set(), failSettings: false, failDisk: false, rejectNotes: false, blockNotes: null, reportFlushes: 0 };
   let timerId = 0;
   let diskWrites = 0;
   const node = (selector) => {
@@ -94,8 +94,10 @@ async function harness() {
     syncReaderShortcutHints() {}, renderAISettings() {}, renderSelectionActions() {}, applyAppearance() {},
     cancelImportMetadataFollowup() {}, checkHealth: async () => {}, showToast(message) { controls.lastError = message; },
     setArticleNotesStatus() {}, renderArticleNoteConflict() {},
+    paperReport: { async flush() { controls.reportFlushes += 1; return !controls.failReport; } },
     captureCurrentReadingLocation() { context.module.exports.persistentStateSet('reading', 'last-location'); },
     frameDocument: () => controls.readerDocument || null,
+    currentAnnotationMount: () => context.readerMount,
     translationProfileId: () => 'profile', translationTargetLanguage: () => 'zh',
     translationSourceHash: () => 'hash', translationSourceIdentity: (source) => source.text,
     protectSpecialTokens: (text) => ({ text, tokens: [] }), SPECIAL_MATH_TOKEN_RE: /__MATH__/gu,
@@ -142,6 +144,15 @@ async function harness() {
 const draft = (jobId, markdown = jobId) => ({ jobId, markdown, revision: 1, baseRevision: `base-${jobId}` });
 
 (async () => {
+  {
+    const h = await harness();
+    h.controls.failReport = true;
+    assert.equal(await h.close({ intent: 'quit' }), false, 'Unsaved report changes must block quit');
+    assert.equal(h.controls.reportFlushes, 1);
+    assert.equal(await h.close({ intent: 'quit', discard: true }), true, 'Explicit discard bypasses report saves');
+    assert.equal(h.controls.reportFlushes, 1);
+    h.resume();
+  }
   {
     const h = await harness();
     h.controls.annotationResponses = [];

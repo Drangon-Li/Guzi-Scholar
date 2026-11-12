@@ -29,6 +29,7 @@ READONLY_MODE = _flag("MY_SCHOLAR_READONLY")
 # Security-relevant switches. These gate authentication, transport policy and
 # the migration control endpoints, so they must have exactly one definition.
 API_ACCESS_TOKEN = os.environ.get("MY_SCHOLAR_API_TOKEN", "").strip()
+DESKTOP_CLI_ALLOWED = _flag("MY_SCHOLAR_DESKTOP_CLI")
 MIGRATION_CONTROL_TOKEN = os.environ.get("MY_SCHOLAR_MIGRATION_TOKEN", "").strip()
 ACCOUNT_SERVICE_URL = os.environ.get("MY_SCHOLAR_ACCOUNT_URL", "").strip().rstrip("/")
 ALLOW_INSECURE_LOOPBACK_ACCOUNT = _flag("MY_SCHOLAR_ALLOW_INSECURE_LOOPBACK_ACCOUNT")
@@ -44,6 +45,11 @@ AI_REQUIRES_MEMBER = str(
 # Hosts that count as this machine for transport and origin checks. Immutable,
 # so importing it by name is safe.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def desktop_cli_available() -> bool:
+    return DESKTOP_CLI_ALLOWED and bool(API_ACCESS_TOKEN) and not READONLY_MODE
+
 
 # Guards METADATA_PENDING and the metadata generation bookkeeping in server.py.
 METADATA_STATE_LOCK = threading.RLock()
@@ -61,4 +67,5 @@ __all__ = [
     "METADATA_STATE_LOCK",
     "MIGRATION_CONTROL_TOKEN",
     "READONLY_MODE",
+    "desktop_cli_available",
 ]

@@ -8,8 +8,12 @@
   --soft: #f7f9fa;
   --accent: #2f6fed;
   --accent-dark: #1d55bd;
+  --accent-soft: #edf3ff;
+  --text-secondary: #4d5b68;
+  --error: #9a2837;
   --green: #2f9d79;
   --shadow: 0 12px 34px rgba(30, 48, 65, .08);
+  --shadow-pop: var(--shadow);
   --reader-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Segoe UI", sans-serif;
   --app-font: var(--reader-font);
 }

@@ -1122,7 +1122,7 @@ let browserSession;
       const result = {
         contentSize: root.getPropertyValue('--reader-content-font-size').trim(),
         supportSize: root.getPropertyValue('--reader-support-font-size').trim(),
-        toolbarSize: getComputedStyle(document.querySelector('.action-button')).fontSize,
+        toolbarSize: getComputedStyle(document.querySelector('#full-translate-button')).fontSize,
         appFont: getComputedStyle(document.body).fontFamily,
         chatBubble: measure(chatBubble),
         chatEmpty: measure(chatEmpty),

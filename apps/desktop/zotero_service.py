@@ -77,7 +77,7 @@ class ZoteroImports:
         with self.lock:
             batch = self._read(batch_id)
             if batch["status"] == "running" and self.active_id != batch_id:
-                batch.update(status="failed", error="上次导入因应用退出而中断；已接收的文献会继续解析，可重新选择剩余条目导入。")
+                batch.update(status="failed", error="上次导入因应用退出而中断。已接收的 PDF 保存在文献库，可重新选择剩余条目导入。")
                 write_json(self.root / f"{batch_id}.json", batch)
             return batch
 

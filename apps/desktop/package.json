@@ -1,6 +1,6 @@
 {
   "name": "my-scholar",
-  "version": "0.6.13",
+  "version": "0.7.0",
   "private": true,
   "license": "Apache-2.0",
   "description": "Clean-room local academic PDF reader",
@@ -52,6 +52,7 @@
     "test:ui:translation-controls": "node tests/run_ui_tests.js --only=translation-controls",
     "test:ui:vocabulary": "node tests/run_ui_tests.js --only=vocabulary",
     "mcp:build": "node scripts/build-mcp.cjs",
+    "postinstall": "node scripts/prepare-pdfjs.cjs",
     "dev:plugins": "node scripts/start-development.cjs",
     "prestart": "npm run mcp:build",
     "predev": "npm run mcp:build",
@@ -81,7 +82,8 @@
     "electron-builder": "26.15.3",
     "esbuild": "0.28.2",
     "eslint": "^9.39.5",
-    "globals": "^17.11.0"
+    "globals": "^17.11.0",
+    "pdfjs-dist": "6.5.438"
   },
   "build": {
     "appId": "com.guzi.scholar",

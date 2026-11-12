@@ -243,6 +243,10 @@ if (packagedApp) {
   ]) {
     assert.ok(fs.statSync(path.join(resourcesRoot, 'app', relative)).isFile(), `${relative} is missing from the packaged plugin runtime`);
   }
+  for (const relative of ['LICENSE', 'build/pdf.mjs', 'build/pdf.worker.mjs', 'build/pdf.renderer.mjs']) {
+    const file = path.join(resourcesRoot, 'app', 'web', 'vendor', 'pdfjs', relative);
+    assert.ok(fs.statSync(file).isFile(), `${relative} is missing from the packaged PDF.js runtime`);
+  }
   runChecked(process.execPath, [
     path.join(__dirname, 'mcp_bridge_test.js'), appExecutable,
     path.join(resourcesRoot, 'app', 'mcp', 'bridge.cjs'),

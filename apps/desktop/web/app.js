@@ -369,11 +369,48 @@
   };
   const annotationOperations = window.MyScholarAnnotationOperations.create({
     request: requestAPI, getCloseGate: () => request.closeGate, waitForCloseResume,
-    state, mounts: readerMounts, getCurrentMount: () => readerMount,
+    state, mounts: readerMounts, getCurrentMount: currentAnnotationMount,
     isCurrentMount: readerMountIsCurrent, matchesMount: readerMountMatches, isAIAnnotation,
   });
   const api = annotationOperations.api;
   const jsonOptions = (body, method = 'POST') => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  let activeReportJobId = null;
+  const paperReport = isDesktopApp && window.GuziPaperReport?.create({
+    api: requestAPI,
+    aiConfigured: () => healthAIService('chat')?.enabled === true,
+    openSource: openReportSource,
+    renderMath: () => hydrateFrameMath(document),
+    openOriginal: (job) => openReader(reportJob(job.job_id) || job),
+    backToLibrary: () => switchView('library-view'),
+    showKnowledge: openReportKnowledge,
+    openKnowledgeEntry: (entry, { evidence } = {}) => {
+      const job = reportJob(entry.job_id);
+      if (!job) throw new Error('这篇文献当前不可用。');
+      if (evidence) return openReportSource(job, evidence);
+      openPaperReport(job, { conceptId: entry.concept_id });
+    },
+  });
+  const reportKnowledgeNav = $('#paper-report-knowledge-nav');
+  if (reportKnowledgeNav) reportKnowledgeNav.hidden = !paperReport;
+  $('#reader-open-report')?.addEventListener('click', () => openPaperReport(state.activeJob));
+  let activeNativePdfJobId = null;
+  let nativePdfMount = null;
+  const nativePdfTabs = new Set();
+  const pdfParsePolls = new Set();
+  const nativePdf = !browserDemo && window.GuziNativePdf?.create({
+    container: $('#native-pdf-view'),
+    embedded: true,
+    onSelection: showNativePdfSelection,
+    onAnnotationClick: (_job, annotation, anchor) => showInlineAnnotation(annotation, anchor),
+    isSelectionInteraction: (target) => Boolean(target?.closest('#selection-popover, .annotation-note-popover')),
+    onViewportChange: refreshNativePdfOverlays,
+    onParse: startPdfParsing,
+    onOpenParsed: (job) => {
+      nativePdfTabs.delete(job.job_id);
+      openReader(job);
+    },
+    onBack: () => switchView('library-view'),
+  });
   const pluginHost = window.MyScholarPluginHost.create({
     api, jsonOptions, navigate: openPrimaryView, toast: showToast, confirm: requestConfirmation,
     onRemoved: () => switchView('library-view'),
@@ -430,6 +467,8 @@
 
   function translationProviderLabel(record) {
     const snapshot = record?.provider_snapshot || {};
+    const cliLabel = aiCliLabels.get(snapshot.cli_kind);
+    if (cliLabel) return snapshot.model ? `${cliLabel} · ${snapshot.model}` : cliLabel;
     return snapshot.model || record?.model || snapshot.provider || record?.provider || '先前保存的译文';
   }
 
@@ -460,7 +499,7 @@
   }
 
   function isEditableAppSurface(element) {
-    return Boolean(element?.closest?.('input, textarea, select, [contenteditable="true"], .chat-bubble, .copyable-data, .library-details, .vocabulary-card, .vocabulary-review'));
+    return Boolean(element?.closest?.('input, textarea, select, [contenteditable="true"], .chat-bubble, .copyable-data, .library-details, .vocabulary-card, .vocabulary-review, .native-pdf .textLayer, .native-pdf-translation'));
   }
 
   function guardAppSelection(event) {
@@ -519,6 +558,7 @@
     if (viewId !== 'reader-view') closeTranslationScopeMenu();
     if (viewId !== 'reader-view') closeReaderSearch({ reset: true });
     if (viewId !== 'reader-view' && $('#reader-view')?.classList.contains('active-view')) captureCurrentReadingLocation();
+    if (viewId !== 'reader-view' && activeNativePdfJobId) closeNativePdf();
     if (viewId !== 'settings-view' && $('#settings-view')?.classList.contains('active-view')) {
       void flushPendingSettings();
       // The section hash exists so a reload lands back on the open settings
@@ -549,11 +589,12 @@
       }
       view.classList.toggle('active-view', active);
     });
-    if (viewId !== 'reader-view') state.primaryView = viewId === 'plugin-preview-view' ? 'market-view' : viewId;
+    const documentView = ['reader-view', 'paper-report-shell'].includes(viewId);
+    if (!documentView) state.primaryView = viewId === 'plugin-preview-view' ? 'market-view' : viewId;
     // The document tab is the active surface while reading. Keep the library
     // or saved-view context in state for returning there, but do not paint a
     // second, misleading underline in the primary navigation.
-    const activeNavView = viewId === 'reader-view' ? null : viewId === 'plugin-preview-view' ? 'market-view' : viewId;
+    const activeNavView = documentView ? null : viewId === 'plugin-preview-view' ? 'market-view' : viewId;
     $$('.nav-button').forEach((button) => button.classList.toggle('active', button.dataset.view === activeNavView));
     document.body.classList.toggle('reader-mode', viewId === 'reader-view');
     // Open document tabs remain available outside the reader, but only the
@@ -577,6 +618,7 @@
   }
 
   function openPrimaryView(viewId) {
+    if (viewId === 'report-knowledge-view') { openReportKnowledge(); return; }
     if (viewId === 'library-view') {
       state.activeViewId = null;
       state.activeFolderId ||= 'system-all';
@@ -584,6 +626,187 @@
     switchView(viewId);
   }
   $$('.nav-button').forEach((button) => button.addEventListener('click', () => openPrimaryView(button.dataset.view)));
+
+  function reportJob(jobId) {
+    if (state.library?.items?.[jobId]?.deleted_at) return null;
+    return state.jobs.find((job) => job.job_id === jobId && job.status === 'completed') || null;
+  }
+
+  function nativePdfAvailable(job) {
+    return Boolean(nativePdf && !state.health?.readonly && job?.links?.source);
+  }
+
+  function openPreferredDocument(job) {
+    if (nativePdfAvailable(job) && (job.status !== 'completed' || nativePdfTabs.has(job.job_id))) {
+      openNativePdf(job);
+    } else if (job.status === 'completed') {
+      openPaperReport(job);
+    }
+  }
+
+  function openNativePdf(job) {
+    if (!nativePdfAvailable(job)) return;
+    if (activeNativePdfJobId === job.job_id) {
+      nativePdf.update(job);
+      return;
+    }
+    captureCurrentReadingLocation();
+    const notesReady = flushPendingArticleNotes(state.activeJob?.job_id);
+    const previousAnnotations = state.activeJob?.job_id === job.job_id ? state.annotations : [];
+    if (readerMount) {
+      readerMount.annotations = state.annotations;
+      readerMount.aiHighlights = state.aiHighlights;
+      deactivateReaderMount();
+      readerMount = null;
+    }
+    closeNativePdf();
+    closeChatSessionMenu();
+    closeImageContextMenu();
+    closeImageLightbox({ restoreFocus: false });
+    nativePdfTabs.add(job.job_id);
+    activeNativePdfJobId = job.job_id;
+    state.activeJob = job;
+    activeJobId = job.job_id;
+    const mount = nativePdfMount = { jobId: job.job_id, annotations: previousAnnotations };
+    state.annotations = mount.annotations;
+    state.aiHighlights = [];
+    state.chat = chatSession(job.job_id);
+    state.chatSelection = null;
+    state.translationCache = state.translationCaches.get(job.job_id) || [];
+    state.translationRun = state.translationRuns.get(job.job_id) || null;
+    setChatHistoryOpen(false, { focus: false });
+    resetReaderProgress();
+    renderAnnotations();
+    renderChat();
+    setPanelStatus('');
+    renderSelectedContext();
+    const notesSession = prepareArticleNotes(job.job_id);
+    const isNew = !state.openDocuments.some((document) => document.job_id === job.job_id);
+    if (isNew) {
+      state.openDocuments.push(job);
+      persistOpenDocuments();
+    }
+    setNativePdfMode(true);
+    syncNativePdfReportAction(job);
+    switchView('reader-view', { enteringDocumentId: isNew ? job.job_id : null });
+    nativePdf.open(job);
+    nativePdf.setAnnotations(mount.annotations);
+    watchPdfParsing(job);
+    void loadNativePdfData(mount, notesReady, notesSession);
+    void markReadingStarted(job.job_id);
+  }
+
+  function setNativePdfMode(enabled) {
+    $('#native-pdf-view').hidden = !enabled;
+    $('#reader-view').classList.toggle('is-native-pdf', enabled);
+    if (enabled && !nativePdfSidebarPanel($('.sidebar-tab.active')?.dataset.panel)) {
+      switchSidebar('annotations-panel', { open: false });
+    }
+  }
+
+  function nativePdfSidebarPanel(id) {
+    return ['chat-panel', 'annotations-panel', 'notes-panel'].includes(id);
+  }
+
+  function syncNativePdfReportAction(job) {
+    $('#reader-open-report').hidden = !paperReport || job.status !== 'completed';
+  }
+
+  function closeNativePdf() {
+    if (!nativePdfMount) return;
+    closeInlineAnnotation(document, { immediate: true });
+    clearSelectionPopover({ clearState: true, immediate: true });
+    nativePdfMount = null;
+    activeNativePdfJobId = null;
+    nativePdf.close();
+    setNativePdfMode(false);
+  }
+
+  async function loadNativePdfData(mount, notesReady, notesSession) {
+    const { jobId, annotations: before } = mount;
+    const annotations = api(`/api/jobs/${jobId}/annotations`).then((payload) => {
+      if (!readerMountMatches(mount) || mount.annotations !== before) return;
+      state.annotations = mount.annotations = payload.annotations || [];
+      renderFrameAnnotations();
+      renderAnnotations();
+    }).catch((error) => { if (readerMountMatches(mount)) showToast(error.message, true); });
+    const notes = Promise.resolve(notesReady).catch(() => {}).then(() => api(`/api/jobs/${jobId}/notes`)).then((payload) => {
+      if (readerMountMatches(mount)) loadArticleNotes(jobId, payload.markdown || '', notesSession, payload.revision);
+    }).catch((error) => { if (readerMountMatches(mount)) handleArticleNotesLoadError(jobId, error, notesSession); });
+    await Promise.all([annotations, notes]);
+  }
+
+  function mergePdfParseState(job) {
+    const previousStatus = state.jobs.find((current) => current.job_id === job.job_id)?.status;
+    const update = (current) => current.job_id === job.job_id ? { ...current, ...job } : current;
+    state.jobs = state.jobs.map(update);
+    state.openDocuments = state.openDocuments.map(update);
+    if (activeNativePdfJobId === job.job_id) {
+      state.activeJob = update(state.activeJob);
+      nativePdf.update(job);
+      syncNativePdfReportAction(job);
+    }
+    renderDocumentTabs();
+    if (previousStatus !== job.status) {
+      if ($('#library-view').classList.contains('active-view')) renderLibrary();
+      if ($('#views-view').classList.contains('active-view')) renderViews();
+    }
+  }
+
+  async function startPdfParsing(job) {
+    const updated = await api(`/api/jobs/${job.job_id}/parse`, { method: 'POST' });
+    mergePdfParseState(updated);
+    watchPdfParsing(updated);
+    return updated;
+  }
+
+  function watchPdfParsing(job) {
+    const { job_id: jobId, status } = job;
+    if (!['queued', 'running'].includes(status) || pdfParsePolls.has(jobId)) return;
+    pdfParsePolls.add(jobId);
+    const poll = async () => {
+      if (!pdfParsePolls.has(jobId)) return;
+      try {
+        const updated = await api(`/api/jobs/${jobId}`);
+        if (!pdfParsePolls.has(jobId)) return;
+        if (!['queued', 'running'].includes(updated.status)) {
+          pdfParsePolls.delete(jobId);
+          mergePdfParseState(updated);
+          if (updated.status === 'completed') void loadLibrary();
+          return;
+        }
+        mergePdfParseState(updated);
+      } catch (error) {
+        if (error.status === 404) {
+          pdfParsePolls.delete(jobId);
+          return;
+        }
+      }
+      window.setTimeout(poll, 1200);
+    };
+    window.setTimeout(poll, 700);
+  }
+
+  function openPaperReport(job, { conceptId = null } = {}) {
+    if (!job || job.status !== 'completed') return;
+    if (!paperReport || state.health?.readonly) { openReader(job); return; }
+    if (activeReportJobId !== job.job_id && !paperReport.canLeave()) return;
+    activeReportJobId = job.job_id;
+    const isNew = !state.openDocuments.some((document) => document.job_id === job.job_id);
+    if (isNew) {
+      state.openDocuments.push(job);
+      persistOpenDocuments();
+    }
+    switchView('paper-report-shell', { enteringDocumentId: isNew ? job.job_id : null });
+    markReadingStarted(job.job_id);
+    void paperReport.open(job, { generate: healthAIService('chat')?.enabled === true, conceptId });
+  }
+
+  function openReportKnowledge() {
+    if (!paperReport || state.health?.readonly) return;
+    switchView('report-knowledge-view');
+    void paperReport.openKnowledge();
+  }
 
   const settingsNavigationLinks = $$('.settings-navigation a[href^="#settings-"]');
   let activeSettingsSectionId = settingsNavigationLinks[0]?.getAttribute('href')?.slice(1) || 'settings-reading';
@@ -774,14 +997,16 @@
     }
     container.hidden = false;
     container.closest('.app-header')?.classList.add('has-document-tabs');
-    const readerIsActive = Boolean($('#reader-view')?.classList.contains('active-view'));
-    const rovingJobId = (readerIsActive ? state.activeJob?.job_id : null) || state.activeJob?.job_id || state.openDocuments[0]?.job_id;
+    const readerIsActive = $('#reader-view')?.classList.contains('active-view');
+    const reportIsActive = $('#paper-report-shell')?.classList.contains('active-view');
+    const activeDocumentId = readerIsActive ? state.activeJob?.job_id : reportIsActive ? activeReportJobId : activeNativePdfJobId;
+    const rovingJobId = activeDocumentId || state.activeJob?.job_id || activeReportJobId || state.openDocuments[0]?.job_id;
     const tabsModel = state.openDocuments.map((job) => ({ job, title: itemTitle({ job, item: state.library?.items?.[job.job_id] || {} }) }));
     const structureKey = JSON.stringify(tabsModel.map(({ job, title }) => [job.job_id, title]));
     const busyDocuments = busyDocumentIds();
     if (container.dataset.structureKey === structureKey) {
       container.querySelectorAll('.document-tab').forEach((tab) => {
-        const active = readerIsActive && state.activeJob?.job_id === tab.dataset.jobId;
+        const active = activeDocumentId === tab.dataset.jobId;
         tab.classList.toggle('active', active);
         tab.setAttribute('aria-selected', String(active));
         tab.tabIndex = tab.dataset.jobId === rovingJobId ? 0 : -1;
@@ -791,7 +1016,7 @@
     }
     container.dataset.structureKey = structureKey;
     container.innerHTML = tabsModel.map(({ job, title }) => {
-      const active = readerIsActive && state.activeJob?.job_id === job.job_id ? ' active' : '';
+      const active = activeDocumentId === job.job_id ? ' active' : '';
       const entering = enteringJobId === job.job_id ? ' is-entering' : '';
       return `<div class="document-tab${active}${entering}" data-job-id="${escapeHTML(job.job_id)}" role="tab" aria-selected="${active ? 'true' : 'false'}" tabindex="${job.job_id === rovingJobId ? '0' : '-1'}"><span class="document-tab-label" title="${escapeHTML(title)}">${escapeHTML(title)}</span><button class="document-tab-close" data-close-job-id="${escapeHTML(job.job_id)}" type="button" tabindex="-1" aria-label="关闭 ${escapeHTML(title)}">×</button></div>`;
     }).join('');
@@ -799,9 +1024,11 @@
     container.querySelectorAll('.document-tab').forEach((tab) => tab.addEventListener('click', (event) => {
       if (event.target.closest('[data-close-job-id]')) return;
       const job = state.openDocuments.find((item) => item.job_id === tab.dataset.jobId) || state.jobs.find((item) => item.job_id === tab.dataset.jobId);
-      // Clicking the already-mounted tab must not tear down and rebuild the
-      // whole reader; only genuinely different documents remount the iframe.
-      if (job && !($('#reader-view')?.classList.contains('active-view') && state.activeJob?.job_id === job.job_id)) openReader(job, { addTab: false });
+      if (!job) return;
+      if ($('#reader-view')?.classList.contains('active-view') && state.activeJob?.job_id === job.job_id) return;
+      if ($('#paper-report-shell')?.classList.contains('active-view') && activeReportJobId === job.job_id) return;
+      if (activeNativePdfJobId === job.job_id) return;
+      openPreferredDocument(job);
     }));
     container.querySelectorAll('.document-tab').forEach((tab) => tab.addEventListener('keydown', (event) => {
       const tabs = [...container.querySelectorAll('.document-tab:not(.is-closing)')];
@@ -835,6 +1062,7 @@
   async function closeDocumentTab(jobId) {
     const tab = $('#document-tabs')?.querySelector(`.document-tab[data-job-id="${cssEscape(jobId)}"]`);
     if (tab?.classList.contains('is-closing')) return;
+    if (activeReportJobId === jobId && !paperReport.canLeave()) return;
     if (state.activeJob?.job_id === jobId) captureCurrentReadingLocation();
     const restoreTabFocus = Boolean(tab?.contains(document.activeElement));
     if (tab && !reducedMotionQuery.matches) {
@@ -859,19 +1087,36 @@
     }
     const index = state.openDocuments.findIndex((job) => job.job_id === jobId);
     if (index < 0) return;
+    const showingReport = $('#paper-report-shell')?.classList.contains('active-view');
+    const wasReport = activeReportJobId === jobId && showingReport;
+    if (activeReportJobId === jobId) {
+      activeReportJobId = null;
+      paperReport.close();
+    }
     const wasActive = state.activeJob?.job_id === jobId;
+    const wasNative = activeNativePdfJobId === jobId;
+    nativePdfTabs.delete(jobId);
     if (wasActive) flushPendingArticleNotes(jobId);
     disposeReaderMount(jobId);
     state.openDocuments.splice(index, 1);
     releaseClosedDocumentCaches(jobId);
     persistOpenDocuments();
-    if (!wasActive) {
-      renderDocumentTabs();
+    const next = state.openDocuments[index] || state.openDocuments[index - 1];
+    if (wasNative && next) {
+      openPreferredDocument(next);
       if (restoreTabFocus) window.requestAnimationFrame(() => $('#document-tabs .document-tab[tabindex="0"]')?.focus({ preventScroll: true }));
       return;
     }
-    const next = state.openDocuments[index] || state.openDocuments[index - 1];
-    if (next) openReader(next, { addTab: false });
+    if (!wasActive || (showingReport && !wasReport)) {
+      if (wasActive) { state.activeJob = null; activeJobId = null; }
+      if (wasReport && next) openPreferredDocument(next);
+      else if (wasReport) switchView('library-view');
+      else renderDocumentTabs();
+      if (restoreTabFocus) window.requestAnimationFrame(() => $('#document-tabs .document-tab[tabindex="0"]')?.focus({ preventScroll: true }));
+      return;
+    }
+    if (next && wasReport) openPreferredDocument(next);
+    else if (next) openReader(next, { addTab: false });
     else {
       state.activeJob = null;
       activeJobId = null;
@@ -1084,12 +1329,13 @@
     item.job = job;
     item.progress = 1;
     item.stage = job?.stage || '';
-    if (job?.status === 'completed') {
+    if (job?.status === 'completed' || job?.status === 'unparsed') {
       item.status = 'done';
       if (!wasTerminal) trackImportMetadata(item, job);
       if (item.autoOpen && !item.opened) {
         item.opened = true;
-        openReader(job);
+        if (nativePdfAvailable(job)) openNativePdf(job);
+        else openReader(job);
       }
     } else {
       item.status = 'failed';
@@ -1103,7 +1349,7 @@
     if (!job) return;
     item.jobId = job.job_id || item.jobId;
     item.job = job;
-    if (job.status === 'completed' || job.status === 'failed') {
+    if (['completed', 'unparsed', 'failed'].includes(job.status)) {
       completeImportItem(item, job);
       return;
     }
@@ -2024,9 +2270,10 @@
         : `<button class="row-cell-button" type="button"${state.health?.readonly === true ? ' disabled' : ''} data-cell-edit="${escapeHTML(propertyId)}" data-cell-job="${escapeHTML(entry.jobId)}" aria-haspopup="dialog" aria-label="设置${escapeHTML(label)}">${inner}</button>`);
       const topics = Array.isArray(values.research_topic) ? values.research_topic : [];
       const title = itemTitle(entry);
+      const fileStatus = ({ unparsed: '原版 PDF', queued: '等待解析', running: '正在解析', failed: '解析失败' })[job.status];
       const cell = (column) => {
         const id = String(column.id);
-        if (id === 'name') return `<div class="library-row-name"><div class="library-row-name-text"><strong title="${escapeHTML(itemAlias(entry) ? `原题：${itemOriginalTitle(entry)}` : title)}">${escapeHTML(title || '未命名文献')}</strong><small>${escapeHTML(job.created_at ? new Date(job.created_at).toLocaleDateString('zh-CN') : '')} · ${counts.pages || '—'} 页</small></div></div>`;
+        if (id === 'name') return `<div class="library-row-name"><div class="library-row-name-text"><strong title="${escapeHTML(itemAlias(entry) ? `原题：${itemOriginalTitle(entry)}` : title)}">${escapeHTML(title || '未命名文献')}</strong><small>${escapeHTML(job.created_at ? new Date(job.created_at).toLocaleDateString('zh-CN') : '')} · ${fileStatus || `${counts.pages || '—'} 页`}</small></div></div>`;
         if (id === 'title') return `<div class="library-row-title" title="${escapeHTML(title)}">${escapeHTML(title)}</div>`;
         if (id === 'research_topic') return editableCell('research_topic', `<div class="library-tags">${topics.length ? topics.map((topic) => `<span class="tag-chip">${escapeHTML(topic)}</span>`).join('') : '<span class="property-placeholder">—</span>'}</div>`, '研究主题');
         if (id === 'importance') {
@@ -2049,9 +2296,15 @@
       const selectedIds = selectedLibraryJobIds();
       const actionIds = selectedIds.includes(entry.jobId) && selectedIds.length > 1 ? selectedIds : [entry.jobId];
       const permanentAllowed = actionIds.every((id) => Boolean(libraryEntryById(id)?.item?.deleted_at));
+      const originalAction = paperReport && job.status === 'completed'
+        ? `<button data-row-action="original" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span>阅读原文</span></button>` : '';
+      const pdfAction = nativePdfAvailable(job) && job.status === 'completed'
+        ? `<button data-row-action="native-pdf" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span>阅读原版 PDF</span></button>` : '';
+      const parseAction = nativePdfAvailable(job) && ['unparsed', 'failed'].includes(job.status)
+        ? `<button data-row-action="parse" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span>${job.status === 'failed' ? '重试解析' : '解析 PDF'}</span></button>` : '';
       const menu = entry.item?.deleted_at
         ? `<button data-row-action="metadata" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>编辑元数据</span>${shortcut(primaryShortcutLabel('I'))}</button><div class="row-menu-separator" role="separator"></div><button data-row-action="restore" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">恢复文献${bulkLabel}</span>${shortcut(primaryShortcutLabel('Backspace'))}</button><button class="is-danger" data-row-action="permanent" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${permanentAllowed ? '' : ' disabled'} title="只能彻底清除全部位于回收站的选中文献"><span class="row-action-label">彻底清除${bulkLabel}</span></button>`
-        : `<button data-row-action="open" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${job.status === 'completed' ? '' : ' disabled'}><span>打开文献</span>${shortcut('↩')}</button>${isDesktopApp ? `<button data-row-action="reveal" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>跳转原始文件</span></button>` : ''}<button data-row-action="metadata" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>编辑元数据</span>${shortcut(primaryShortcutLabel('I'))}</button><button data-row-action="folders" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">添加到文件夹${bulkLabel}…</span>${shortcut(primaryShortcutLabel('Shift+F'))}</button><div class="row-menu-separator" role="separator"></div><button class="is-danger" data-row-action="trash" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">移入回收站${bulkLabel}</span>${shortcut(primaryShortcutLabel('Backspace'))}</button>`;
+        : `<button data-row-action="open" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${job.status === 'completed' || nativePdfAvailable(job) ? '' : ' disabled'}><span>打开文献</span>${shortcut('↩')}</button>${originalAction}${pdfAction}${parseAction}${isDesktopApp ? `<button data-row-action="reveal" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>跳转原始文件</span></button>` : ''}<button data-row-action="metadata" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"${selectedCount > 1 ? ' disabled' : ''}><span>编辑元数据</span>${shortcut(primaryShortcutLabel('I'))}</button><button data-row-action="folders" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">添加到文件夹${bulkLabel}…</span>${shortcut(primaryShortcutLabel('Shift+F'))}</button><div class="row-menu-separator" role="separator"></div><button class="is-danger" data-row-action="trash" data-job-id="${escapeHTML(entry.jobId)}" role="menuitem" type="button"><span class="row-action-label">移入回收站${bulkLabel}</span>${shortcut(primaryShortcutLabel('Backspace'))}</button>`;
       const selected = selectedLibraryJobIds().includes(entry.jobId);
       return `<article class="library-card library-row${entry.item?.deleted_at ? ' is-trashed' : ''}${selected ? ' is-selected' : ''}" style="--library-grid-template:${libraryGridTemplate(columns)}" data-job-id="${escapeHTML(entry.jobId)}" data-status="${escapeHTML(job.status || '')}" tabindex="0" aria-selected="${selected ? 'true' : 'false'}" aria-grabbed="false" aria-label="文献：${escapeHTML(title)}">${columns.map(cell).join('')}<div class="library-row-actions"><button class="row-more-button" data-row-menu-job-id="${escapeHTML(entry.jobId)}" type="button" aria-label="更多操作" aria-haspopup="menu" aria-expanded="false">⋯</button><div class="row-more-menu" data-row-more-menu data-menu-owner="${escapeHTML(entry.jobId)}" role="menu" aria-label="文献操作">${menu}</div></div></article>`;
     }).join('');
@@ -2223,7 +2476,7 @@
     if (state.libraryStatusFilter) entries = entries.filter((entry) => String(itemValues(entry).reading_status || '未开始') === state.libraryStatusFilter);
     entries.sort((a, b) => compareLibraryEntries(a, b, state.librarySort));
     const activeFolder = folderById(state.activeFolderId); const selectedView = activeView(); $('#library-heading').textContent = activeFolder?.name || selectedView?.name || (state.activeGroupValue ? `${groupFieldLabel()}：${state.activeGroupValue}` : (state.activeFolderId === 'system-trash' ? '回收站' : '全部文献'));
-    $('#library-subtitle').textContent = state.health?.readonly === true ? `${entries.length} 篇 · 公开样例 · 只读体验` : state.activeFolderId === 'system-trash' ? '可恢复的本地文献' : `${entries.length} 篇${state.libraryStatusFilter ? ` · 阅读状态：${state.libraryStatusFilter}` : ''} · 本机保存 · HTML 连续阅读`;
+    $('#library-subtitle').textContent = state.health?.readonly === true ? `${entries.length} 篇 · 公开样例 · 只读体验` : state.activeFolderId === 'system-trash' ? '可恢复的本地文献' : `${entries.length} 篇${state.libraryStatusFilter ? ` · 阅读状态：${state.libraryStatusFilter}` : ''} · 本机保存`;
     if ($('#library-sort')) $('#library-sort').value = state.librarySort;
     const columns = visibleLibraryColumns();
     const template = libraryGridTemplate(columns);
@@ -2248,7 +2501,10 @@
       state.jobs = jobsPayload.jobs || []; state.library = libraryPayload.library || null;
       resumeRunningReflows();
       const stored = JSON.parse(persistentStateGet(openTabsStorageKey) || '[]');
-      if (Array.isArray(stored)) state.openDocuments = stored.map((id) => state.jobs.find((job) => job.job_id === id)).filter((job) => job?.status === 'completed');
+      if (Array.isArray(stored)) state.openDocuments = stored.map((id) => state.jobs.find((job) => job.job_id === id)).filter((job) => job?.status === 'completed' || nativePdfAvailable(job));
+      state.jobs.filter(nativePdfAvailable).forEach(watchPdfParsing);
+      const activePdf = state.jobs.find((job) => job.job_id === activeNativePdfJobId);
+      if (activePdf) nativePdf.update(activePdf);
       renderLibrary(); renderViews(); renderDocumentTabs();
       if (state.activeJob) { const refreshed = state.jobs.find((item) => item.job_id === state.activeJob.job_id); if (refreshed) state.activeJob = refreshed; renderDocumentTabs(); }
     } catch (error) { $('#recent-list').innerHTML = `<div class="empty-state">文献库读取失败：${escapeHTML(error.message)}</div>`; }
@@ -2397,7 +2653,18 @@
     }
     if (action === 'open') {
       if (entry.item?.deleted_at) await restoreLibraryItem(jobId);
-      else if (entry.job?.status === 'completed') openReader(entry.job);
+      else if (entry.job) openPreferredDocument(entry.job);
+    } else if (action === 'original') {
+      if (!entry.item?.deleted_at && entry.job?.status === 'completed') openReader(entry.job);
+    } else if (action === 'native-pdf') {
+      if (!entry.item?.deleted_at) openNativePdf(entry.job);
+    } else if (action === 'parse') {
+      try {
+        await startPdfParsing(entry.job);
+        showToast('已开始解析，可继续阅读原版 PDF。');
+      } catch (error) {
+        showToast(error.message, true);
+      }
     } else if (action === 'reveal') {
       if (!window.myScholarDesktop?.showItemInFolder) return;
       try {
@@ -3216,6 +3483,8 @@
   }
 
   async function removeDeletedDocumentState(jobId) {
+    pdfParsePolls.delete(jobId);
+    nativePdfTabs.delete(jobId);
     const run = state.translationRuns.get(jobId);
     if (run?.running) cancelTranslationRun(run);
     state.translationRuns.delete(jobId);
@@ -3245,13 +3514,19 @@
       return;
     }
     const wasActive = state.activeJob?.job_id === jobId;
+    const wasNative = activeNativePdfJobId === jobId;
     state.openDocuments.splice(index, 1);
     persistOpenDocuments();
-    if (!wasActive) {
+    if (!wasActive && !wasNative) {
       renderDocumentTabs();
       return;
     }
     const next = state.openDocuments[index] || state.openDocuments[index - 1];
+    if (wasNative) {
+      if (next) openPreferredDocument(next);
+      else switchView('library-view');
+      return;
+    }
     if (next) {
       openReader(next, { addTab: false });
       // openReader captures the outgoing viewport before mounting the next
@@ -3447,7 +3722,10 @@
   function filterValue(entry, field) {
     const values = itemValues(entry);
     if (field === 'name' || field === 'title') return itemTitle(entry);
-    if (field === 'status') return entry.job?.status === 'completed' ? '可阅读' : entry.job?.status === 'failed' ? '失败' : '处理中';
+    if (field === 'status') {
+      if (['completed', 'unparsed'].includes(entry.job?.status)) return '可阅读';
+      return entry.job?.status === 'failed' ? '失败' : '处理中';
+    }
     if (field === 'folder') return entry.item?.folder_ids || [];
     if (field === 'reading_status' || field === 'importance' || field === 'research_topic') return values[field];
     if (field === 'venue') return itemVenue(entry);
@@ -3529,6 +3807,7 @@
 
   const readerSearchHighlightName = 'my-scholar-reader-search';
   const readerSearchCurrentHighlightName = 'my-scholar-reader-search-current';
+  const reportEvidenceHighlightName = 'my-scholar-report-evidence';
   const readerTextSelectionStates = new WeakMap();
 
   function readerHighlightRegistry(doc = frameDocument()) {
@@ -3938,13 +4217,19 @@
   }
 
   function readerMountMatches(mount = readerMount, doc = frameDocument()) {
+    if (mount && mount === nativePdfMount) {
+      return state.activeJob?.job_id === mount.jobId && $('#reader-view').classList.contains('active-view');
+    }
     if (!readerMountIsCurrent(mount) || mount !== readerMount || !doc || state.activeJob?.job_id !== mount.jobId || activeJobId !== mount.jobId) return false;
     return readerURLIdentity(doc.URL) === mount.urlIdentity && $('#html-preview')?.contentDocument === doc;
   }
 
   function readerMountIsCurrent(mount) {
-    return Boolean(mount && readerMounts.get(mount.jobId) === mount);
+    return Boolean(mount && (mount === nativePdfMount || readerMounts.get(mount.jobId) === mount));
   }
+
+  function currentAnnotationMount() { return nativePdfMount || readerMount; }
+  function annotationDocument() { return nativePdfMount ? document : frameDocument(); }
 
   function deactivateReaderMount() {
     clearAnnotationDrawAnimation(frameDocument());
@@ -4889,6 +5174,7 @@
 
   function selectionRequestKey(selection) {
     if (!selection?.quote) return '';
+    if (selection.surface === 'pdf') return JSON.stringify([selection.job_id, selection.page, selection.pdf_rects, selection.quote]);
     return [state.activeJob?.job_id || '', selection.surface || 'paper', selection.block_id || '', selection.source_block_id || '', selection.start ?? '', selection.end ?? '', hashText(selection.quote)].join(':');
   }
 
@@ -4896,25 +5182,30 @@
     const selection = state.selection;
     const popover = $('#selection-popover');
     const doc = frameDocument();
-    if (!selection?.quote || !doc || !popover || popover.hidden || popover.classList.contains('is-closing') || !$('#reader-view')?.classList.contains('active-view')) return null;
+    if (!selection?.quote || (!doc && !nativePdfMount) || !popover || popover.hidden || popover.classList.contains('is-closing') || !$('#reader-view')?.classList.contains('active-view')) return null;
+    if (selection.surface === 'pdf') return selection.job_id === activeNativePdfJobId ? selection : null;
     if (selection.job_id !== state.activeJob?.job_id || selection.render_generation !== activeChatSourceGeneration()) return null;
     return selection;
   }
 
   $('#selection-popover')?.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') clearSelectionPopover({ clearState: true, immediate: true });
+    if (event.key === 'Escape') {
+      if (nativePdfMount) nativePdf.clearSelection();
+      clearSelectionPopover({ clearState: true, immediate: true });
+    }
   });
 
   function positionSelectionPopover() {
     const frame = $('#html-preview');
     const wrap = $('.reader-frame-wrap');
     const popover = $('#selection-popover');
-    const anchor = state.selection?.anchorRect;
-    if (!frame || !wrap || !popover || popover.hidden || !anchor) return;
-    const frameRect = frame.getBoundingClientRect();
+    const rawPdf = state.selection?.surface === 'pdf';
+    const anchor = rawPdf ? nativePdf.selectionRect() : state.selection?.anchorRect;
+    if ((!frame && !rawPdf) || !wrap || !popover || popover.hidden || !anchor) return;
+    const frameRect = rawPdf ? { left: 0, top: 0 } : frame.getBoundingClientRect();
     const wrapRect = wrap.getBoundingClientRect();
-    const scaleX = frame.clientWidth ? frameRect.width / frame.clientWidth : 1;
-    const scaleY = frame.clientHeight ? frameRect.height / frame.clientHeight : 1;
+    const scaleX = !rawPdf && frame.clientWidth ? frameRect.width / frame.clientWidth : 1;
+    const scaleY = !rawPdf && frame.clientHeight ? frameRect.height / frame.clientHeight : 1;
     const popoverWidth = popover.offsetWidth || 320;
     const popoverHeight = popover.offsetHeight || 96;
     const anchorLeft = frameRect.left - wrapRect.left + anchor.left * scaleX;
@@ -4924,6 +5215,41 @@
     const maxTop = Math.max(8, wrapRect.height - popoverHeight - 8);
     popover.style.left = `${Math.max(8, Math.min(maxLeft, anchorLeft))}px`;
     popover.style.top = `${Math.max(8, Math.min(maxTop, below <= maxTop ? below : above))}px`;
+  }
+
+  function showNativePdfSelection(job, selection) {
+    if (activeNativePdfJobId !== job.job_id) return;
+    if (!selection) {
+      if (state.selection?.surface === 'pdf') clearSelectionPopover({ clearState: true, immediate: true });
+      return;
+    }
+    closeInlineAnnotation(document, { immediate: true });
+    const { rect, ...source } = selection;
+    const next = { ...source, job_id: job.job_id, origin: 'selection', anchorRect: rect };
+    const changed = selectionRequestKey(next) !== selectionTranslationKey;
+    state.selection = next;
+    renderSelectedContext();
+    $('#selection-translation-result').hidden = false;
+    renderSelectionActions();
+    openTransient($('#selection-popover'));
+    if (changed) beginSelectionTranslation(next);
+    positionSelectionPopover();
+  }
+
+  function refreshNativePdfOverlays() {
+    if (!nativePdfMount) return;
+    if (state.selection?.surface === 'pdf') {
+      if (nativePdf.selectionRect()) positionSelectionPopover();
+      else clearSelectionPopover({ clearState: true, immediate: true });
+    }
+    const popover = document.querySelector('.annotation-note-popover');
+    if (!popover || popover.classList.contains('is-closing')) return;
+    const originalAnchor = notePopoverHover.anchor;
+    const anchor = originalAnchor?.isConnected ? originalAnchor : nativePdf.annotationElement(popover.dataset.annotationId);
+    if (anchor) {
+      notePopoverHover.anchor = anchor;
+      positionInlineAnnotation(document, popover, anchor);
+    }
   }
 
   function renderSelectionTranslation(status, { text = '', formulas = [], markers = [], emphasis = [], message = '' } = {}) {
@@ -5013,6 +5339,7 @@
       try {
         const translated = await requestTranslation(quote, null, [], {
           jobId,
+          sourceKind: selection.surface === 'pdf' ? 'pdf' : '',
           onDelta: (partial) => { if (!stale()) renderSelectionTranslation('streaming', { text: partial }); },
           signal: abortController.signal,
         });
@@ -6513,6 +6840,10 @@
           background:color-mix(in srgb,var(--accent,#d97706) 24%,transparent);
           color:inherit;
         }
+        ::highlight(${reportEvidenceHighlightName}) {
+          background:#fbbf2480;
+          color:inherit;
+        }
         mark.reader-search-match {
           border-radius:.16em;
           background:color-mix(in srgb,var(--accent,#d97706) 12%,transparent);
@@ -7379,6 +7710,21 @@
         cursor = text.indexOf(quote, cursor + 1);
       }
     }
+    if (candidates.length === 0 && annotation.surface === 'pdf') {
+      const query = normalizeReaderSearchText(quote);
+      if (!query) return null;
+      const normalized = [];
+      for (const block of readerSearchRoots(doc)) {
+        if (block.closest('.my-scholar-translation') || String(block.dataset.page) !== String(annotation.page)) continue;
+        const map = readerSearchMap(block, doc);
+        const start = map.text.indexOf(query);
+        if (start < 0) continue;
+        if (normalized.length || map.text.indexOf(query, start + 1) >= 0) return null;
+        const range = readerSearchRangeFromMap(map, start, query.length, doc);
+        if (range) normalized.push({ root: block, range });
+      }
+      return normalized[0] || null;
+    }
     if (candidates.length !== 1) return null;
     const found = candidates[0];
     return { root: found.root, range: rangeAtOffsets(found.root, found.start, found.end, doc) };
@@ -7559,7 +7905,7 @@
     }, NOTE_HOVER_CLOSE_DELAY);
   }
 
-  function closeInlineAnnotation(doc = frameDocument(), { immediate = false } = {}) {
+  function closeInlineAnnotation(doc = annotationDocument(), { immediate = false } = {}) {
     cancelNoteHoverOpen();
     cancelNoteHoverClose();
     notePopoverHover.pinned = false;
@@ -7577,6 +7923,7 @@
 
   function annotationAnchor(doc, annotationId) {
     if (!doc || !annotationId) return null;
+    if (doc === document && nativePdfMount) return nativePdf.annotationElement(annotationId);
     const selector = `[data-annotation-id="${cssEscape(annotationId)}"]`;
     return doc.querySelector(`.annotation-note-trigger${selector}`) || doc.querySelector(`:is(mark, mrow)${selector}`);
   }
@@ -7779,7 +8126,8 @@
   }
 
   function showInlineAnnotation(annotation, trigger, { pinned = true } = {}) {
-    const doc = frameDocument(); if (!doc || !trigger) return;
+    const doc = trigger?.ownerDocument;
+    if (!doc) return;
     closeInlineAnnotation(doc, { immediate: true });
     notePopoverHover.pinned = pinned;
     notePopoverHover.anchor = trigger;
@@ -7814,7 +8162,7 @@
   async function updateAnnotationKind(annotation, kind, popover) {
     if (!state.activeJob || isAIAnnotation(annotation) || !['highlight', 'underline'].includes(kind)) return;
     const jobId = state.activeJob.job_id;
-    const mount = readerMount;
+    const mount = currentAnnotationMount();
     if (!readerMountMatches(mount)) return;
     const button = popover?.querySelector('[data-action="convert"]');
     if (button) button.disabled = true;
@@ -7825,7 +8173,7 @@
       Object.assign(annotation, updated || { kind });
       renderFrameAnnotations();
       renderAnnotations();
-      const trigger = annotationAnchor(frameDocument(), annotation.id);
+      const trigger = annotationAnchor(annotationDocument(), annotation.id);
       if (trigger) showInlineAnnotation(annotation, trigger);
       showToast(kind === 'underline' ? '已转为划线，颜色和笔记保持不变。' : '已转为高亮，颜色和笔记保持不变。');
     } catch (error) {
@@ -7838,7 +8186,7 @@
   async function updateAnnotationColor(annotation, color, popover) {
     if (!state.activeJob || isAIAnnotation(annotation)) return;
     const jobId = state.activeJob.job_id;
-    const mount = readerMount;
+    const mount = currentAnnotationMount();
     if (!readerMountMatches(mount)) return;
     const nextColor = normalizeAnnotationColor(color);
     const buttons = [...(popover?.querySelectorAll('[data-annotation-color]') || [])];
@@ -7848,6 +8196,7 @@
       if (!annotationOperations.applyResult(jobId, mount, payload)) return;
       const updated = state.annotations.find((item) => item.id === annotation.id) || { ...annotation, color: nextColor };
       Object.assign(annotation, updated);
+      if (mount === nativePdfMount) renderFrameAnnotations();
       frameDocument()?.querySelectorAll(`:is(mark, mrow)[data-annotation-id="${cssEscape(annotation.id)}"]`).forEach((mark) => applyAnnotationColor(mark, annotation));
       applyAnnotationTheme(popover, annotation);
       frameDocument()?.querySelectorAll(`.annotation-note-trigger[data-annotation-id="${cssEscape(annotation.id)}"]`).forEach((trigger) => applyAnnotationTheme(trigger, annotation));
@@ -7951,6 +8300,11 @@
   }
 
   function renderFrameAnnotations() {
+    if (nativePdfMount) {
+      nativePdf.setAnnotations(state.annotations);
+      updateAnnotationAnchorStatus(0);
+      return;
+    }
     const doc = frameDocument(); if (!doc?.querySelector('.reader-content')) return;
     const documentState = readerDocumentState(doc);
     const annotationsKey = JSON.stringify([state.annotations, state.aiHighlights, state.highlightColor]);
@@ -8003,24 +8357,27 @@
   async function saveAnnotation(kind, { withNote = false, action = null } = {}) {
     if (!state.activeJob || !state.selection) return;
     const selectionTarget = state.selection;
-    const selection = { ...selectionTarget };
-    if (!selection.block_id || !Number.isFinite(selection.start) || !Number.isFinite(selection.end)) {
-      clearSelectionPopover({ clearState: true });
-      showToast('无法定位选区。请在同一正文段落内重新选择。', true);
-      return;
-    }
+    const { anchorRect: _anchorRect, ...selection } = selectionTarget;
+    const isPdf = selection.surface === 'pdf';
     const doc = frameDocument();
-    const root = doc?.querySelector(`[data-block-id="${cssEscape(selection.block_id)}"]`);
-    const group = selection.surface === 'translation' && selection.block_id === `translation-${selection.source_block_id}` ? translationAnnotationGroup(selection.source_block_id, doc) : null;
-    const preflightRange = group ? translationGroupAnchor(group, selection.start, selection.end, doc) : root ? rangeAtOffsets(root, selection.start, selection.end, doc) : null;
-    const preflightText = group ? group.text : root ? canonicalBlockText(root, doc) : '';
-    if (!preflightRange || preflightText.slice(selection.start, selection.end) !== selection.quote) {
-      clearSelectionPopover({ clearState: true });
-      showToast('这个选区包含暂时无法稳定定位的内容，请重新选择后再试。', true);
-      return;
+    if (!isPdf) {
+      if (!selection.block_id || !Number.isFinite(selection.start) || !Number.isFinite(selection.end)) {
+        clearSelectionPopover({ clearState: true });
+        showToast('无法定位选区。请在同一正文段落内重新选择。', true);
+        return;
+      }
+      const root = doc?.querySelector(`[data-block-id="${cssEscape(selection.block_id)}"]`);
+      const group = selection.surface === 'translation' && selection.block_id === `translation-${selection.source_block_id}` ? translationAnnotationGroup(selection.source_block_id, doc) : null;
+      const preflightRange = group ? translationGroupAnchor(group, selection.start, selection.end, doc) : root ? rangeAtOffsets(root, selection.start, selection.end, doc) : null;
+      const preflightText = group ? group.text : root ? canonicalBlockText(root, doc) : '';
+      if (!preflightRange || preflightText.slice(selection.start, selection.end) !== selection.quote) {
+        clearSelectionPopover({ clearState: true });
+        showToast('这个选区包含暂时无法稳定定位的内容，请重新选择后再试。', true);
+        return;
+      }
     }
     const jobId = state.activeJob.job_id;
-    const mount = readerMount;
+    const mount = currentAnnotationMount();
     if (!readerMountMatches(mount)) return;
     const existingAnnotationIds = new Set(state.annotations.map((annotation) => annotation.id));
     let note = '';
@@ -8030,19 +8387,23 @@
       const currentTarget = state.selection;
       renderFrameAnnotations();
       renderAnnotations();
-      if (currentTarget === selectionTarget) clearSelectionPopover({ clearState: true, immediate: true });
+      if (currentTarget === selectionTarget) {
+        if (isPdf) nativePdf.clearSelection();
+        clearSelectionPopover({ clearState: true, immediate: true });
+      }
       const saved = state.annotations.find((item) => item.id === payload.annotation?.id) || payload.annotation;
-      if (saved && !annotationAnchor(frameDocument(), saved.id)) {
+      const anchor = saved && annotationAnchor(annotationDocument(), saved.id);
+      if (saved && !anchor) {
         showToast('标注已保存，但当前页面无法显示它；重新打开文献后可再次定位。', true);
         return;
       }
-      if (saved && !existingAnnotationIds.has(saved.id)) playAnnotationDrawAnimation(saved, doc);
+      if (!isPdf && saved && !existingAnnotationIds.has(saved.id)) playAnnotationDrawAnimation(saved, doc);
       if (withNote) {
         const annotation = saved;
-        const trigger = annotation && frameDocument()?.querySelector(`.annotation-note-trigger[data-annotation-id="${cssEscape(annotation.id)}"]`);
+        const trigger = isPdf ? anchor : annotation && doc?.querySelector(`.annotation-note-trigger[data-annotation-id="${cssEscape(annotation.id)}"]`);
         if (annotation && trigger) showInlineAnnotation(annotation, trigger);
         if (annotation && trigger) {
-          const popover = frameDocument()?.querySelector('.annotation-note-popover');
+          const popover = trigger.ownerDocument.querySelector('.annotation-note-popover');
           if (popover) beginAnnotationEdit(annotation, trigger, popover);
         }
       }
@@ -8078,7 +8439,8 @@
   function handleSelectionNumberShortcut(event) {
     if (event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229
       || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || !/^[0-9]$/u.test(event.key)
-      || isEditableAppSurface(event.target) || $('dialog[open]') || !readerShortcutReady()) return false;
+      || (isEditableAppSurface(event.target) && !event.target?.closest?.('.native-pdf .textLayer'))
+      || $('dialog[open]') || (!nativePdfMount && !readerShortcutReady())) return false;
     const target = activeSelectionActionTarget();
     const entry = target && selectionNumberActions()[selectionNumberKeys.indexOf(event.key)];
     if (!entry) return false;
@@ -8200,6 +8562,7 @@
   $('#selection-add-chat').addEventListener('click', () => {
     if (!state.selection) return;
     state.chatSelection = { kind: 'text', selection: { ...state.selection } };
+    if (nativePdfMount) nativePdf.clearSelection();
     switchSidebar('chat-panel');
     renderSelectedContext();
     $('#chat-input').focus();
@@ -8369,8 +8732,8 @@
   }
 
   function beginAnnotationEdit(annotation, trigger, popover) {
-    const doc = frameDocument();
-    const mount = readerMount;
+    const doc = popover?.ownerDocument;
+    const mount = currentAnnotationMount();
     const jobId = state.activeJob?.job_id;
     if (!doc || !popover || !state.activeJob) return;
     const body = popover.querySelector('.annotation-note-popover-body');
@@ -8538,7 +8901,7 @@
   async function editAnnotationNote(annotation, note, trigger) {
     if (!state.activeJob) return;
     const jobId = state.activeJob.job_id;
-    const mount = readerMount;
+    const mount = currentAnnotationMount();
     if (!readerMountMatches(mount)) return;
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations/${annotation.id}`, jsonOptions({ note }, 'PATCH'));
@@ -8546,7 +8909,7 @@
       renderAnnotations();
       renderFrameAnnotations();
       const refreshed = state.annotations.find((item) => item.id === annotation.id) || annotation;
-      const refreshedTrigger = frameDocument()?.querySelector(`.annotation-note-trigger[data-annotation-id="${cssEscape(annotation.id)}"]`);
+      const refreshedTrigger = annotationAnchor(annotationDocument(), annotation.id);
       if (refreshedTrigger) showInlineAnnotation(refreshed, refreshedTrigger);
     } catch (error) {
       if (!readerMountMatches(mount) || state.activeJob?.job_id !== jobId) return;
@@ -8557,7 +8920,7 @@
   async function deleteAnnotation(annotation) {
     if (!state.activeJob || !annotation?.id) return;
     const jobId = state.activeJob.job_id;
-    const mount = readerMount;
+    const mount = currentAnnotationMount();
     if (!readerMountMatches(mount)) return;
     try {
       const payload = await api(`/api/jobs/${jobId}/annotations/${annotation.id}`, { method: 'DELETE' });
@@ -8574,7 +8937,7 @@
   async function clearManualAnnotations() {
     if (!state.activeJob) return;
     const jobId = state.activeJob.job_id;
-    const mount = readerMount;
+    const mount = currentAnnotationMount();
     if (!readerMountMatches(mount)) return;
     const manualAnnotations = state.annotations.filter((item) => !isAIAnnotation(item));
     if (!manualAnnotations.length) return;
@@ -8988,7 +9351,7 @@
     return result;
   }
 
-  async function requestTranslation(text, blockId = null, suppliedFormulas = null, { jobId = state.activeJob?.job_id, onDelta = null, markers = [], emphasis = [], signal = null, refresh = false, segments = [] } = {}) {
+  async function requestTranslation(text, blockId = null, suppliedFormulas = null, { jobId = state.activeJob?.job_id, onDelta = null, markers = [], emphasis = [], signal = null, refresh = false, segments = [], sourceKind = '' } = {}) {
     const originalText = String(text || '').trim();
     const profileId = translationProfileId();
     const mathPayload = Array.isArray(suppliedFormulas) ? { text: originalText, formulas: suppliedFormulas } : protectInlineMath(originalText);
@@ -9022,6 +9385,7 @@
     if (!jobId) throw new Error('没有找到当前文献。');
     const requestBody = {
       text: protectedPayload.text,
+      ...(sourceKind ? { source_kind: sourceKind } : {}),
       target_language: targetLanguage,
       block_id: blockId,
       source_hash: sourceHash,
@@ -9030,7 +9394,7 @@
       ...(refresh ? { refresh: true } : {}),
     };
     requestTranslation.pending ||= new Map();
-    const requestKey = JSON.stringify([jobId, blockId || '', profileId, targetLanguage, translationSourceIdentity(source), protectedSegments, refresh]);
+    const requestKey = JSON.stringify([jobId, blockId || '', profileId, targetLanguage, translationSourceIdentity(source), protectedSegments, refresh, sourceKind]);
     let operation = requestTranslation.pending.get(requestKey);
     if (!operation) {
       operation = { listeners: new Set(), text: '' };
@@ -10040,6 +10404,124 @@
     if (button && !button.disabled) void invokeSelectionPlugin(button.dataset.pluginSelection, button.dataset.pluginAction, button);
   });
 
+  function reportEvidenceTarget(doc, evidence) {
+    const id = String(evidence.block_id || '');
+    const page = String(evidence.page || '');
+    const quote = String(evidence.quote || '').trim();
+    if (!doc || !id || !page) return null;
+    const continuation = readerContinuations.get(doc)?.get(id);
+    const block = continuation?.root || doc.querySelector(`[data-block-id="${cssEscape(id)}"]`);
+    const blockPage = continuation?.page || block?.dataset.page || block?.closest('[data-page]')?.dataset.page;
+    if (!block || block.closest('.my-scholar-translation') || page !== String(blockPage)) return null;
+    if (!quote) {
+      return ['figure', 'table', 'equation'].includes(evidence.kind) && block.getClientRects().length ? block : null;
+    }
+    const start = continuation?.start || 0;
+    const text = canonicalBlockText(block, doc).slice(start, continuation?.end);
+    const words = quote.split(/\s+/u).map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    const pattern = new RegExp(words.join('\\s+'), 'gu');
+    const first = pattern.exec(text);
+    if (!first) return null;
+    pattern.lastIndex = first.index + 1;
+    if (pattern.test(text)) return null;
+    const range = rangeAtOffsets(block, start + first.index, start + first.index + first[0].length, doc);
+    return range && !range.collapsed && range.getClientRects().length ? range : null;
+  }
+
+  function highlightReportEvidence(doc, range) {
+    const registry = readerHighlightRegistry(doc);
+    const highlight = readerHighlightForRanges(doc, [range]);
+    if (!registry || !highlight) throw new Error('此窗口无法高亮原句，请查看报告保留的引文。');
+    registry.set(reportEvidenceHighlightName, highlight);
+    window.setTimeout(() => {
+      if (registry.get(reportEvidenceHighlightName) === highlight) registry.delete(reportEvidenceHighlightName);
+    }, 10000);
+    const viewport = doc.defaultView;
+    viewport.scrollBy({ top: range.getBoundingClientRect().top - viewport.innerHeight * 0.35, behavior: 'instant' });
+  }
+
+  function revealReportEvidence(doc, target) {
+    if (target.nodeType === Node.ELEMENT_NODE) {
+      target.scrollIntoView({ block: 'center', behavior: 'instant' });
+      if (!reducedMotionQuery.matches) target.animate([
+        { outline: '2px solid #fbbf24', outlineOffset: '5px' },
+        { outline: '2px solid transparent', outlineOffset: '5px' },
+      ], { duration: 2400, easing: 'ease-in' });
+      return true;
+    }
+    if (!readerHighlightRegistry(doc)) return false;
+    highlightReportEvidence(doc, target);
+    return true;
+  }
+
+  async function openReportSource(report, evidence) {
+    const job = reportJob(report.job_id);
+    const generation = normalizeChatSourceGeneration(evidence?.render_generation);
+    if (!job || !generation) throw new Error('原文不可用，请查看报告保留的引文。');
+    const current = activeChatSourceGeneration(job);
+    if (generation !== current || state.translationPreferences.displayMode === 'translation') {
+      await showReportSourcePreview(job, generation, evidence);
+      return;
+    }
+    const returnView = $('.view.active-view')?.id;
+    openReader(job);
+    const mount = readerMount;
+    if (!mount) throw new Error('无法打开原文。');
+    const activation = mount.activation;
+    const isCurrent = () => readerMount === mount && mount.activation === activation && $('#reader-view')?.classList.contains('active-view');
+    const deadline = Date.now() + 10000;
+    while (isCurrent() && !mount.ready && Date.now() < deadline) {
+      await new Promise((resolve) => window.setTimeout(resolve, 40));
+    }
+    if (!isCurrent()) return;
+    const doc = frameDocument();
+    const target = mount.ready && generation === activeChatSourceGeneration() && reportEvidenceTarget(doc, evidence);
+    if (target && revealReportEvidence(doc, target)) return;
+    if (returnView) switchView(returnView);
+    await showReportSourcePreview(job, generation, evidence);
+  }
+
+  async function showReportSourcePreview(job, generation, evidence) {
+    const dialog = $('#paper-report-historical-source');
+    const frame = dialog?.querySelector('.paper-report-historical-frame');
+    const url = generation === 'base' ? `/api/jobs/${job.job_id}/document.html`
+      : safeReflowDocumentURL(`/api/jobs/${job.job_id}/renders/${generation}/document.html`, job.job_id, generation);
+    if (!frame || !url) throw new Error('该排版版本不可用，请查看报告保留的引文。');
+    if (dialog.open) return;
+    dialog.showModal();
+    try {
+      const ready = await new Promise((resolve) => {
+        const finish = (loaded) => {
+          window.clearTimeout(timeout);
+          frame.removeEventListener('load', onLoad);
+          dialog.removeEventListener('close', onClose);
+          resolve(loaded);
+        };
+        const onLoad = () => finish(true);
+        const onClose = () => finish(false);
+        const timeout = window.setTimeout(() => finish(false), 10000);
+        frame.addEventListener('load', onLoad);
+        dialog.addEventListener('close', onClose);
+        frame.src = url;
+      });
+      if (!dialog.open) return;
+      const doc = frame.contentDocument;
+      const target = ready && readerURLIdentity(doc?.URL) === readerURLIdentity(url) && reportEvidenceTarget(doc, evidence);
+      if (!target) throw new Error('无法确认该版本的原文位置。');
+      const style = doc.createElement('style');
+      style.textContent = `::highlight(${reportEvidenceHighlightName}) { background:#fbbf2480; color:inherit; }`;
+      doc.head.append(style);
+      if (!revealReportEvidence(doc, target)) throw new Error('无法高亮该版本的原文位置。');
+    } catch (error) {
+      dialog.close();
+      throw error;
+    }
+  }
+
+  const reportSourceDialog = $('#paper-report-historical-source');
+  reportSourceDialog?.querySelector('[data-report-historical-close]')?.addEventListener('click', () => reportSourceDialog.close());
+  reportSourceDialog?.addEventListener('close', () => reportSourceDialog.querySelector('iframe')?.removeAttribute('src'));
+
   async function openPluginSource(source, { settleImages = false } = {}) {
     const job = state.jobs.find((item) => item.job_id === source?.job_id);
     if (!job || job.status !== 'completed' || state.library?.items?.[source.job_id]?.deleted_at) {
@@ -10119,6 +10601,7 @@
   function setPanelStatus(message, error = false) { const node = $('#chat-status'); node.textContent = message || ''; node.hidden = !message; node.classList.toggle('error', error); }
   function switchSidebar(panelId, { open = true } = {}) {
     if (state.health?.readonly === true && !['outline-panel', 'quick-preview-panel'].includes(panelId)) panelId = 'outline-panel';
+    if (nativePdfMount && !nativePdfSidebarPanel(panelId)) panelId = 'annotations-panel';
     const target = document.getElementById(panelId);
     if (!target?.classList.contains('sidebar-panel')) return;
     if (panelId !== 'chat-panel') closeChatSessionMenu();
@@ -10155,7 +10638,10 @@
       if (!['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
       event.preventDefault();
       const step = event.key === 'ArrowRight' ? 1 : -1;
-      const available = state.health?.readonly === true ? tabs.filter((item) => ['outline-panel', 'quick-preview-panel'].includes(item.dataset.panel) && !item.hidden) : tabs;
+      const available = tabs.filter((item) => !item.hidden && (
+        nativePdfMount ? nativePdfSidebarPanel(item.dataset.panel)
+          : state.health?.readonly !== true || ['outline-panel', 'quick-preview-panel'].includes(item.dataset.panel)
+      ));
       const next = available[(available.indexOf(tab) + step + available.length) % available.length];
       switchSidebar(next.dataset.panel);
       next.focus();
@@ -10253,8 +10739,17 @@
     if (!notedAnnotations.length) return;
     $$('.annotation-item').forEach((node) => {
       const item = state.annotations.find((annotation) => annotation.id === node.dataset.annotationId);
-      node.querySelector('.annotation-quote').addEventListener('click', () => {
-        const target = resolveAnnotationAnchor(item)?.root;
+      node.querySelector('.annotation-quote').addEventListener('click', async () => {
+        const target = nativePdfMount ? null : resolveAnnotationAnchor(item)?.root;
+        if (nativePdfMount || (!target && item.surface === 'pdf' && nativePdfAvailable(state.activeJob))) {
+          if (!nativePdfMount) openNativePdf(state.activeJob);
+          const mount = nativePdfMount;
+          const anchor = await nativePdf.locateAnnotation(item);
+          if (!readerMountMatches(mount)) return;
+          if (anchor) showInlineAnnotation(item, anchor);
+          else showToast('这条标注无法在原版 PDF 中唯一定位。', true);
+          return;
+        }
         readerVisibleTarget(target)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         const trigger = frameDocument()?.querySelector(`.annotation-note-trigger[data-annotation-id="${cssEscape(item?.id || '')}"]`);
         if (trigger && item) showInlineAnnotation(item, trigger);
@@ -10352,7 +10847,7 @@
   }
 
   function aiProfileIdentity(profile = {}) {
-    return JSON.stringify([profile.base_url || '', profile.api_format || 'auto']);
+    return JSON.stringify([profile.base_url || '', profile.api_format || 'auto', profile.cli_kind || '']);
   }
 
   function aiCapabilities(service, profile = state.aiProfiles[service] || {}) {
@@ -10451,8 +10946,19 @@
   }
 
   function validateAISettingsControls() {
-    for (const service of ['translation', 'chat']) {
-      const profile = aiSettingsFromControls()[service];
+    for (const [service, profile] of Object.entries(aiSettingsFromControls())) {
+      if (profile.cli_kind) {
+        const input = $(`#setting-${service}-cli-path`);
+        const path = profile.cli_path;
+        const valid = path ? /^(\/|~[\\/]|[a-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/iu.test(path) : profile.cli_kind !== 'custom';
+        input.setCustomValidity(valid ? '' : '请输入绝对路径或以 ~/ 开头的路径。');
+        if (!input.checkValidity()) {
+          showSettingsSection('settings-ai');
+          input.reportValidity();
+          return false;
+        }
+        continue;
+      }
       if (service === 'translation' && (profile.provider !== 'openai-compatible' || profile.mode !== 'chat')) continue;
       for (const name of ['thinking-budget', 'context-window']) {
         const input = $(`#setting-${service}-${name}`);
@@ -10500,6 +11006,7 @@
     if (!state.activeJob) return;
     const thread = activeChatThread();
     const profile = state.aiProfiles.chat || {};
+    const usingCli = Boolean(profile.cli_kind);
     const capabilities = aiCapabilities('chat', profile);
     const options = normalizeChatOptions(thread.options);
     const panel = $('#chat-session-options');
@@ -10511,8 +11018,13 @@
       const inheritedEffort = profile.reasoning_effort || 'auto';
       $('#chat-reasoning-effort option[value="inherit"]').textContent = `跟随设置（${aiReasoningLabels[inheritedEffort] || inheritedEffort}）`;
       const effective = chatEffectiveOptions(thread);
-      if (effective.reasoning_effort && effective.reasoning_effort !== 'auto' && aiOptionWarning(effective, capabilities)) $('#chat-reasoning-field').hidden = false;
-      $('#chat-thinking-field').hidden = (capabilities.thinking_supported === false || capabilities.thinking_budget_supported === false) && !(effective.thinking_budget > 0);
+      if (usingCli) {
+        $('#chat-reasoning-field').hidden = true;
+        $('#chat-reasoning-custom-field').hidden = true;
+      } else if (effective.reasoning_effort && effective.reasoning_effort !== 'auto' && aiOptionWarning(effective, capabilities)) {
+        $('#chat-reasoning-field').hidden = false;
+      }
+      $('#chat-thinking-field').hidden = usingCli || (capabilities.thinking_supported === false || capabilities.thinking_budget_supported === false) && !(effective.thinking_budget > 0);
       for (const [name, key] of [['thinking', 'thinking_budget'], ['context', 'context_window']]) {
         const value = options[key];
         $(`#chat-${name}-mode`).value = value === undefined ? 'inherit' : value === 0 ? 'auto' : 'custom';
@@ -10522,13 +11034,13 @@
         input.value = value > 0 ? value : '';
         input.hidden = !(value > 0);
       }
-      $('#chat-capability-status').textContent = capabilityDescription(capabilities);
-      const warning = aiOptionWarning(chatEffectiveOptions(thread), capabilities);
+      $('#chat-capability-status').textContent = usingCli ? '当前使用 CLI 处理文本。' : capabilityDescription(capabilities);
+      const warning = usingCli ? '' : aiOptionWarning(effective, capabilities);
       $('#chat-options-warning').textContent = warning;
       $('#chat-options-warning').hidden = !warning;
       const summary = [];
-      if (options.reasoning_effort !== undefined) summary.push(aiReasoningLabels[options.reasoning_effort] || options.reasoning_effort);
-      if (options.thinking_budget !== undefined) summary.push(options.thinking_budget ? `思考 ${options.thinking_budget}` : '思考自动');
+      if (!usingCli && options.reasoning_effort !== undefined) summary.push(aiReasoningLabels[options.reasoning_effort] || options.reasoning_effort);
+      if (!usingCli && options.thinking_budget !== undefined) summary.push(options.thinking_budget ? `思考 ${options.thinking_budget}` : '思考自动');
       if (options.context_window !== undefined) summary.push(options.context_window ? `上下文 ${options.context_window}` : '上下文自动');
       $('#chat-options-summary').textContent = summary.join(' · ') || '跟随设置';
     }
@@ -10538,13 +11050,18 @@
   function updateChatOptions() {
     if (!state.activeJob) return;
     const thread = activeChatThread();
-    const options = {};
-    const effort = reasoningFromControl('chat');
-    if (effort !== 'inherit') options.reasoning_effort = effort;
+    const usingCli = Boolean(state.aiProfiles.chat?.cli_kind);
+    const options = usingCli ? normalizeChatOptions(thread.options) : {};
+    if (!usingCli) {
+      const effort = reasoningFromControl('chat');
+      if (effort !== 'inherit') options.reasoning_effort = effort;
+    }
     for (const [name, key] of [['thinking', 'thinking_budget'], ['context', 'context_window']]) {
+      if (usingCli && name === 'thinking') continue;
       const mode = $(`#chat-${name}-mode`).value;
       const input = $(`#chat-${key.replaceAll('_', '-')}`);
       input.hidden = mode !== 'custom';
+      if (mode === 'inherit') delete options[key];
       if (mode === 'auto') options[key] = 0;
       if (mode === 'custom') {
         if (!input.value) { input.focus(); return; }
@@ -11547,25 +12064,31 @@
     // Capture the thread and its document. A slow gateway response must land
     // in the thread the question was asked in, never the newly opened tab's.
     const jobId = state.activeJob.job_id;
+    const sourceKind = nativePdfMount ? 'pdf' : '';
     const envelope = chatEnvelope(jobId);
     const thread = activeChatThread(jobId);
     const sessionId = thread.id;
-    for (const id of ['chat-thinking-budget', 'chat-context-window']) {
+    const usingCli = Boolean(state.aiProfiles.chat?.cli_kind);
+    for (const id of usingCli ? ['chat-context-window'] : ['chat-thinking-budget', 'chat-context-window']) {
       const optionInput = $(`#${id}`);
       if (!optionInput.hidden && (!optionInput.value || !optionInput.checkValidity())) { optionInput.reportValidity(); optionInput.focus(); return; }
     }
-    if ($('#chat-reasoning-effort').value === 'custom' && !$('#chat-reasoning-custom').value.trim()) {
+    if (!usingCli && $('#chat-reasoning-effort').value === 'custom' && !$('#chat-reasoning-custom').value.trim()) {
       setPanelStatus('请输入服务商支持的推理档位，或改为自动。', true);
       $('#chat-reasoning-custom').focus();
       return;
     }
-    const optionWarning = aiOptionWarning(chatEffectiveOptions(thread), aiCapabilities('chat'));
+    const optionWarning = usingCli ? '' : aiOptionWarning(chatEffectiveOptions(thread), aiCapabilities('chat'));
     if (optionWarning) {
       setPanelStatus(optionWarning, true);
       $('#chat-session-options').open = true;
       return;
     }
     const requestOptions = normalizeChatOptions(thread.options);
+    if (usingCli) {
+      delete requestOptions.reasoning_effort;
+      delete requestOptions.thinking_budget;
+    }
     const chat = thread.messages;
     state.chat = chat;
     chat.push(normalizedChatMessage({ role: 'user', content, ...(selectedText ? { quote: selectedText } : {}) }));
@@ -11574,6 +12097,7 @@
     input.value = '';
     if (selectedText || selectedImage) {
       state.chatSelection = null;
+      if (sourceKind) nativePdf.clearSelection();
       frameDocument()?.getSelection()?.removeAllRanges();
       clearSelectionPopover({ clearState: true });
       renderSelectedContext();
@@ -11592,6 +12116,7 @@
         messages: outgoing,
         options: requestOptions,
         selected_text: selectedText,
+        ...(sourceKind ? { source_kind: sourceKind } : {}),
         ...(selectedImage ? { selected_image: selectedImage } : {}),
       }, (delta) => {
         if (reply.content.length + delta.length > chatMaxMessageChars) {
@@ -11788,7 +12313,9 @@
   }
 
   function openReader(job, { addTab = true } = {}) {
-    if (!job?.links?.html) return;
+    if (!job?.links?.html) { openNativePdf(job); return; }
+    closeNativePdf();
+    nativePdfTabs.delete(job.job_id);
     captureCurrentReadingLocation();
     if (readerMount) {
       readerMount.annotations = state.annotations;
@@ -11813,6 +12340,8 @@
     if ($('#reader-title')) $('#reader-title').textContent = libraryEntry ? itemTitle(libraryEntry) : String(job.source_filename || '').replace(/\.pdf$/i, '');
     const counts = job.manifest?.counts || {};
     if ($('#reader-meta')) $('#reader-meta').textContent = `${counts.pages || '—'} 页 · ${counts.tables || 0} 表 · ${counts.images || counts.major_figures || 0} 图 · ${counts.formulas || counts.display_formulas || 0} 公式`;
+    const reportButton = $('#reader-open-report');
+    if (reportButton) reportButton.hidden = !paperReport || state.health?.readonly === true;
     state.translationCache = nextCache;
     state.translationRun = state.translationRuns.get(job.job_id) || null;
     const highlightButton = $('#auto-highlight-button');
@@ -13002,6 +13531,8 @@
   const aiStatusHistoryPageSize = 3;
   const aiModelLists = { translation: [], chat: [] };
   const aiServiceNames = Object.freeze({ translation: '翻译服务', chat: '文章助手' });
+  const aiCliLabels = new Map([['codex', 'Codex CLI'], ['claude', 'Claude Code CLI'], ['custom', '自定义 CLI']]);
+  const aiCliDrafts = { translation: new Map(), chat: new Map() };
 
   function setLibraryLocationStatus(message = '', { error = false, migrating = false } = {}) {
     const row = $('.settings-library-location');
@@ -13059,6 +13590,7 @@
     try {
       const notesSaved = await flushPendingArticleNotes();
       if (notesSaved === false) throw new Error('文章笔记尚未保存，请先解决保存错误后再迁移文献库。');
+      if (paperReport && await paperReport.flush() !== true) throw new Error('报告尚未保存，请先解决保存错误后再迁移文献库。');
       setLibraryLocationStatus('请选择一个空文件夹。', { migrating: true });
       const result = await desktop.chooseLibraryLocation();
       if (result?.cancelled) {
@@ -13310,24 +13842,70 @@
       const fullyConfigured = flags.length ? flags.every(Boolean) : config.enabled === true;
       const configuration = $(`#setting-${service}-configuration`);
       if (configuration) {
-        configuration.textContent = config.enabled === true ? '已启用' : fullyConfigured ? '已配置 · 当前未启用' : '配置不完整';
+        const label = aiCliLabels.get(config.cli_kind);
+        const status = config.enabled === true ? '已启用' : fullyConfigured ? '已配置 · 当前未启用' : '配置不完整';
+        configuration.textContent = label ? `${status} · ${label}` : status;
         configuration.title = String(config.note || '');
       }
     }
     renderAIStatusHistory();
   }
 
-  function syncTranslationProviderControls() {
+  function desktopCliSettingsAvailable() {
+    return isDesktopApp && !browserDemo && state.health?.desktop_cli_available === true && state.health.readonly !== true && state.health.demo !== true;
+  }
+
+  function selectedAICliKind(service) {
+    return desktopCliSettingsAvailable() ? $(`#setting-${service}-cli-kind`).value : '';
+  }
+
+  function syncAITransportControls() {
     const provider = $('#setting-translation-provider')?.value || 'openai-compatible';
     $$('[data-translation-provider-fields]').forEach((field) => { field.hidden = !field.dataset.translationProviderFields.split(' ').includes(provider); });
-    const reuseChat = $('[data-ai-reuse-source="chat"][data-ai-reuse-target="translation"]');
-    if (reuseChat) reuseChat.hidden = provider !== 'openai-compatible';
+    for (const service of Object.keys(aiServiceNames)) {
+      const kind = selectedAICliKind(service);
+      $(`[data-ai-transport="${service}"]`).hidden = !desktopCliSettingsAvailable();
+      $(`[data-ai-cli-fields="${service}"]`).hidden = !kind;
+      $(`[data-ai-cli-builtin="${service}"]`).hidden = !kind || kind === 'custom';
+      $(`[data-ai-cli-custom="${service}"]`).hidden = kind !== 'custom';
+      $$(`[data-ai-api-fields="${service}"]`).forEach((field) => { field.hidden = Boolean(kind); });
+    }
+    const usingCli = selectedAICliKind('chat') || selectedAICliKind('translation');
+    $$('[data-ai-reuse-source]').forEach((button) => { button.hidden = Boolean(usingCli) || provider !== 'openai-compatible'; });
+  }
+
+  function readAICliFields(service, kind) {
+    const prefix = `setting-${service}-cli`;
+    const cli_path = $(`#${prefix}-path`).value.trim();
+    return kind === 'custom'
+      ? { cli_path, cli_args: $(`#${prefix}-args`).value.split('\n').filter((line) => line.length > 0) }
+      : { cli_path, cli_model: $(`#${prefix}-model`).value.trim() };
+  }
+
+  function renderAICliFields(service, kind) {
+    const prefix = `setting-${service}-cli`;
+    const draft = aiCliDrafts[service].get(kind) || {};
+    const path = $(`#${prefix}-path`);
+    path.value = draft.cli_path || '';
+    path.required = kind === 'custom';
+    path.setCustomValidity('');
+    path.placeholder = kind === 'custom' ? '~/bin/deepseek-wrapper' : `自动查找 ${kind}`;
+    $(`#${prefix}-path-hint`).textContent = kind === 'custom'
+      ? '填写绝对路径或以 ~/ 开头的路径。'
+      : '留空时使用本机安装的 CLI 和登录状态。需要指定安装位置时，填写绝对路径或以 ~/ 开头的路径。';
+    $(`#${prefix}-model`).value = draft.cli_model || '';
+    $(`#${prefix}-args`).value = Array.isArray(draft.cli_args) ? draft.cli_args.join('\n') : '';
+    $(`#${prefix}-kind`).dataset.renderedKind = kind;
   }
 
   function renderAISettings(settings = {}) {
     Object.keys(aiServiceNames).forEach((service) => {
       const config = settings?.[service] || {};
-      state.aiProfiles[service] = { base_url: config.base_url || '', model: config.model || '', api_format: config.api_format || 'auto', ...normalizeChatOptions(config), capabilities: config.capabilities || {} };
+      const cliKind = desktopCliSettingsAvailable() && aiCliLabels.has(config.cli_kind) ? config.cli_kind : '';
+      state.aiProfiles[service] = { base_url: config.base_url || '', model: config.model || '', api_format: config.api_format || 'auto', cli_kind: cliKind, ...normalizeChatOptions(config), capabilities: config.capabilities || {} };
+      if (cliKind) aiCliDrafts[service].set(cliKind, config);
+      $(`#setting-${service}-cli-kind`).value = cliKind;
+      renderAICliFields(service, cliKind);
       if (service === 'translation') {
         $('#setting-translation-provider').value = config.provider || 'openai-compatible';
         $('#setting-translation-deepl-tier').value = config.deepl_tier === 'pro' ? 'pro' : 'free';
@@ -13373,33 +13951,37 @@
       if (modelFilter) modelFilter.value = '';
       if (modelStatus) modelStatus.textContent = '';
     });
-    syncTranslationProviderControls();
+    syncAITransportControls();
     for (const service of Object.keys(aiServiceNames)) renderAIInferenceControls(service);
     renderChatOptions({ force: true });
   }
 
   function aiSettingsFromControls() {
-    return Object.fromEntries(Object.keys(aiServiceNames).map((service) => [service, {
-      base_url: $(`#setting-${service}-base-url`)?.value.trim() || '',
-      api_format: $(`#setting-${service}-api-format`)?.value || 'auto',
-      reasoning_effort: reasoningFromControl(`setting-${service}`),
-      thinking_budget: Number($(`#setting-${service}-thinking-budget`)?.value || 0),
-      context_window: Number($(`#setting-${service}-context-window`)?.value || 0),
-      model: $(`#setting-${service}-model`)?.value.trim() || '',
-      api_key: $(`#setting-${service}-api-key`)?.value || '',
-      clear_api_key: $(`#setting-${service}-clear-key`)?.dataset.clearRequested === 'true',
-      ...(service === 'translation' ? {
-        mode: $('#setting-translation-mode')?.value === 'chat' ? 'chat' : 'qwen-mt',
-        provider: $('#setting-translation-provider')?.value || 'openai-compatible',
-        deepl_tier: $('#setting-translation-deepl-tier')?.value || 'free',
-        source_language: $('#setting-translation-source-language')?.value.trim() || 'auto',
-        target_language: $('#setting-translation-target-language')?.value.trim() || 'zh',
-        access_key_id: $('#setting-translation-access-key-id')?.value || '',
-        secret_access_key: $('#setting-translation-secret-access-key')?.value || '',
-        clear_access_key_id: $('[data-translation-clear-secret="access_key_id"]')?.dataset.clearRequested === 'true',
-        clear_secret_access_key: $('[data-translation-clear-secret="secret_access_key"]')?.dataset.clearRequested === 'true',
-      } : {}),
-    }]));
+    return Object.fromEntries(Object.keys(aiServiceNames).map((service) => {
+      const cli_kind = selectedAICliKind(service);
+      return [service, {
+        base_url: $(`#setting-${service}-base-url`)?.value.trim() || '',
+        api_format: $(`#setting-${service}-api-format`)?.value || 'auto',
+        reasoning_effort: reasoningFromControl(`setting-${service}`),
+        thinking_budget: Number($(`#setting-${service}-thinking-budget`)?.value || 0),
+        context_window: Number($(`#setting-${service}-context-window`)?.value || 0),
+        model: $(`#setting-${service}-model`)?.value.trim() || '',
+        api_key: $(`#setting-${service}-api-key`)?.value || '',
+        clear_api_key: $(`#setting-${service}-clear-key`)?.dataset.clearRequested === 'true',
+        ...(desktopCliSettingsAvailable() ? { cli_kind, ...(cli_kind ? readAICliFields(service, cli_kind) : {}) } : {}),
+        ...(service === 'translation' ? {
+          mode: $('#setting-translation-mode')?.value === 'chat' ? 'chat' : 'qwen-mt',
+          provider: $('#setting-translation-provider')?.value || 'openai-compatible',
+          deepl_tier: $('#setting-translation-deepl-tier')?.value || 'free',
+          source_language: $('#setting-translation-source-language')?.value.trim() || 'auto',
+          target_language: $('#setting-translation-target-language')?.value.trim() || 'zh',
+          access_key_id: $('#setting-translation-access-key-id')?.value || '',
+          secret_access_key: $('#setting-translation-secret-access-key')?.value || '',
+          clear_access_key_id: $('[data-translation-clear-secret="access_key_id"]')?.dataset.clearRequested === 'true',
+          clear_secret_access_key: $('[data-translation-clear-secret="secret_access_key"]')?.dataset.clearRequested === 'true',
+        } : {}),
+      }];
+    }));
   }
 
   function clearSavedAIKey(service, button) {
@@ -14477,7 +15059,7 @@
   $('#settings-form').addEventListener('input', (event) => {
     if (browserDemo?.invalidated) return;
     if (event.target.closest('.shortcut-grid, #settings-mcp')) return;
-    if (event.target.matches('input[type="text"], input[type="email"], input[type="url"], input[type="password"], input[type="number"]')) queueSettingsSave(false);
+    if (event.target.matches('input[type="text"], input[type="email"], input[type="url"], input[type="password"], input[type="number"], [data-ai-cli-custom] textarea')) queueSettingsSave(false);
   });
   document.addEventListener('visibilitychange', () => {
     if (browserDemo?.invalidated) return;
@@ -14550,6 +15132,8 @@
           if (!annotationWritesSaved) saved = false;
           if (await flushPendingArticleNotes(null, { isCurrent }) !== true) saved = false;
           if (!isCurrent()) return false;
+          if (paperReport && await paperReport.flush() !== true) saved = false;
+          if (!isCurrent()) return false;
           if (await flushPendingSettings({ isCurrent }) !== true || settingsSavedRevision < settingsSaveRevision) saved = false;
           if (!isCurrent()) return false;
         }
@@ -14595,6 +15179,14 @@
   });
   for (const service of ['translation', 'chat']) {
     const prefix = `setting-${service}`;
+    $(`#${prefix}-cli-kind`).addEventListener('change', (event) => {
+      const select = event.currentTarget;
+      const previousKind = select.dataset.renderedKind;
+      if (previousKind) aiCliDrafts[service].set(previousKind, readAICliFields(service, previousKind));
+      renderAICliFields(service, select.value);
+      syncAITransportControls();
+      renderAIInferenceControls(service);
+    });
     for (const field of ['model', 'base-url', 'api-format', 'mode', 'provider', 'thinking-budget', 'context-window']) {
       $(`#${prefix}-${field}`)?.addEventListener('change', () => renderAIInferenceControls(service));
     }
@@ -14629,7 +15221,7 @@
     $('#setting-translation-api-key').value = '';
     $('#setting-translation-api-key').placeholder = '为当前提供商输入密钥';
     $('#setting-translation-clear-key').disabled = true;
-    syncTranslationProviderControls();
+    syncAITransportControls();
   });
   $$('[data-translation-clear-secret]').forEach((button) => button.addEventListener('click', () => {
     const name = button.dataset.translationClearSecret;
@@ -14667,6 +15259,7 @@
       if (status) { status.textContent = '检测中'; status.className = 'ai-service-status is-loading'; }
     });
     try {
+      if (!await flushPendingSettings()) throw new Error('请先解决未保存的设置。');
       const payload = await api('/api/ai/test', { method: 'POST' });
       const results = aiTestResults(payload);
       const translationOK = aiConnectionSucceeded(results.translation);
@@ -14712,6 +15305,7 @@
   $('#open-source-button')?.addEventListener('click', () => {
     const job = state.activeJob;
     if (!job) { showToast('请先打开一篇文献。', true); return; }
+    if (nativePdfAvailable(job)) { openNativePdf(job); return; }
     if (window.myScholarDesktop?.openSourcePdf) {
       Promise.resolve(window.myScholarDesktop.openSourcePdf(job.job_id))
         .then((result) => {
@@ -15003,6 +15597,7 @@
     const ids = new Set();
     state.translationRuns.forEach((run, jobId) => { if (run.running) ids.add(jobId); });
     reflowRuns.forEach((run, jobId) => { if (reflowRunIsActive(run)) ids.add(jobId); });
+    pdfParsePolls.forEach((jobId) => ids.add(jobId));
     return ids;
   }
   const backgroundTasksView = window.MyScholarBackgroundTasks?.create({
@@ -15194,7 +15789,8 @@
   loadTypography();
   applyAppearance();
   $('#share-button').addEventListener('click', async () => {
-    const url = state.activeJob?.links?.html ? new URL(state.activeJob.links.html, window.location.href).href : window.location.href;
+    const source = nativePdfMount ? state.activeJob?.links?.source : state.activeJob?.links?.html;
+    const url = source ? new URL(source, window.location.href).href : window.location.href;
     try { await navigator.clipboard.writeText(url); showToast('本地阅读链接已复制。'); }
     catch (_) { showToast(`复制失败，请手动复制：${url}`, true); }
   });
@@ -15210,9 +15806,10 @@
       const previousProfileId = translationProfileId();
       const payload = await api('/api/health');
       state.health = payload;
+      syncAITransportControls();
       for (const service of ['translation', 'chat']) {
         const profile = payload.ai?.services?.[service];
-        if (profile) state.aiProfiles[service] = { ...state.aiProfiles[service], model: profile.model || '', api_format: profile.api_format || 'auto', ...normalizeChatOptions(profile), capabilities: profile.capabilities || {} };
+        if (profile) state.aiProfiles[service] = { ...state.aiProfiles[service], model: profile.model || '', api_format: profile.api_format || 'auto', cli_kind: desktopCliSettingsAvailable() ? profile.cli_kind || '' : '', ...normalizeChatOptions(profile), capabilities: profile.capabilities || {} };
       }
       renderChatOptions({ force: true });
       const nextProfileId = translationProfileId();
@@ -15243,6 +15840,7 @@
       if (state.activeJob && frameDocument()) ensureTitleTranslation();
     } catch (_) {
       state.health = null;
+      syncAITransportControls();
     }
   }
   function shortcutMatches(event, shortcut) {
@@ -15279,7 +15877,7 @@
   function handleApplicationShortcut(event) {
     if (event.defaultPrevented || event.repeat || event.isComposing || event.keyCode === 229
       || $('dialog[open]') || event.target?.ownerDocument?.querySelector('dialog[open]')
-      || isEditableAppSurface(event.target) || event.target?.isContentEditable
+      || (isEditableAppSurface(event.target) && !event.target?.closest?.('.native-pdf .textLayer')) || event.target?.isContentEditable
       || event.target?.closest?.('[contenteditable]:not([contenteditable="false"]), [role="textbox"]')) return false;
     if (handleSelectionNumberShortcut(event)) return true;
     if (shortcutMatches(event, state.shortcuts.full_translation)) {
