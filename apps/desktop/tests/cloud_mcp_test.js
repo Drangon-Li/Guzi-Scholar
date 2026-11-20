@@ -77,7 +77,7 @@ async function main() {
 
   // 云端设置文件权限 0600，未登录时不保存会话
   const saved = path.join(temp, 'guzi-cloud.json');
-  assert.equal(fs.statSync(saved).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') assert.equal(fs.statSync(saved).mode & 0o777, 0o600); // Windows 没有 POSIX 权限位
   assert.equal(JSON.parse(fs.readFileSync(saved, 'utf8')).session, null);
   assert.equal(cloud.link.getState().endpoint, 'https://mcp.guzilab.com/scholar');
 
