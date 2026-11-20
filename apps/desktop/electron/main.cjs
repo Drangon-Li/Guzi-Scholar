@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, powerMonitor, shell, webContents } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage, powerMonitor, safeStorage, shell, webContents } = require('electron');
 const { spawn, spawnSync } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
@@ -58,6 +58,7 @@ if (DEVELOPMENT_BUILD) {
 let mainWindow = null;
 let pythonServer = null;
 let serverURL = null;
+let scholarCloud = null;
 let serverStartupPromise = null;
 let serverStopPromise = null;
 let windowStartupPromise = null;
@@ -215,6 +216,33 @@ ipcMain.handle('my-scholar:plugin-runtime-check', async (event, payload) => {
   })().finally(() => pluginRuntimeChecks.delete(key));
   pluginRuntimeChecks.set(key, check);
   return check;
+});
+
+// 谷子云端 MCP（统一账号）。返回 { ok, value } / { ok: false, error }，保留服务端给出的中文提示。
+function handleCloud(channel, action) {
+  ipcMain.handle(`my-scholar:cloud-${channel}`, async (event, ...args) => {
+    requireMainWindowSender(event);
+    if (!scholarCloud) return { ok: false, error: '云端 MCP 未能启动，请重启应用后再试。' };
+    try { return { ok: true, value: await action(scholarCloud.link, ...args) }; }
+    catch (error) { return { ok: false, error: error.message || String(error) }; }
+  });
+}
+handleCloud('state', (link) => link.getState());
+handleCloud('request-code', (link, input) => link.requestCode({ purpose: input?.purpose === 'register' ? 'register' : 'login', email: String(input?.email || '') }));
+handleCloud('login', (link, input) => link.login({ identifier: String(input?.identifier || ''), password: String(input?.password || '') }));
+handleCloud('login-code', (link, input) => link.loginWithCode({ email: String(input?.email || ''), code: String(input?.code || '') }));
+handleCloud('register', (link, input) => link.register({ username: String(input?.username || ''), password: String(input?.password || ''), email: String(input?.email || ''), code: String(input?.code || '') }));
+handleCloud('logout', (link) => link.logout());
+handleCloud('set-enabled', (link, enabled) => link.setEnabled(enabled === true));
+handleCloud('tokens', (link) => link.listTokens());
+handleCloud('create-token', (link, input) => link.createToken({ name: String(input?.name || ''), bindDevice: input?.bindDevice === true }));
+handleCloud('revoke-token', (link, id) => link.revokeToken(String(id)));
+handleCloud('tools-changed', (link) => link.toolsChanged());
+handleCloud('open-account', async (link) => {
+  const url = new URL(link.getState().accountUrl);
+  if (url.protocol !== 'https:' && app.isPackaged) return null;
+  await shell.openExternal(url.href);
+  return null;
 });
 
 ipcMain.handle('my-scholar:mcp-config', async (event) => {
@@ -831,6 +859,8 @@ async function startServer() {
           fs.writeFileSync(path.join(app.getPath('userData'), 'development-runtime.json'), JSON.stringify({ pid: process.pid, backendPid: child.pid, url: serverURL, stateDir: storage.stateDir, libraryDir: storage.currentPath }, null, 2), { mode: 0o600 });
         }
         resolve(serverURL);
+        // 本地服务每次启动都会轮换 MCP 凭据，能力列表也可能变化：通知云端连接重新推送。
+        Promise.resolve().then(() => scholarCloud?.link.toolsChanged()).catch(() => {});
       }
     };
     child.stdout.on('data', onData);
@@ -1005,7 +1035,7 @@ function ensureWindow() {
 
 app.whenReady().then(async () => {
   powerMonitor.on('suspend', () => pluginGuard?.suspend());
-  powerMonitor.on('resume', () => pluginGuard?.resume());
+  powerMonitor.on('resume', () => { pluginGuard?.resume(); scholarCloud?.link.nudge(); });
   const installationCompletion = isolatedBuild ? null : consumeInstallationMarker({ app });
   const installation = isolatedBuild ? { action: 'continue' } : requestMacInstallation({ app, dialog });
   if (installation.action !== 'continue') {
@@ -1049,6 +1079,29 @@ app.whenReady().then(async () => {
     }
   }
   const window = await ensureWindow();
+  // 云端 MCP 是可选能力：任何初始化失败都只影响设置里的云端分区，不能阻止应用启动。
+  // 开发构建可以用环境变量指向本机的 guzi-cloud；发布版固定使用 guzilab.com。
+  try {
+    const { createScholarCloud } = require('./cloud.cjs');
+    scholarCloud = await createScholarCloud({
+      userData: app.getPath('userData'),
+      appVersion: app.getVersion(),
+      platform: process.platform,
+      safeStorage,
+      mcpStatus: () => backendRequestJSON('/api/mcp/status'),
+      send: (channel, value) => {
+        try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, value); }
+        catch (error) { diagnosticLog('cloud-state-send-error', error.message || String(error)); }
+      },
+      accountOrigin: app.isPackaged ? undefined : process.env.GUZI_CLOUD_ACCOUNT_ORIGIN,
+      mcpOrigin: app.isPackaged ? undefined : process.env.GUZI_CLOUD_MCP_ORIGIN,
+      log: (line) => diagnosticLog('cloud', line),
+    }).initialize();
+    app.on('will-quit', () => scholarCloud?.dispose());
+  } catch (error) {
+    scholarCloud = null;
+    diagnosticLog('cloud-start-error', error.stack || error.message || String(error));
+  }
   if (installationCompletion) {
     await dialog.showMessageBox(window, {
       type: 'info',

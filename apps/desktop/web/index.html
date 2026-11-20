@@ -584,6 +584,11 @@
           </section>
           <section id="settings-mcp" class="settings-section" aria-labelledby="settings-mcp-title" hidden>
             <div class="settings-section-heading"><div><h2 id="settings-mcp-title">MCP 连接</h2><p>让本机 Agent 通过授权接口访问谷子学术的文献、笔记与其他功能。</p></div><span class="settings-badge">本机连接</span></div>
+            <div id="settings-cloud" class="settings-cloud">
+              <div class="settings-row"><div><strong>谷子云端 MCP</strong><small>登录谷子账号后，AI 客户端用固定地址和你的 token 即可连接，无需配置本机桥接。工具仍在这台电脑上执行、使用下方同一套能力范围；使用时请保持谷子学术运行。</small></div><span id="settings-cloud-status" class="settings-badge">未登录</span></div>
+              <div id="settings-cloud-body"></div>
+              <p id="settings-cloud-message" class="panel-status" role="status" aria-live="polite"></p>
+            </div>
             <div class="settings-row"><div><strong>启用 MCP 服务</strong><small>连接时需保持谷子学术运行。更改开关或权限后，请点击“保存 MCP 设置”。</small></div><label class="settings-toggle"><input id="settings-mcp-enabled" type="checkbox" aria-label="启用 MCP 服务"></label></div>
             <fieldset id="settings-mcp-scopes"><legend>允许访问的能力范围</legend></fieldset>
             <div class="settings-mcp-actions">
@@ -812,6 +817,7 @@
   <script src="/web/plugin-host.js"></script>
   <script src="/web/market.js"></script>
   <script src="/web/mcp-settings.js"></script>
+  <script src="/web/cloud-settings.js"></script>
   <script src="/web/paper-report.js"></script>
   <script src="/web/native-pdf.js"></script>
   <script defer src="/web/test-build.js"></script>

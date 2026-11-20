@@ -1936,3 +1936,31 @@ body.browser-demo-mode.reader-mode .app-shell { height: auto; flex: 1 1 0; }
 .browser-demo-invalidated-dialog::backdrop { background: #0007; }
 .browser-demo-invalidated-dialog h2 { margin: 0 0 12px; font-size: 18px; }
 .browser-demo-invalidated-dialog p { margin: 0 0 20px; color: var(--text-secondary); line-height: 1.7; }
+
+/* 谷子云端 MCP */
+.settings-cloud { margin-bottom: 18px; padding-bottom: 6px; border-bottom: 1px solid color-mix(in srgb, var(--line) 72%, transparent); }
+.settings-cloud .settings-badge[data-tone="online"] { color: var(--success, #2f8a4c); border-color: color-mix(in srgb, var(--success, #2f8a4c) 40%, var(--line)); }
+.settings-cloud .settings-badge[data-tone="pending"] { color: var(--warning, #b7791f); }
+.settings-cloud .settings-badge[data-tone="error"] { color: var(--danger, #b5432f); }
+.settings-cloud small { display: block; margin: 2px 0 8px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.settings-cloud-tabs { display: inline-flex; gap: 4px; margin: 6px 0 12px; padding: 3px; border-radius: 8px; background: var(--soft); }
+.settings-cloud-tabs button { border: 0; border-radius: 6px; padding: 5px 12px; background: transparent; color: var(--muted); font: inherit; font-size: 12.5px; cursor: pointer; }
+.settings-cloud-tabs button[aria-selected="true"] { background: var(--canvas); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+.settings-cloud-form { display: grid; gap: 10px; max-width: 520px; }
+.settings-cloud-field { display: grid !important; grid-template-columns: 96px 1fr auto; align-items: center; gap: 10px; margin: 0 !important; font-size: 13px; color: var(--ink) !important; }
+.settings-cloud-field > span { color: var(--muted); }
+.settings-cloud-field input, .settings-cloud-create input[type="text"] { min-width: 0; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--canvas); color: var(--ink); font: inherit; font-size: 13px; }
+.settings-cloud-form small { margin: -4px 0 0 106px; }
+.settings-cloud-line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 0; font-size: 13px; }
+.settings-cloud-line > span { min-width: 40px; color: var(--muted); }
+.settings-cloud-line code, .settings-cloud-created code { padding: 3px 8px; border-radius: 6px; background: var(--canvas); font-size: 12px; overflow-wrap: anywhere; user-select: text; }
+.settings-cloud-subtitle { display: block; margin-top: 10px; font-size: 13.5px; }
+.settings-cloud-tokens { list-style: none; margin: 4px 0 10px; padding: 0; }
+.settings-cloud-tokens li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid color-mix(in srgb, var(--line) 72%, transparent); font-size: 13px; }
+.settings-cloud-tokens em { color: var(--muted); font-style: normal; font-size: 12px; }
+.settings-cloud-tokens small { margin: 2px 0 0; }
+.settings-cloud-create { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 10px; }
+.settings-cloud-create input[type="text"] { width: 260px; }
+.settings-cloud-check { display: inline-flex !important; align-items: center; gap: 6px; margin: 0 !important; font-size: 12.5px; color: var(--muted) !important; }
+.settings-cloud-created { display: grid; gap: 8px; margin: 8px 0 10px; padding: 12px; border-radius: 8px; background: color-mix(in srgb, var(--accent-fill, #d48a1f) 10%, var(--canvas)); }
+.settings-cloud-created code { display: block; padding: 8px 10px; }
