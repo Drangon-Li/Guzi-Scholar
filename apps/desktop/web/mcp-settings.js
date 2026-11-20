@@ -47,6 +47,8 @@
       try {
         if (await task() === false) return;
         await refresh();
+        // 云端 MCP 沿用这里的能力范围：权限变化后让云端重新推送工具列表。
+        window.myScholarDesktop?.cloud?.toolsChanged().catch(() => {});
         report(service.enabled ? 'MCP 已启用 · 设置已保存' : 'MCP 已关闭 · 设置已保存');
       } catch (error) { report(error.message, true); }
       finally { setBusy(false); }

@@ -35,6 +35,27 @@ contextBridge.exposeInMainWorld('myScholarDesktop', Object.freeze({
     ipcRenderer.on('my-scholar:update-state', listener);
     return () => ipcRenderer.removeListener('my-scholar:update-state', listener);
   },
+  // 谷子云端 MCP（统一账号）
+  cloud: Object.freeze({
+    getState: () => rendererStateInvoke('my-scholar:cloud-state'),
+    requestCode: (purpose, email) => rendererStateInvoke('my-scholar:cloud-request-code', { purpose, email }),
+    login: (identifier, password) => rendererStateInvoke('my-scholar:cloud-login', { identifier, password }),
+    loginWithCode: (email, code) => rendererStateInvoke('my-scholar:cloud-login-code', { email, code }),
+    register: (input) => rendererStateInvoke('my-scholar:cloud-register', input),
+    logout: () => rendererStateInvoke('my-scholar:cloud-logout'),
+    setEnabled: (enabled) => rendererStateInvoke('my-scholar:cloud-set-enabled', enabled === true),
+    listTokens: () => rendererStateInvoke('my-scholar:cloud-tokens'),
+    createToken: (name, bindDevice) => rendererStateInvoke('my-scholar:cloud-create-token', { name, bindDevice: bindDevice === true }),
+    revokeToken: (id) => rendererStateInvoke('my-scholar:cloud-revoke-token', id),
+    toolsChanged: () => rendererStateInvoke('my-scholar:cloud-tools-changed'),
+    openAccount: () => rendererStateInvoke('my-scholar:cloud-open-account'),
+    onState: (callback) => {
+      if (typeof callback !== 'function') throw new TypeError('云端状态回调必须是函数。');
+      const listener = (_event, payload) => callback(payload);
+      ipcRenderer.on('my-scholar:cloud-state', listener);
+      return () => ipcRenderer.removeListener('my-scholar:cloud-state', listener);
+    },
+  }),
   state: Object.freeze({
     loadAll: () => rendererStateInvoke('my-scholar:state-load'),
     set: (key, value) => rendererStateInvoke('my-scholar:state-set', key, value),
