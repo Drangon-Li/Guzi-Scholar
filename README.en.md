@@ -1,118 +1,123 @@
-# Guzi Scholar
+<p align="center">
+  <img src="apps/desktop/electron/assets/icon.png" width="112" alt="Guzi Scholar icon" />
+</p>
 
-A local-first academic PDF reader that brings paper organization, continuous reading and translation, annotations, notes, and vocabulary review into one desktop app.
+<h1 align="center">Guzi Scholar</h1>
 
-Your papers and reading work stay on your device by default. Connect your own API services for translation and article assistance.
+<p align="center">
+  <b>Read English papers, understand them, and keep what you learn.</b><br />
+  A local-first academic PDF reader that puts your library, continuous reading with translation, annotations, notes, and vocabulary review in one desktop app
+</p>
 
-[Download](https://github.com/Drangon-Li/Guzi-Scholar/releases) · [Try the browser demo](https://scholar.guzilab.com/) · [中文](README.md)
+<p align="center">
+  <a href="https://s.guzilab.com">Website</a> ·
+  <a href="https://scholar.guzilab.com">Browser demo</a> ·
+  <a href="https://github.com/holamochi/Guzi-Scholar/releases/latest">Download</a> ·
+  <a href="https://github.com/holamochi/Guzi-Scholar/issues">Issues</a> ·
+  <a href="README.md">中文</a>
+</p>
 
 ![Continuous reading and translation in Guzi Scholar](docs/images/reading.jpg)
 
-*Screenshot from the browser demo using the public “Attention Is All You Need” sample. AI translations and answers are preset examples, not live model results; no private library is shown.*
+<sub>All screenshots come from the browser demo with the public paper “Attention Is All You Need”. AI translations and answers are preset examples, not live model output.</sub>
 
-## A workflow for reading papers
+## Why Guzi Scholar
 
-### 1. Organize your library
+Reading a paper in a second language usually means juggling five tools: a PDF viewer, a translation site, a note app, a vocabulary list, and a reference manager. When you finish the paper, what you learned is spread across all five.
 
-Import PDFs and organize them with folders, reading status, custom properties, and filtered views. Keep track of what to read next and what you have already read.
+Guzi Scholar keeps that whole loop in one app, and keeps your papers and notes on your own computer by default.
 
-![Paper library and reading status](docs/images/library.jpg)
+## Highlights
 
-*Screenshot from the browser demo using the public “Attention Is All You Need” sample. AI translations and answers are preset examples, not live model results; no private library is shown.*
+- **Continuous reading**: PDFs become a reflowable page with adjustable font size and line spacing, plus a table of contents.
+- **Translation on demand**: translate a selection for a hard sentence, or the whole paper for a full read. Translations are cached locally.
+- **Reading assistant**: ask questions about the paper you are reading, answered from its context.
+- **Annotations and notes**: highlights, comments, and per-paper notes with images. Your own annotations are stored apart from AI-suggested highlights.
+- **Vocabulary in context**: saved words keep their original sentence and source paper, so you can jump back to see how they were used.
+- **Library management**: folders, reading status, custom properties, filtered views, and Zotero import.
+- **Bring your own model**: configure translation and the reading assistant separately with any supported API format, such as OpenAI-compatible. No model or API key is bundled.
+- **Connect AI clients**: let Claude Code, Codex, and other MCP clients look up your library.
 
-### 2. Read continuously, with translation when needed
-
-Convert PDFs into continuous reading pages, navigate the outline, and adjust text size and spacing. Translate selected text or the full article, and ask the reading assistant questions about the paper. Translation caches are saved locally for later reading.
-
-The desktop package includes local conversion tools. You can optionally connect a self-hosted GLM-OCR + MinerU parsing service for complex layouts. Conversion quality depends on the source PDF and parsing engine. AI translation and assistance require your own configured services.
-
-### 3. Keep annotations and notes
-
-Highlight passages, add comments, and collect questions and conclusions in article notes, including images. Personal annotations and AI reading highlights are stored separately so you can distinguish your own records from model suggestions.
-
-![Article notes and annotations](docs/images/notes.jpg)
-
-*Screenshot from the browser demo using the public “Attention Is All You Need” sample. AI translations and answers are preset examples, not live model results; no private library is shown.*
-
-### 4. Review vocabulary in context
-
-Save words and phrases from the original text with their source sentences and papers. Edit meanings, tags, and notes, review entries by learning status, and return to the paper to see how a term is used.
-
-![Vocabulary with source sentences and papers](docs/images/vocabulary.jpg)
-
-*Screenshot from the browser demo using the public “Attention Is All You Need” sample. AI translations and answers are preset examples, not live model results; no private library is shown.*
+| Library and reading status | Notes and annotations | Vocabulary with source sentences |
+| --- | --- | --- |
+| ![Library](docs/images/library.jpg) | ![Notes and annotations](docs/images/notes.jpg) | ![Vocabulary](docs/images/vocabulary.jpg) |
 
 ## Try it in your browser
 
-**[Open the browser demo → scholar.guzilab.com](https://scholar.guzilab.com/)**
+Open **[scholar.guzilab.com](https://scholar.guzilab.com)** to try the reading sidebar, notes, annotations, and vocabulary with a public sample paper. Nothing to install; your edits stay in the current browser.
 
-Explore a public sample paper with the reading sidebar, notes, annotations, and vocabulary tools. Edits stay in your current browser, persist after refresh, and can be reset.
+The AI answers and translations in the demo are labelled presets and do not call a real model. Uploading PDFs, re-parsing, Zotero import, and live AI services need the desktop app.
 
-AI answers and translations are clearly labeled preset examples; no live model is called. Loading the site and sample requires an internet connection. Use the desktop app for PDF uploads, reparsing, Zotero imports, and real AI services.
+## Download
 
-## Downloads and platforms
-
-Download desktop packages from [Releases](https://github.com/Drangon-Li/Guzi-Scholar/releases).
-
-| Platform | Packages | Status |
+| Platform | Version | Get it |
 | --- | --- | --- |
-| macOS Apple Silicon | `.dmg` for installation; `.zip` for in-app updates | Actively maintained; not notarized |
-| Windows x64 | `.exe` / `.zip` | Updates at selected key releases aligned with major release plans; existing packages remain in historical Releases |
+| macOS (Apple Silicon) | Latest, actively maintained | `.dmg` from [Releases](https://github.com/holamochi/Guzi-Scholar/releases/latest) |
+| Windows x64 | v0.6.7, updated only at major releases | [v0.6.7 Release](https://github.com/holamochi/Guzi-Scholar/releases/tag/v0.6.7) |
 
-macOS is the primary platform for development and releases, including routine feature work, local testing, and default CI validation.
+The macOS app bundles Python, Java, Pandoc, and the other runtimes it needs. It checks for updates at launch and verifies them with Sparkle signatures before installing.
 
-**Routine Windows iteration is paused, but Windows development is not discontinued.** Adaptation, testing, and releases will be planned around major release goals, with updates at selected key releases rather than every macOS minor release. Windows source and manual build entry points remain available.
+Windows builds are paused for day-to-day releases but not discontinued; Windows support will be updated at major versions.
 
-The macOS package bundles Python, Java, Pandoc, OpenDataLoader, and PyMuPDF runtimes. It uses ad-hoc signing and has not been signed with an Apple Developer ID or notarized by Apple. If Gatekeeper blocks the first launch, right-click `谷子学术.app` in Finder, choose **Open**, and confirm the prompt.
-
-The app checks for updates at startup and supports manual checks. Sparkle verifies the update signature before installation. You can also download a DMG for a manual update.
+> **Blocked by macOS on first launch?** The app is ad-hoc signed and not yet notarized by Apple. In Finder, right-click “谷子学术.app”, choose **Open**, then confirm.
 
 ## Get started
 
-1. Install the desktop app, import a PDF, and wait for local conversion.
-2. Configure the service URL, API key, and model for translation and the article assistant in Settings. The services can be configured separately and support OpenAI-compatible APIs and other formats offered in the UI. The app does not include provider keys or a large language model.
-3. Open a paper to read, translate, annotate, take notes, and save vocabulary. Library management, reading converted content, annotations, and local notes remain available without an AI service.
+1. Import a PDF and wait for local conversion to finish.
+2. In Settings, configure the endpoint, API key, and model for translation and for the reading assistant. Without them, library management, reading, annotations, and local notes still work.
+3. Open a paper and read: translate, annotate, take notes, or save words as you go.
+4. (Optional) In **Settings → MCP**, choose which capabilities to expose. Sign in with a Guzi account and create a token to connect clients to `https://mcp.guzilab.com/scholar` without a local bridge. Keep Guzi Scholar running while you use it; manage tokens at [account.guzilab.com](https://account.guzilab.com).
+
+For PDFs with complex layouts, you can connect your own GLM-OCR + MinerU fusion parsing service on a Linux NVIDIA GPU server. See [Remote parser setup](docs/remote-parser.md) (in Chinese).
 
 ## Data and privacy
 
-PDFs, translations, notes, annotations, vocabulary, settings, and AI configuration are stored on your device by default. The installed app keeps application state and the paper library separately; you can choose a library location in Settings.
+PDFs, translations, notes, annotations, vocabulary, settings, and AI configuration stay on your device by default. You can choose where the library lives in Settings.
 
-Some optional features send data outside your device:
+Local-first does not mean fully offline. These optional features send data out:
 
-- Online metadata lookup sends paper identifiers, titles, or author candidates to the relevant public services.
-- Translation, article assistance, and AI-assisted vocabulary explanations send the relevant text, article context, or explicitly attached images to your configured services.
-- Remote parsing uploads the original PDF to your configured server. Downloaded results are saved locally.
-
-Do not commit API keys, user data, `data/`, `developer.tokens.json`, or local build artifacts to Git.
-
-## Remote parsing
-
-Remote GLM-OCR + MinerU parsing is optional and requires your own Linux NVIDIA GPU server. The desktop download does not include a public parsing service, credentials, or GPU model weights. Translation and article-assistant API settings are separate from the parsing service settings.
-
-See the [complete remote server setup guide](README.md#远端解析服务器配置) for SSH connection fields, host verification, the private `remote-parser.config.json` file, configuration precedence, deployment prerequisites, and troubleshooting. The guide includes the full connection example and server deployment steps.
+- **Online metadata lookup** sends paper identifiers, titles, or author candidates to public metadata services.
+- **Translation, reading assistant, and AI explanations** send the relevant text, paper context, or images you attach to the services you configured.
+- **Remote parsing** uploads the original PDF to your parsing server; results are downloaded and stored locally.
+- **Cloud MCP** relays tool calls and results through `mcp.guzilab.com` to your computer. The relay stores no paper content, only tool names and timings.
 
 ## Development
 
 ```sh
 npm ci
 npm --prefix apps/desktop ci
-npm run desktop:dev
+npm run desktop:dev     # start the desktop app in development
+npm run desktop:check   # checks
+npm run build:mac       # build the macOS package
 ```
 
-Common checks and build commands:
+Day-to-day development and acceptance testing happen on macOS. Project layout, release process, and Windows build notes are in [docs/development.md](docs/development.md) (in Chinese).
 
-```sh
-npm run desktop:check:syntax
-npm run desktop:check
-npm run build:mac
-```
+Issues and pull requests are welcome. For packaging changes, please state the target OS, architecture, install method, and how you verified it. Report security issues privately as described in [SECURITY.md](SECURITY.md). Never commit real API keys, user data, `data/`, `developer.tokens.json`, or local build output.
 
-Shared desktop source and tests live in [`apps/desktop/`](apps/desktop/); platform packaging lives in [`platforms/`](platforms/). See the [desktop development guide](apps/desktop/README.md) for runtime requirements, data directories, and configuration.
+## Topic / Keywords
 
-Runtime and UI acceptance default to macOS; shared static checks may run on Linux CI. Default releases build macOS artifacts and require matching signatures, asset verification, and native upgrade acceptance. The macOS release workflow prepares bundled runtimes and currently uses ad-hoc signing. Windows CI is manual-only; Windows candidates included in a major release plan must pass Windows build and native upgrade acceptance before publication. The `build:windows` and `verify:windows` commands remain available for that work.
+- **Problem**: reading papers in a second language means switching between a PDF viewer, a translator, a note app, a vocabulary list, and a reference manager, so what you learn ends up scattered and hard to revisit.
+- **Approach**: a desktop app converts PDFs into a reflowable reading view (local parsing, or optional GLM-OCR + MinerU on your own GPU server), then offers selection or full-text translation, paper-grounded Q&A, annotations, notes, and a vocabulary list that keeps each source sentence, all in one window. Data stays local; AI features use the user's own OpenAI-compatible API.
+- **Category**: academic PDF reader · paper translation tool · reference manager · academic English reading aid · macOS / Windows desktop app · MCP server
+- **Not to be confused with**: a paper search engine, or a writing or submission tool. It bundles no LLM and supplies no API keys; the browser demo cannot upload PDFs.
+- **Keywords**: academic PDF reader, research paper reader, paper translation, full-text translation, PDF annotation, literature notes, reference manager, vocabulary builder, reflowable PDF, GLM-OCR, MinerU, Zotero import, local-first, AI reading assistant, OpenAI-compatible API, MCP server, Electron
+- **中文关键词**：论文阅读器、PDF 翻译、文献管理、论文笔记、PDF 标注、生词本、学术英语、本地优先
 
-## License and contributions
+## TL;DR
 
-Project-owned code is licensed under [Apache License 2.0](LICENSE). Preserve the source attribution in [NOTICE.md](NOTICE.md) when redistributing or creating derivatives, and follow the separate terms for third-party dependencies, fonts, icons, and paper content.
+> Guzi Scholar is a local-first paper reader: read, translate, ask, annotate, take notes, and learn vocabulary in one window, with your data kept on your computer.
 
-Issues and pull requests are welcome. For platform packaging changes, include the target OS, architecture, installation method, and validation results.
+## Link
+
+- GitHub: https://github.com/holamochi/Guzi-Scholar
+- Website: https://s.guzilab.com
+- Browser demo: https://scholar.guzilab.com
+- Similar projects:
+  - Zotero (reference manager and PDF reader): https://github.com/zotero/zotero
+  - PDFMathTranslate (layout-preserving paper PDF translation): https://github.com/PDFMathTranslate/PDFMathTranslate
+  - Zotero PDF Translate (PDF translation plugin for Zotero): https://github.com/windingwind/zotero-pdf-translate
+
+## License
+
+Original code in this project is licensed under the [Apache License 2.0](LICENSE). If you modify or redistribute it, keep the attribution in [NOTICE.md](NOTICE.md) and follow the licenses of third-party dependencies, fonts, icons, and paper content.
